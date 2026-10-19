@@ -12,6 +12,7 @@ flowchart TD
     Release --> Website[Sync website downloads]
     COS --> Manifest[COS 安装包与 latest.json]
     Website --> Downloads[官网下载文件与 releases.json]
+    Website --> Skill[Release 标签源码的 skill ZIP 与 skill.json]
     Manifest --> Client[SapLink 检查版本与用户确认更新]
 ```
 
@@ -88,7 +89,19 @@ COS 工作流固定安装 cos-python-sdk-v5==1.9.44，并先运行离线同步�
 sudo python3 /path/to/install-website-upload.py
 ```
 
-部署脚本要求已有 `/usr/local/lib/saplink-release-sync/receive_release.py`，先检查语法并在 `/var/backups/saplink-release-sync/` 备份，再安装扩展和分派入口，保留原 check / sync / status 协议及 SSH 限制。它不会创建同步账号、密钥或更改 SSH 配置。应先部署服务端，再推送新版工作流。只有客户端代码修改时不需要重复部署；接收器扩展有变化时需重新部署。
+部署脚本要求已有 `/usr/local/lib/saplink-release-sync/receive_release.py`，先检查语法并在 `/var/backups/saplink-release-sync/` 备份，再安装扩展和分派入口，保留原 check / sync / status 协议及 SSH 限制。它不会创建同步账号、密钥或更改 SSH 配置。应先部署服务端，再推送新版工作流。只有客户端代码修改时不需要重复部署；接收器扩展有变化时需重新部署。部署时须将 `website_skill.py` 与上面两个脚本放在同一目录；它为接收器增加 `skill <version>` 命令。
+
+#### 官网 skill ZIP
+
+官网工作流在安装包同步后，将该 Release 标签对应提交中的 `skills/saplink-manager/` 自动打包，不使用 main 分支当前的 skill，不要求手工向 Release 上传 ZIP。压缩包保留顶层 `saplink-manager/` 及其中的 `SKILL.md`、`agents/`、`references/`。ZIP 使用固定时间戳和文件顺序，服务器通过 GitHub 源码独立重建并逐字节核验，拒绝符号链接、路径穿越和异常大小的源码。
+
+- 版本下载：`/downloads/skills/v<version>/SapLink-<version>-skill.zip`。
+- 固定最新版下载：`/downloads/skills/latest/saplink-manager.zip`。
+- 版本、源码提交、文件大小和 SHA-256：`/downloads/skills/latest/skill.json`。
+
+服务器在核验成功后原子替换 skill 的 latest 指针，同版本内容冲突会报错；不改动安装包的 releases.json，也不向 COS 上传 skill。官网页面的下载按钮可使用上述固定下载地址。最终 Actions 会回读公开 ZIP 并校验 SHA-256。skill 与安装包分别发布；skill 失败时 Actions 标红，但此前成功的安装包同步不会回滚，重跑可以补齐 skill。旧版 skill 保存在 skills 子目录，不参与安装包旧版本清理。
+
+首次启用此功能必须先重新部署上述接收器扩展，再推送工作流；COS 工作流及其安装包、latest.json 同步保持不变。
 
 工作流最终核对 `http://118.89.185.57/downloads/latest/releases.json` 中的版本，以及各 `SapLink-win-<arch>-setup.exe` 公开入口的 Content-Length。该最终检查不是对官网公开二进制再次做完整 SHA-256 下载验证；准备阶段已校验 GitHub 原始附件。
 
@@ -115,6 +128,7 @@ sudo python3 /path/to/install-website-upload.py
 ```powershell
 python .github/scripts/test-sync-cos-release.py -v
 python .github/scripts/test-website-upload.py -v
+python .github/scripts/test-website-skill.py -v
 ```
 
 这些回归使用模拟安装包、内存 COS 和隔离暂存目录，不读取密钥、不操作云端；需要可用的 Python。COS 工作流中额外验证已安装 SDK 的兼容性。在 Linux 上可设置 `RECEIVER_MODULE` 为原接收器脚本绝对路径，额外验证拼接后的载荷能由原接收器校验并发布到测试目录。离线测试通过不等于 Actions secrets 已配置、官网接收器已部署或云端发布成功。

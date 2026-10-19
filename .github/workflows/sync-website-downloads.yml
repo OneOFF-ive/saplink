@@ -46,7 +46,9 @@ jobs:
         run: python3 .github/scripts/prepare-website-release.py
 
       - name: Check resumable upload invariants without network access
-        run: python3 .github/scripts/test-website-upload.py -v
+        run: |
+          python3 .github/scripts/test-website-upload.py -v
+          python3 .github/scripts/test-website-skill.py -v
 
       - name: Upload to the restricted website receiver
         if: steps.prepare.outputs.ready == 'true'
@@ -54,6 +56,7 @@ jobs:
           SSH_PRIVATE_KEY: ${{ secrets.SAPLINK_WEBSITE_SYNC_KEY }}
           METADATA: ${{ steps.prepare.outputs.metadata }}
           MANIFEST: ${{ steps.prepare.outputs.manifest }}
+          RELEASE_VERSION: ${{ steps.prepare.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
@@ -67,6 +70,7 @@ jobs:
           printf '%s\n' '118.89.185.57 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINE72nJcd/l97GmHpxJ1UXLwLjR6J4ZMl/3+0IO/RiCl' > "$hosts"
           export SYNC_SSH_KEY="$key" SYNC_SSH_HOSTS="$hosts"
           python3 .github/scripts/upload-website-release.py
+          python3 .github/scripts/sync-website-skill.py
 
       - name: Verify public download endpoints
         if: steps.prepare.outputs.ready == 'true'
@@ -74,7 +78,7 @@ jobs:
           EXPECTED_VERSION: ${{ steps.prepare.outputs.version }}
         run: |
           python3 - <<'PY'
-          import json, os, urllib.request
+          import hashlib, json, os, urllib.request
           url = 'http://118.89.185.57/downloads/latest/'
           with urllib.request.urlopen(url + 'releases.json', timeout=30) as response:
               manifest = json.load(response)
@@ -85,5 +89,14 @@ jobs:
               with urllib.request.urlopen(request, timeout=30) as response:
                   if int(response.headers['Content-Length']) != asset['size']:
                       raise SystemExit('Public installer size verification failed')
-          print('Website download synchronization verified: v' + manifest['version'])
+          skills = 'http://118.89.185.57/downloads/skills/latest/'
+          with urllib.request.urlopen(skills + 'skill.json', timeout=30) as response:
+              skill = json.load(response)
+          if skill['version'] != os.environ['EXPECTED_VERSION']:
+              raise SystemExit('Public skill version verification failed')
+          with urllib.request.urlopen(skills + 'saplink-manager.zip', timeout=30) as response:
+              content = response.read(skill['size'] + 1)
+          if len(content) != skill['size'] or hashlib.sha256(content).hexdigest() != skill['sha256']:
+              raise SystemExit('Public skill ZIP verification failed')
+          print('Website installers and skill synchronization verified: v' + manifest['version'])
           PY

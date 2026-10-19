@@ -127,7 +127,11 @@ def handle(command, legacy):
     root = directory(Path('/var/lib/saplink-release-sync'), 'staging')
     with Path('/var/lib/saplink-release-sync/sync.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        if operation == 'prepare' and len(args) == 1:
+        if operation == 'skill' and len(args) == 2:
+            from website_skill import receive
+            result = receive(sys.stdin.buffer, legacy.DOWNLOADS, args[1], legacy.api,
+                             lambda: legacy.api('releases/latest'))
+        elif operation == 'prepare' and len(args) == 1:
             content = sys.stdin.buffer.read(16385)
             if len(content) > 16384:
                 raise ValueError('Manifest is too large')
