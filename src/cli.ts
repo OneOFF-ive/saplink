@@ -8,14 +8,12 @@ import { resolve } from 'node:path';
 import { appVersion } from './version.js';
 import { ConfigStore, WindowsCredentials, connectionSchema, type Connection } from './config.js';
 import { AdtBackend } from './adt.js';
-import { Operations } from './operations.js';
-import { startHttp } from './server.js';
 import { AppError } from './errors.js';
 import { acquireLease } from './lease.js';
 import { startAdmin } from './admin.js';
 import { printSuccess, printFailure, parsePort } from './cli-output.js';
 import { installationStatus, doctor } from './diagnostics.js';
-import { startService, stopService, restartService, serviceStatus, clearServiceCache, runManagedService, reportStartupFailure } from './service.js';
+import { startService, stopService, restartService, serviceStatus, clearServiceCache, runManagedService, reportStartupFailure, openServiceUi } from './service.js';
 import { promptLocalPassword } from './password-prompt.js';
 import { cleanupLogs, retentionDays } from './log-cleanup.js';
 import { checkForUpdate, startRuntimeUpdateChecks } from './updates.js';
@@ -309,6 +307,29 @@ cli.command('ui').description('Open the interactive local management interface')
   .action(async options => {
     if (jsonOutput) throw new AppError('INTERACTION_REQUIRED', 'ui is an interactive foreground command. Use status/doctor/service commands with --json for automation.');
     const port = parsePort(options.port);
+    const existing = await serviceStatus(store.directory);
+    if (existing.state === 'running' && existing.managed) {
+      const session = await openServiceUi(store.directory, port);
+      if (options.open && process.platform === 'win32') {
+        const browser = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+          "$ErrorActionPreference = 'Stop'; Start-Process -FilePath $env:SAPLINK_BROWSER_URL"],
+          { windowsHide: true, stdio: 'ignore', env: { ...process.env, SAPLINK_BROWSER_URL: session.url } });
+        browser.on('error', () => console.error('Browser launch failed; use the local session URL.'));
+      }
+      console.log(`Management session URL: ${session.url}`);
+      // The desktop launcher is only a tray client; the existing host owns MCP and UI.
+      let checking = false;
+      const timer = setInterval(() => {
+        if (checking) return;
+        checking = true;
+        void serviceStatus(store.directory).then(state => {
+          if (state.pid !== session.pid || state.state !== 'running') clearInterval(timer);
+        }).catch(() => clearInterval(timer)).finally(() => { checking = false; });
+      }, 1000);
+      process.once('SIGINT', () => clearInterval(timer));
+      process.once('SIGTERM', () => clearInterval(timer));
+      return;
+    }
     const release = await acquireLease(store.directory, 'runtime.lock');
     let runtime: Awaited<ReturnType<typeof startAdmin>> | undefined;
     let closing = false;
@@ -335,15 +356,9 @@ cli.command('serve').description('Run MCP in the foreground; use service start f
     if (jsonOutput) throw new AppError('INTERACTION_REQUIRED', 'serve stays attached to the terminal. Use service start --json for background startup.');
     const port = parsePort(options.port);
     if (!(await store.load()).tokens.length) throw new AppError('TOKEN_REQUIRED', 'Create a token before starting.');
-    const release = await acquireLease(store.directory, 'runtime.lock');
-    try {
-      const runtime = await startHttp(store, new Operations(store, credentials), port);
-      console.log(`SapLink listening at http://127.0.0.1:${port}/mcp`);
-      let closing = false;
-      const stop = async () => { if (closing) return; closing = true; try { await runtime.close(); } finally { await release(); } };
-      process.once('SIGINT', () => { void stop(); });
-      process.once('SIGTERM', () => { void stop(); });
-    } catch (error) { await release(); throw error; }
+    process.env.SAPLINK_STARTUP_ID = randomUUID();
+    await runManagedService(store, credentials, port);
+    console.log(`SapLink listening at http://127.0.0.1:${port}/mcp`);
   });
 
 try { await cli.parseAsync(); }

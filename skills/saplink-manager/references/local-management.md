@@ -16,9 +16,9 @@ CLI 返回 `schema_version`、`status`、`data` 或 `error`；同时检查退出
 
 | 服务状态 | 如何处理 |
 | --- | --- |
-| `stopped` | 按接入或启动请求启动后台服务，先确保有令牌 |
-| `running` 且 `managed=true` | 独立控制接口已确认后台实例，使用返回的 `port` / `url` |
-| `external` | UI、前台 serve 或其他实例持有运行锁，尚不能断定 MCP 是否运行 |
+| `stopped` | 用户要求接入、启动或通过 SapLink 访问 SAP 时，先确保有令牌，再正常启动后台 MCP；纯状态查询保持停止 |
+| `running` 且 `managed=true` | 控制接口已确认宿主；还须检查 `mcp_running`，为 false 时仅管理界面可用，不能报告 MCP 已启动 |
+| `external` | 独立 UI、旧版 serve 或其他未提供控制接口的实例持有运行锁，尚不能断定 MCP 是否运行 |
 | `unknown` / `unresponsive` | 核实权限、实例身份及诊断，不覆盖或强制重启 |
 
 还要检查 `lease.guard_present`，存在 guard 时先调查，不删除锁。受限执行环境引起的访问失败，应通过允许的权限机制核实，而非改写权限或重新录入凭据。
@@ -26,6 +26,8 @@ CLI 返回 `schema_version`、`status`、`data` 或 `error`；同时检查退出
 ### UI 与 MCP 是两种状态
 
 UI 默认 `127.0.0.1:8766`；MCP 默认 `127.0.0.1:8765/mcp`。UI 即使尚未启动 MCP，也会持有 runtime 锁，CLI 因而返回 `external`。进程监听的端口可能只有管理端口。
+
+新版 `service start` 和 `serve` 提供共享宿主：服务运行后打开桌面软件或 `ui`，会复用同一后台 Node 进程并显示实际 MCP 状态，不要求先停止服务。重复打开不重启 MCP、不清空请求防重复记录。页面停止 MCP 后宿主保持运行，CLI 状态为 `running,mcp_running=false`；用户要求启动时可用 `service start` 在原 PID 恢复。`service stop` 或托盘退出会正常关闭整个共享宿主；关闭浏览器页面不会停止服务。管理会话 URL 含认证信息，不输出到聊天或普通日志。
 
 有浏览器操作能力时，在已有且已授权的管理页面查看“MCP 服务”页的实际状态、端口，用页面的“启动服务”/“停止服务”正常操作。停止页面内 MCP 不等于退出整个管理进程；退出应用用托盘菜单。不读取浏览器私有数据库或泄露管理会话 URL，不将管理认证用于 MCP。
 

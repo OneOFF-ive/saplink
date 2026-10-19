@@ -274,6 +274,12 @@ else refresh().catch(error => toast(error.message, true));
 
 setInterval(async () => {
   if (!adminKey || document.hidden) return;
-  try { const latest = await api('state'); state.update = latest.update; state.update_install = latest.update_install; renderUpdate(); }
+  try {
+    const latest = await api('state');
+    const changed = state.running !== latest.running || state.mcp_port !== latest.mcp_port || state.busy !== latest.busy;
+    state.running = latest.running; state.mcp_port = latest.mcp_port; state.busy = latest.busy;
+    state.update = latest.update; state.update_install = latest.update_install;
+    if (changed) render(); else renderUpdate();
+  }
   catch { /* Existing page actions report session and connection failures. */ }
-}, 60000);
+}, 3000);

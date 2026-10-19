@@ -13,6 +13,7 @@ import { cleanupLogs } from './log-cleanup.js';
 import { getAutomaticUpdate } from './updates.js';
 import { appVersion } from './version.js';
 import { SelfUpdater } from './self-update.js';
+import { localPortInUse } from './local-port.js';
 
 const draft = connectionSchema.omit({ connection_id: true }).extend({
   write_enabled: z.boolean(),
@@ -35,20 +36,22 @@ function validationResponse(error: z.ZodError) {
 
 export async function startAdmin(store: ConfigStore, credentials: Credentials, port = 8766,
   factory: BackendFactory = (c, p) => new AdtBackend(c, p), requestExit?: () => Promise<void>,
-  options: { updater?: SelfUpdater; initialMcpPort?: number } = {}) {
+  options: { updater?: SelfUpdater; initialMcpPort?: number;
+    sharedRuntime?: { current?: Awaited<ReturnType<typeof startHttp>>; port: number };
+    runtimeChanged?: () => Promise<void> } = {}) {
+  if (port && await localPortInUse(port)) throw new AppError('EADDRINUSE', '管理端口已被占用，现有进程不会被接管');
   const key = randomBytes(32).toString('base64url');
   const app = express();
   app.disable('x-powered-by');
-  let runtime: Awaited<ReturnType<typeof startHttp>> | undefined;
+  const state = options.sharedRuntime ?? { current: undefined as Awaited<ReturnType<typeof startHttp>> | undefined, port: 8765 };
   let busy = false;
   let active = 0;
   let closing = false;
-  let mcpPort = 8765;
   const updater = options.updater ?? new SelfUpdater(store.directory);
   if (options.initialMcpPort) {
     if (!(await store.load()).tokens.length) throw new AppError('TOKEN_REQUIRED', '恢复 MCP 服务需要有效的访问令牌。');
-    runtime = await startHttp(store, new Operations(store, credentials, undefined, factory), options.initialMcpPort);
-    mcpPort = options.initialMcpPort;
+    state.current = await startHttp(store, new Operations(store, credentials, undefined, factory), options.initialMcpPort);
+    state.port = options.initialMcpPort;
   }
   const exclusive = async <T>(action: () => Promise<T>) => {
     if (busy)
@@ -125,11 +128,11 @@ export async function startAdmin(store: ConfigStore, credentials: Credentials, p
         id,
         created_at
       })),
-      running: Boolean(runtime),
+      running: Boolean(state.current),
       update: updater.latest && (!getAutomaticUpdate() || updater.latest.checked_at >= getAutomaticUpdate()!.checked_at)
         ? updater.latest : getAutomaticUpdate() ?? null,
       update_install: await updater.status(),
-      mcp_port: mcpPort,
+      mcp_port: state.port,
       busy
     });
   });
@@ -144,7 +147,7 @@ export async function startAdmin(store: ConfigStore, credentials: Credentials, p
   app.post('/api/updates/install', async (req, res) => {
     const { version } = z.object({ version: z.string().regex(/^\d+\.\d+\.\d+$/) }).strict().parse(req.body);
     const result = await exclusive(() => updater.install(version, { mode: 'ui', ui_port: actualPort,
-      ...(runtime ? { mcp_port: mcpPort } : {}) }, async () => {
+      ...(state.current ? { mcp_port: state.port } : {}) }, async () => {
       // The POST response is sent before the background download completes.
       await (requestExit ? requestExit() : close());
     }));
@@ -174,7 +177,7 @@ export async function startAdmin(store: ConfigStore, credentials: Credentials, p
   });
   app.post('/api/connections', async (req, res) => {
     const result = await exclusive(async () => changeConfig(async () => {
-      if (runtime)
+      if (state.current)
         throw new AppError('MCP_RUNNING', '请先停止 MCP 服务再编辑连接');
       const p = draft.parse(req.body);
       if (!p.password)
@@ -202,7 +205,7 @@ export async function startAdmin(store: ConfigStore, credentials: Credentials, p
   });
   app.put('/api/connections/:id', async (req, res) => {
     const result = await exclusive(async () => changeConfig(async () => {
-      if (runtime)
+      if (state.current)
         throw new AppError('MCP_RUNNING', '请先停止 MCP 服务再编辑连接');
       const config = await store.load();
       const index = config.connections.findIndex(c => c.connection_id === req.params.id);
@@ -243,7 +246,7 @@ export async function startAdmin(store: ConfigStore, credentials: Credentials, p
   });
   app.delete('/api/connections/:id', async (req, res) => {
     await exclusive(async () => changeConfig(async () => {
-      if (runtime)
+      if (state.current)
         throw new AppError('MCP_RUNNING', '请先停止 MCP 服务再编辑连接');
       const config = await store.load();
       const c = config.connections.find(c => c.connection_id === req.params.id);
@@ -272,29 +275,33 @@ export async function startAdmin(store: ConfigStore, credentials: Credentials, p
     }));
     res.json({ success: true });
   });
+  const startMcp = (port: number) => exclusive(async () => {
+    if (closing || updater.busy) throw new AppError('BUSY', '应用正在退出或更新，请稍后重试');
+    if (state.current)
+      throw new AppError('MCP_RUNNING', 'MCP 服务已启动');
+    if (!(await store.load()).tokens.length)
+      throw new AppError('TOKEN_REQUIRED', '请先创建访问令牌');
+    state.current = await startHttp(store, new Operations(store, credentials, undefined, factory), port);
+    state.port = port;
+    await options.runtimeChanged?.();
+  });
   app.post('/api/service/start', async (req, res) => {
-    await exclusive(async () => {
-      if (runtime)
-        throw new AppError('MCP_RUNNING', 'MCP 服务已启动');
-      const p = z.object({ port: z.number().int().min(1).max(65535) }).strict().parse(req.body);
-      if (!(await store.load()).tokens.length)
-        throw new AppError('TOKEN_REQUIRED', '请先创建访问令牌');
-      runtime = await startHttp(store, new Operations(store, credentials, undefined, factory), p.port);
-      mcpPort = p.port;
-    });
+    const p = z.object({ port: z.number().int().min(1).max(65535) }).strict().parse(req.body);
+    await startMcp(p.port);
     res.json({ success: true });
   });
   app.post('/api/service/stop', async (_req, res) => {
     await exclusive(async () => {
-      if (runtime) {
-        await runtime.close();
-        runtime = undefined;
+      if (state.current) {
+        await state.current.close();
+        state.current = undefined;
+        await options.runtimeChanged?.();
       }
     });
     res.json({ success: true });
   });
   app.post('/api/cache/clear', async (_req, res) => {
-    res.json(await exclusive(async () => runtime ? await runtime.clearCache() : { cleared_sessions: 0, retained_write_requests: 0 }));
+    res.json(await exclusive(async () => state.current ? await state.current.clearCache() : { cleared_sessions: 0, retained_write_requests: 0 }));
   });
   app.post('/api/logs/clear', async (req, res) => {
     const options = z.object({ older_than_days: z.number().int().min(0).max(36500), confirm: z.boolean().default(false) }).strict().parse(req.body);
@@ -324,7 +331,7 @@ export async function startAdmin(store: ConfigStore, credentials: Credentials, p
   const listener = await new Promise<ReturnType<typeof app.listen>>((resolve, reject) => {
     const server = app.listen(port, '127.0.0.1', () => resolve(server));
     server.once('error', reject);
-  }).catch(async error => { await runtime?.close(); throw error; });
+  }).catch(async error => { if (!options.sharedRuntime) await state.current?.close(); throw error; });
   listener.requestTimeout = 30000;
   listener.headersTimeout = 10000;
   const address = listener.address();
@@ -334,13 +341,14 @@ export async function startAdmin(store: ConfigStore, credentials: Credentials, p
     closing = true;
     const stopped = new Promise<void>(resolve => listener.close(() => resolve()));
     while (busy) await new Promise(resolve => setTimeout(resolve, 50));
-    if (runtime) await runtime.close();
+    if (!options.sharedRuntime && state.current) await state.current.close();
     listener.closeIdleConnections();
     await stopped;
   })();
   return {
     listener,
     url: `http://127.0.0.1:${actualPort}/#${key}`,
+    startMcp,
     close
   };
 }

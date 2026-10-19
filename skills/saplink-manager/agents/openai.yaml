@@ -1,4 +1,4 @@
 interface:
   display_name: "SapLink 管理助手"
-  short_description: "管理 SapLink 配置与服务，按需升级，自动接入当前 Agent 的 MCP 并完成 SAP 任务"
-  default_prompt: "使用 $saplink-manager 检查已安装的 SapLink，为当前 AI 客户端配置 saplink-mcp，并完成我的 SAP 任务；未安装时提醒我手动安装。"
+  short_description: "确认后安装和升级 SapLink，管理服务与 MCP 接入，完成 SAP 任务；明确要求时才卸载"
+  default_prompt: "使用 $saplink-manager 检查 SapLink；未安装时先询问安装意愿和路径，同意后下载安装，再配置当前客户端的 saplink-mcp 并完成我的 SAP 任务。"

@@ -8,6 +8,7 @@ import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { ConfigStore, connectionSchema } from '../src/config.js';
 import { acquireLease, inspectLease } from '../src/lease.js';
+import { openServiceUi } from '../src/service.js';
 
 const execute = promisify(execFile);
 
@@ -25,7 +26,7 @@ async function fixture() {
   const root = join(process.cwd(), '.saplink', 'tests');
   await mkdir(root, { recursive: true });
   const directory = await mkdtemp(join(root, 'cli-'));
-  const env = { ...process.env, SAPLINK_CONFIG_DIR: directory, SAPLINK_LOG_DIR: join(directory, 'logs') };
+  const env = { ...process.env, SAPLINK_CONFIG_DIR: directory, SAPLINK_LOG_DIR: join(directory, 'logs'), SAPLINK_AUTO_UPDATE_CHECK: '0' };
   const run = async (...args: string[]) => {
     let stdout: string; let stderr: string; let code = 0;
     try {
@@ -51,6 +52,56 @@ async function freePort() {
   await new Promise<void>(resolve => server.close(() => resolve()));
   return address.port;
 }
+
+test('background MCP and graphical management share one host and preserve it across repeated opens and MCP restarts', async () => {
+  const f = await fixture();
+  let relay: ReturnType<typeof spawn> | undefined;
+  try {
+    await f.store.createToken();
+    const port = await freePort(); const uiPort = await freePort();
+    const started = await f.run('service', 'start', '--port', String(port));
+    assert.equal(started.code, 0);
+    const pid = started.result.data.pid;
+    const occupiedUi = createServer();
+    await new Promise<void>(resolve => occupiedUi.listen(0, '127.0.0.1', resolve));
+    try {
+      await assert.rejects(openServiceUi(f.directory, (occupiedUi.address() as { port: number }).port));
+      assert.equal((await f.run('service', 'status')).result.data.pid, pid);
+      assert.equal((await f.run('service', 'status')).result.data.mcp_running, true);
+    } finally { await new Promise<void>(resolve => occupiedUi.close(() => resolve())); }
+    const sessions = await Promise.all([openServiceUi(f.directory, uiPort), openServiceUi(f.directory, uiPort)]);
+    assert.equal(sessions[0].pid, pid); assert.equal(sessions[0].url, sessions[1].url);
+    const session = new URL(sessions[0].url);
+    const headers = { Origin: session.origin, 'X-Admin-Token': session.hash.slice(1), 'Content-Type': 'application/json' };
+    const state = async () => (await fetch(`${session.origin}/api/state`, { headers })).json();
+    assert.equal((await state()).running, true); assert.equal((await state()).mcp_port, port);
+    assert.equal((await fetch(`${session.origin}/api/state`)).status, 401);
+    relay = spawn(process.execPath, [resolve('dist/cli.js'), 'ui', '--no-open', '--port', String(uiPort)], {
+      env: f.env, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore']
+    });
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('UI attachment timed out')), 15000);
+      relay!.stdout!.on('data', chunk => {
+        if (chunk.toString().includes('Management session URL: ')) { clearTimeout(timer); resolve(); }
+      });
+      relay!.once('error', error => { clearTimeout(timer); reject(error); });
+    });
+    assert.equal((await inspectLease(f.directory)).pid, pid);
+    assert.equal((await fetch(`${session.origin}/api/service/stop`, { method: 'POST', headers })).status, 200);
+    assert.equal((await state()).running, false);
+    assert.equal((await f.run('service', 'status')).result.data.mcp_running, false);
+    const resumed = await f.run('service', 'start', '--port', String(port));
+    assert.equal(resumed.code, 0); assert.equal(resumed.result.data.pid, pid);
+    assert.equal((await state()).running, true);
+    const relayExit = new Promise(resolve => relay!.once('exit', resolve));
+    assert.equal((await f.run('service', 'stop')).code, 0);
+    await relayExit;
+    assert.equal((await inspectLease(f.directory)).state, 'missing');
+  } finally {
+    if (relay?.exitCode === null) relay.kill();
+    await f.cleanup();
+  }
+});
 
 test('JSON diagnostics and argument errors are structured; tokens are not printed or overwritten', async () => {
   const f = await fixture();
@@ -210,6 +261,37 @@ test('authenticated GUI shutdown drains the admin process and releases its runti
   } finally {
     // This is only our isolated test process, never a user's service.
     if (child.exitCode === null) child.kill();
+    await f.cleanup();
+  }
+});
+
+test('foreground serve exposes the same authenticated shared management host', async () => {
+  const f = await fixture();
+  let child: ReturnType<typeof spawn> | undefined;
+  try {
+    await f.store.createToken();
+    const port = await freePort(); const uiPort = await freePort();
+    child = spawn(process.execPath, [resolve('dist/cli.js'), 'serve', '--port', String(port)], {
+      env: f.env, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore']
+    });
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Foreground host startup timed out')), 20000);
+      child!.stdout!.on('data', chunk => {
+        if (chunk.toString().includes('SapLink listening at ')) { clearTimeout(timer); resolve(); }
+      });
+      child!.once('error', error => { clearTimeout(timer); reject(error); });
+    });
+    const session = await openServiceUi(f.directory, uiPort);
+    assert.equal(session.pid, child.pid);
+    const url = new URL(session.url);
+    const response = await fetch(`${url.origin}/api/state`, { headers: { 'X-Admin-Token': url.hash.slice(1) } });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).running, true);
+    const exited = new Promise(resolve => child!.once('exit', resolve));
+    assert.equal((await f.run('service', 'stop')).code, 0);
+    await exited;
+  } finally {
+    if (child?.exitCode === null) child.kill();
     await f.cleanup();
   }
 });

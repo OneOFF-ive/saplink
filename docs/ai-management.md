@@ -70,8 +70,8 @@ start 要求至少一个 MCP 令牌。后台进程隐藏运行，不依赖发起
 | state | 含义 |
 | --- | --- |
 | `stopped` | 没有确认存活的 runtime；旧的普通租约可能已过期 |
-| `running` | 租约身份匹配，且独立控制接口确认了后台实例 |
-| `external` | 前台 UI、serve 或其他进程持有 runtime；管理器不停止它 |
+| `running` | 租约身份匹配，且独立控制接口确认了宿主实例；`mcp_running` 表示 MCP 是否实际运行 |
+| `external` | 旧版或独立 UI 等未提供控制接口的进程持有 runtime；管理器不停止它 |
 | `unresponsive` | 后台进程身份存在，但控制接口未确认响应；不强杀 |
 | `unknown` | 进程身份或锁文件无法确认；先诊断，不自动覆盖 |
 
@@ -80,6 +80,10 @@ start 要求至少一个 MCP 令牌。后台进程隐藏运行，不依赖发起
 stop 通过单独鉴权的 loopback 控制接口请求正常关闭，等待已有请求及 SAP 会话清理。它不调用 taskkill，也不会仅凭 PID 结束其他程序。启动确认最多等待 20 秒，停止确认最多等待 30 秒；返回 `SERVICE_START_UNKNOWN` / `SERVICE_STOP_UNKNOWN` 后必须先查 status，不能盲目重复或强杀。
 
 背景管理不是 Windows Service 安装器，没有承诺开机启动或无人值守崩溃重启。`ui` 与 `serve` 保留前台行为，`--json` 不允许误将它们作为后台命令。
+
+已通过 `service start` 或新版 `serve` 启动时，再打开桌面软件或运行 `ui` 会通过独立认证的本地控制接口复用原宿主。管理 HTTP 与 MCP HTTP 运行在同一个 Node 进程，不重复取得运行锁；桌面托盘及其连接助手不是第二套后端。重复打开复用同一个管理会话，不重启 MCP、不清空请求防重复记录。管理会话 URL 含私密凭据，不写入普通状态输出或日志。
+
+管理页面显示当前共享 MCP 状态，并定期刷新。页面停止 MCP 后保留宿主及管理界面，`service status` 返回 `state=running,mcp_running=false`；可用页面按钮或 `service start` 在原 PID 恢复。`service stop` 和托盘“退出 SapLink 管理”会正常关闭整个宿主及其 MCP、管理监听；关闭浏览器页面不停止服务。旧版本进程不具备接入能力时，不强制接管，应先正常退出并升级。
 
 ## 令牌及客户端参数
 
@@ -95,7 +99,7 @@ client-config 验证令牌属于当前配置且尚未撤销，再导出 `transpo
 
 ## 一个 skill 完成配置、接入与 SAP 工作
 
-项目附带 [saplink-manager](../skills/saplink-manager/SKILL.md)，面向具有本机终端能力的 AI 客户端。用户手动安装 SapLink 后，Agent 负责连接与凭据录入引导、令牌管理、服务启停、给当前客户端配置 `saplink-mcp`、验证 MCP，以及按用户意图执行 SAP 查询或 ABAP 开发。不要求 MCP 预先运行；检测到未安装时提醒用户手动安装，不下载安装包或通过构建源码替代安装。
+项目附带 [saplink-manager](../skills/saplink-manager/SKILL.md)，面向具有本机终端能力的 AI 客户端。用户要使用产品且确认本机未安装时，Agent 先询问安装意愿并确认安装目录，默认 `~\AppData\Local\Programs\SapLink`；得到同意后按官网、COS、GitHub 的顺序获取官方安装包，核对架构和完整性后安装。随后负责连接与凭据录入引导、令牌管理、服务启停、给当前客户端配置 `saplink-mcp`、验证 MCP，以及按用户意图执行 SAP 查询或 ABAP 开发。不要求 MCP 预先运行，不通过构建源码替代产品安装。下载、安装和卸载细节见[技能中的产品安装管理](../skills/saplink-manager/references/installation.md)。
 
 将整个技能目录（包括 `references`、`agents`）导入客户端。Codex 默认个人位置为 `%USERPROFILE%\.codex\skills\saplink-manager`，自定义 `CODEX_HOME` 时使用其 skills 目录。用户可以直接说“帮我配置 SapLink 并连接这个 SAP 系统”“查询物料”“修改这个 ABAP 程序”，由 Agent 按需读取配置管理、客户端接入或 SAP 工具说明。不要只分发 SKILL.md 而遗漏引用文件。
 
@@ -103,4 +107,4 @@ client-config 验证令牌属于当前配置且尚未撤销，再导出 `transpo
 
 分别验证配置写入、MCP 初始化、当前会话工具可见及目标 SAP 操作成功。客户端不支持热加载时可能仍需用户重载或开启新会话；密码仍由用户在本机窗口录入。远程或容器中的 Agent 不能直接通过自身 loopback 连接用户 Windows 服务，不能把这些前提隐瞒为“已全部接入”。
 
-技能不负责首次安装或卸载程序；已安装版本可在用户明确选择后使用 update install --yes --json 自动升级，诊断、备份和正常退出仍按升级意图执行，完成后检查版本并恢复客户端接入。连接写开关与 SAP 具体变更遵循用户意图和 SAP 权限。后台托管不等于 Windows Service 或开机自启。
+首次安装必须同时取得安装同意和路径确认；卸载只接受用户明确要求，不将其作为连接故障、升级失败或安装损坏的常规修复。安装或卸载失败、部分完成或无法确认时，停止自动操作，报告已知结果并提醒用户手动处理。卸载保留配置、令牌、日志、SAP 凭据和客户端条目，不自动清除个人数据或重装。已安装版本可在用户明确选择后使用 `update install --yes --json` 自动升级，诊断、备份和正常退出仍按升级意图执行，完成后检查版本并恢复客户端接入。连接写开关与 SAP 具体变更遵循用户意图和 SAP 权限。后台托管不等于 Windows Service 或开机自启。

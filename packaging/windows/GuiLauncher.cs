@@ -128,6 +128,7 @@ internal sealed class GuiContext : ApplicationContext
     private volatile Uri session;
     private bool opened;
     private volatile bool stopping;
+    private bool exitHandled;
 
     internal GuiContext(EventWaitHandle reopenEvent)
     {
@@ -162,11 +163,22 @@ internal sealed class GuiContext : ApplicationContext
         timer = new System.Windows.Forms.Timer { Interval = 500 };
         timer.Tick += delegate
         {
+            if (exitHandled) return;
             if (child.HasExited)
             {
-                if (child.ExitCode != 0 && !stopping)
-                    MessageBox.Show("管理界面未能启动。请先关闭已有的管理进程，或运行 saplink doctor --json 检查。后台 MCP 服务可用 saplink service stop --json 正常停止。", "SapLink", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                timer.Stop(); tray.Dispose(); child.Dispose(); ExitThread(); return;
+                // MessageBox pumps a nested message loop: stop and guard before showing it.
+                exitHandled = true;
+                timer.Stop();
+                bool failed = child.ExitCode != 0 && !stopping;
+                tray.Dispose();
+                child.Dispose();
+                try
+                {
+                    if (failed)
+                        MessageBox.Show("管理界面未能启动。请先关闭已有的管理进程，或运行 saplink doctor --json 检查。后台 MCP 服务可用 saplink service stop --json 正常停止。", "SapLink", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+                finally { ExitThread(); }
+                return;
             }
             if ((!opened || reopen.WaitOne(0)) && session != null) { opened = true; OpenBrowser(); }
             exitItem.Enabled = !stopping && session != null;
