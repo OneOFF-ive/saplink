@@ -8,6 +8,8 @@
 
 版本检查由 `src/updates.ts` 提供：优先 COS 清单，不可用时回退 GitHub 最新正式 Release。CLI 普通检查缓存 24 小时；长期运行的 CLI/UI 启动后异步重新查询更新源，此后每小时重新查询，不复用旧缓存，不创建系统任务。新版本经受保护的状态接口提供给 Web，侧栏“软件更新”显示红色 New，进入页面直接显示版本及自动更新操作；无新版本时保留手动检查。后台检测不弹窗、不写历史通知文件，也不会自行安装。`SAPLINK_AUTO_UPDATE_CHECK=0` 可关闭自动检查。命令与缓存规则见 [版本检查](operations.md#检查新版本)。
 
+发布端使用两个独立 COS 清单：安装包 `saplink/latest.json` 仅含 schema_version、version、published_at、downloads，兼容已发布的严格校验客户端；技能 `saplink/skill-latest.json` 单独存放版本、源码提交、ZIP 地址、大小和哈希。官网代理这两个小型清单，浏览器直接从 COS 下载二进制。打包和 Actions 的来源选择见 [发布手册](releases-and-actions.md)。
+
 用户确认后的更新安装由 `src/self-update.ts` 与独立原生助手 `packaging/windows/update-runner.ps1` 完成：重新核对版本和架构、下载并校验安装包，再正常关闭当前应用、等待在途操作收尾，在原目录安装并尝试恢复原运行方式。仅支持包含助手的 Windows 安装版，不提供强杀、自动回滚或未经确认的静默升级。详见 [开发验证](development.md#自动更新实现与验证) 和 [运维流程](operations.md#用户确认的自动安装)。
 
 提供不依赖 VS Code 的本地 Web 管理界面与 CLI，通过 HTTP/HTTPS ADT 访问 SAP ABAP 系统，并向 agent 提供 Streamable HTTP MCP tools。后端 HTTPS 沿用默认 TLS 校验，不自动降级；本机管理与 MCP 监听仍使用 loopback HTTP。

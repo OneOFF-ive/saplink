@@ -22,7 +22,7 @@ $lockPath = Join-Path $repository 'package-lock.json'
 $buildScript = Join-Path $PSScriptRoot 'build.ps1'
 $npmCli = Join-Path (Split-Path -Parent (Get-Command npm.cmd -ErrorAction Stop).Source) 'node_modules\npm\bin\npm-cli.js'
 [void](Get-Command node -ErrorAction Stop)
-foreach ($path in @($packagePath, $lockPath, $buildScript, $npmCli, (Join-Path $repository 'scripts\create-update-manifest.mjs'))) {
+foreach ($path in @($packagePath, $lockPath, $buildScript, (Join-Path $PSScriptRoot 'package-skill.ps1'), $npmCli, (Join-Path $repository 'scripts\create-update-manifest.mjs'))) {
   if (!(Test-Path -LiteralPath $path -PathType Leaf)) { throw "Required file not found: $path" }
 }
 
@@ -44,6 +44,7 @@ try {
   & $buildScript @buildOptions
 
   $output = Join-Path $repository "outputs\installers\$Version"
+  & (Join-Path $PSScriptRoot 'package-skill.ps1') -Version $Version -OutputDirectory $output
   foreach ($arch in $Architecture) {
     $installer = Join-Path $output "SapLink-$Version-win-$arch-setup.exe"
     $expected = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant() + '  ' + [IO.Path]::GetFileName($installer)

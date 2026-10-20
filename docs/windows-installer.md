@@ -5,7 +5,7 @@
 ## 安装前准备
 
 - 电脑运行 64 位 Windows 10（1809 或更新）或 Windows 11。
-- 从 [GitHub Releases](https://github.com/OneOFF-ive/saplink/releases) 下载所需版本：Intel / AMD 电脑选择文件名包含 `win-x64` 的 `.exe`；Windows ARM64 电脑选择包含 `win-arm64` 的 `.exe`。
+- 优先通过 [官网入口](https://saplink.cloud/download.html)读取 COS 版本信息并直接从 COS 获取所需版本；COS 不可用时使用 [GitHub Releases](https://github.com/OneOFF-ive/saplink/releases)。官网不保存安装包。选择架构时：Intel / AMD 电脑选择文件名包含 `win-x64` 的 `.exe`；Windows ARM64 电脑选择包含 `win-arm64` 的 `.exe`。
 - 准备 SAP 的 ADT 地址、Client、用户名和语言；不清楚时向 SAP 管理员获取。密码稍后在本机输入。
 
 安装包包含运行所需组件，无需另装 Node.js 或 npm。安装过程无需联网，连接 SAP 时需要相应网络。管理页面需要可用的默认浏览器。
@@ -37,9 +37,13 @@
 
 ## 升级与修复
 
-应用和服务启动后自动检查正式版，运行期间每 24 小时再检查，复用 24 小时缓存。管理页面发现更新后显示下载链接；提供手动检查和用户确认后的自动安装按钮。可在终端执行 `saplink update check` 手动检查，需要立即刷新时使用 `--force`。检查不停止应用、不下载或安装文件；设置 `SAPLINK_AUTO_UPDATE_CHECK=0` 并重启可关闭自动检查。
+应用和服务启动后重新查询最新正式版，运行期间每小时再检查。有新版本时，侧栏“软件更新”显示红色 **New**，不弹窗口；点击后直接显示新版本和“立即自动更新”。没有检测到新版本时，更新页保留“检查版本更新”。检测并不等于授权安装，点击自动更新后仍需确认；程序会下载并校验安装包，正常关闭当前应用，在原目录安装并尝试恢复原运行状态。
+
+可执行 `saplink update check` 手动检查，CLI 普通检查缓存 24 小时；使用 `saplink update check --force` 立即重新查询。检查不停止应用、不下载或安装文件；设置 `SAPLINK_AUTO_UPDATE_CHECK=0` 并重启可关闭自动检查。
 
 检查需要联网访问 COS 或 GitHub，不影响离线安装和已有 SAP 服务。没有公开正式版或网络检查失败时不能判断已是最新版。旧版本不支持该命令时，直接查看 [GitHub Releases](https://github.com/OneOFF-ive/saplink/releases)，按本机架构选择安装包。
+
+以下步骤用于手动升级或修复；在管理页选择自动更新时，由更新程序处理正常退出和安装。
 
 1. 先通过托盘菜单退出应用；如果使用命令行启动服务，按 [运维手册](operations.md) 正常停止。
 2. 运行新安装包，按向导在原位置升级或修复。

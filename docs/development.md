@@ -35,7 +35,7 @@ node dist/cli.js update check --json
 
 版本检查使用独立的 `update-check.json` 缓存，不获取 runtime/config 锁。HTTP 请求不携带 SAP 或 MCP 凭据、不跟随重定向，每个源请求设置 8 秒超时；检查本身不执行安装文件。显式确认安装由独立的 self-update 模块处理，见本文末尾实现说明。检查模块允许注入 fetch 和时间供离线测试，覆盖比较、缓存与强制刷新、错误响应及 CLI 文本/JSON 输出。
 
-CLI postAction 为成功启动的 `ui`、`serve`、`service _run` 接入自动检查器；定时器 unref，不单独维持进程。同一进程避免检查重叠，启动时异步检查，随后每 24 小时执行并复用缓存；SIGINT/SIGTERM 取消请求并清理定时器。`SAPLINK_AUTO_UPDATE_CHECK=0` 禁用。自动失败静默，不影响 SAP；相同新版本只通知一次。受保护的 `/api/state` 暴露最近成功的自动检查结果，Web 每分钟刷新可见页面的更新提示，不触发 GitHub 查询。不注册 MCP tool。
+CLI postAction 为成功启动的 `ui`、`serve`、`service _run` 接入自动检查器；定时器 unref，不单独维持进程。同一进程避免检查重叠，启动时异步重新查询，此后每小时查询更新源，不复用 CLI 普通检查的 24 小时缓存；SIGINT/SIGTERM 取消请求并清理定时器。`SAPLINK_AUTO_UPDATE_CHECK=0` 禁用。后台检测失败不影响 SAP，也不弹窗或写入 update-notice.json。受保护的 `/api/state` 和 `/api/updates/status` 统一返回手动与后台检测中时间最新的结果；可见管理页面每 3 秒读取状态，不因此每 3 秒请求 COS/GitHub。发现新版时侧栏显示红色 New，更新页直接呈现安装操作，安装仍需用户确认。不注册 MCP tool。
 
 构建后可单独运行 `node --import tsx --test tests/updates.test.ts`。模拟测试不证明真实 GitHub 可达；发布前还需在可联网环境验证 `node dist/cli.js update check --force --json`，并确认新安装包已包含该功能。
 
@@ -96,7 +96,7 @@ powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File packagin
 powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File packaging/windows/release-test.ps1
 ```
 
-发布产物按 `package.json` 的版本号输出到 `outputs/installers/<version>/`，例如 `outputs/installers/1.0.0/`。每种架构只生成一个标准名称安装包及对应 `.sha256`，对应版本的发布说明也放在该目录；不同版本分别保留，同版本重打包只更新自己的目录，不影响其他版本。不再生成图标后缀副本。公开分发的文件保持版本唯一；更换图标或程序后更新版本号，避免覆盖同版本文件引起缓存混淆。安装包只包含明确选定的应用文件和生产依赖；源码、测试、本地连接配置、凭据、缓存均不打包。第三方许可随包提供：Node 位于 `runtime/LICENSE`，VC 运行库与 NSIS 位于 `licenses`，依赖许可位于各 `app/node_modules` 包中。
+发布产物按 `package.json` 的版本号输出到 `outputs/installers/<version>/`，例如 `outputs/installers/1.0.0/`。每种架构生成一个标准名称安装包及对应 `.sha256`，同时生成架构无关的 `SapLink-<version>-skill.zip` 与 `.zip.sha256`；技能包保留 `saplink-manager/` 顶层及 SKILL.md、agents、references。对应版本的发布说明也放在该目录；不同版本分别保留，同版本重打包只更新自己的目录，不影响其他版本。不再生成图标后缀副本。公开分发的文件保持版本唯一；更换图标或程序后更新版本号，避免覆盖同版本文件引起缓存混淆。安装包只包含明确选定的应用文件和生产依赖；源码、测试、本地连接配置、凭据、缓存均不打包。第三方许可随包提供：Node 位于 `runtime/LICENSE`，VC 运行库与 NSIS 位于 `licenses`，依赖许可位于各 `app/node_modules` 包中。
 
 测试安装包单独输出到 `.saplink/installer-build/tests`，不进入发布目录。隔离安装测试使用专用临时目录和 `HKCU\Software\SapLinkInstallerTest`，不修改真实用户 PATH 或桌面；测试快捷方式放在测试安装目录内。测试会保留临时文件用于排错，不应将 `-test-setup.exe` 作为发行包分发。不同架构的测试依次执行，因为它们使用同一个测试注册表位置。
 
@@ -158,7 +158,7 @@ node scripts/create-update-manifest.mjs --version 0.1.0 --architectures x64
 
 如果 Release 是由其他工作流用默认 `GITHUB_TOKEN` 创建，GitHub 通常不会再触发 release 工作流；发布流程应在附件上传完成后显式调用此 reusable workflow（`workflow_call` 并传递这两个 secrets），或手动 dispatch。主分支没有工作流/脚本时，仅配置 secrets 不会自动上传。
 
-同一 Action 将发布标签中的 `skills/saplink-manager/` 打包为 `saplink/v<version>/SapLink-<version>-skill.zip`。安装包与技能文件全部校验通过后，先发布独立的 `saplink/skill-latest.json`（schema_version、version、published_at、skill），再提交 `saplink/latest.json`。安装包清单严格只包含 schema_version、version、published_at、downloads，兼容已发布的 1.0.4 等严格校验客户端；禁止向其中追加 skill 字段。技能清单保留 commit、filename、url、size、sha256，官网单独读取，异常不影响安装包下载。修复误加 skill 的线上清单时，在 Sync COS downloads 手动运行中勾选 repair_metadata；该模式校验并备份现有清单，只迁移元数据，不下载、修改或重传安装包。
+同一 Action 优先下载正式 Release 附件 `SapLink-<version>-skill.zip` 与 `SapLink-<version>-skill.zip.sha256`，核对文件大小、GitHub digest（如有）、SHA-256 校验文件和对应标签源码的文件内容，再原样上传至 COS。两份附件缺少任一份或网络下载失败时，从同一标签源码自动生成 ZIP 和校验文件；已下载内容校验失败时直接停止发布，不自动掩盖错误。不同 ZIP 编码器的压缩方式及头部可不同，但所有文件内容必须与标签一致。安装包与技能文件全部校验通过后，先发布独立的 `saplink/skill-latest.json`（schema_version、version、published_at、skill），再提交 `saplink/latest.json`。安装包清单严格只包含 schema_version、version、published_at、downloads，兼容已发布的 1.0.4 等严格校验客户端；禁止向其中追加 skill 字段。技能清单保留 commit、filename、url、size、sha256，官网单独读取，异常不影响安装包下载。修复误加 skill 的线上清单时，在 Sync COS downloads 手动运行中勾选 repair_metadata；该模式校验并备份现有清单，只迁移元数据，不下载、修改或重传安装包。
 
 本地隔离回归：`python .github/scripts/test-sync-cos-release.py -v` 和 `python .github/scripts/test-skill-archive.py -v`。只使用模拟安装包、技能源码和内存 COS，不读取密钥或操作云端。
 
@@ -177,3 +177,11 @@ powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File packagin
 ```
 
 原生测试使用临时模拟安装目录及 `Software\SapLinkInstallerTest` 注册表，不更改真实安装与用户 PATH，涵盖启动器编译、隐藏助手交接、哈希拒绝、含空格路径的真实 NSIS 静默升级、版本验证和配置保留。它需要已缓存的 NSIS 和安装图标，不能与其他占用同一测试注册表的安装测试同时运行。`-TestMode` 不由生产启动入口传递。
+
+### 单独生成技能发行包
+
+```powershell
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File packaging/windows/package-skill.ps1
+```
+
+此命令使用 package.json 版本，只输出 Skill ZIP 和校验文件，不构建安装包、不更新版本号。完整 `package:windows` 和 `release:windows` 均自动调用。Markdown/YAML 的 CRLF 转为 Git 标准 LF，避免 Windows checkout 与 Release 标签内容不同；拒绝源目录中的链接及超出大小限制的文件。构建后应将安装包、技能 ZIP 与全部 `.sha256` 附件一起上传到相同代码提交的 Release。

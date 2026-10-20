@@ -7,7 +7,9 @@
 | 程序安装目录 | `%LOCALAPPDATA%\Programs\SapLink` |
 | 连接配置和令牌哈希 | `%APPDATA%\saplink\config.json` |
 | 更新检查缓存 | `%APPDATA%\saplink\update-check.json`，随 `SAPLINK_CONFIG_DIR` 更改 |
-| 最近新版本通知 | `%APPDATA%\saplink\update-notice.json`，仅自动发现更新时写入；历史通知不代表当前仍需升级 |
+| 历史新版本通知 | `%APPDATA%\saplink\update-notice.json`，旧版本可能遗留；新版不再写入，不作为当前更新结论 |
+| 自动更新下载目录 | `%APPDATA%\saplink\updates\job-随机字符\`，随 `SAPLINK_CONFIG_DIR` 更改；下载中 installer.part，校验通过后 installer.exe |
+| 自动更新最终结果 | `%APPDATA%\saplink\update-install-result.json`，随 `SAPLINK_CONFIG_DIR` 更改 |
 | 操作日志 | `%LOCALAPPDATA%\saplink\logs` |
 | 配置目录环境变量 | `SAPLINK_CONFIG_DIR` |
 | 日志目录环境变量 | `SAPLINK_LOG_DIR` |

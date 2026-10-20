@@ -5,4 +5,4 @@ dist/
 *.log
 coverage/
 __pycache__/
-outputs/installers/
+/outputs/

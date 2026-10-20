@@ -74,7 +74,7 @@ jobs:
           python3 .github/scripts/test-skill-archive.py -v
           python3 .github/scripts/test-prepare-cos-release.py -v
 
-      - name: Upload and verify installers and skill ZIP, then publish latest.json
+      - name: Prefer Release skill attachments, generate when unavailable, and publish COS catalogs
         if: steps.prepare.outputs.ready == 'true'
         env:
           GH_TOKEN: ${{ github.token }}

@@ -4,9 +4,12 @@ import copy
 import hashlib
 import io
 import unittest
+from unittest.mock import patch
+import urllib.error
+import warnings
 import zipfile
 
-from skill_archive import build
+from skill_archive import build, load_release
 
 
 class SkillTests(unittest.TestCase):
@@ -65,6 +68,84 @@ class SkillTests(unittest.TestCase):
                         build(self.api, '1.0.1')
                 finally:
                     self.entries = saved
+
+
+    def attachments(self):
+        generated, _ = build(self.api, '1.0.1')
+        output = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(generated)) as source, zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as target:
+            for name in source.namelist():
+                target.writestr(name, source.read(name))
+        content = output.getvalue()
+        filename = 'SapLink-1.0.1-skill.zip'
+        checksum = (hashlib.sha256(content).hexdigest() + '  ' + filename + '\n').encode()
+        bodies = {1: content, 2: checksum}
+        release = {'tag_name': 'v1.0.1', 'assets': [
+            {'id': i, 'name': name, 'state': 'uploaded', 'size': len(bodies[i]),
+             'digest': 'sha256:' + hashlib.sha256(bodies[i]).hexdigest()}
+            for i, name in ((1, filename), (2, filename + '.sha256'))]}
+        return release, bodies
+
+    def test_prefers_release_zip_and_accepts_different_zip_encoders(self):
+        release, bodies = self.attachments()
+        calls = []
+        def request(url, binary=False):
+            calls.append(url)
+            return io.BytesIO(bodies[int(url.rsplit('/', 1)[-1])])
+        content, metadata = load_release(self.api, release, request)
+        self.assertEqual(content, bodies[1])
+        self.assertEqual(metadata['sha256'], hashlib.sha256(bodies[1]).hexdigest())
+        self.assertEqual(metadata['size'], len(content))
+        self.assertEqual(len(calls), 2)
+
+    def test_missing_either_attachment_generates_from_tag_without_partial_download(self):
+        for keep in ([], [0], [1]):
+            release, _ = self.attachments()
+            release['assets'] = [release['assets'][i] for i in keep]
+            content, _ = load_release(self.api, release, lambda *a, **k: self.fail('Do not download incomplete pairs'))
+            self.assertEqual(content, build(self.api, '1.0.1')[0])
+
+    def test_network_failure_generates_from_tag(self):
+        release, _ = self.attachments()
+        content, _ = load_release(self.api, release, lambda *a, **k: (_ for _ in ()).throw(urllib.error.URLError('offline')))
+        self.assertEqual(content, build(self.api, '1.0.1')[0])
+
+    def test_checksum_mismatch_fails_instead_of_generating(self):
+        release, bodies = self.attachments()
+        bodies[2] = b'0' * 64 + b'  SapLink-1.0.1-skill.zip\n'
+        release['assets'][1].pop('digest')
+        with self.assertRaisesRegex(ValueError, 'sidecar mismatch'):
+            load_release(self.api, release, lambda url, **kw: io.BytesIO(bodies[int(url.rsplit('/', 1)[-1])]))
+
+    def test_valid_hash_cannot_hide_files_from_a_different_source_tag(self):
+        release, bodies = self.attachments()
+        canonical, metadata = build(self.api, '1.0.1')
+        with zipfile.ZipFile(io.BytesIO(canonical)) as z:
+            changed = io.BytesIO()
+            with zipfile.ZipFile(changed, 'w') as out:
+                for name in z.namelist():
+                    out.writestr(name, b'changed' if name.endswith('SKILL.md') else z.read(name))
+        bodies[1] = changed.getvalue()
+        bodies[2] = (hashlib.sha256(bodies[1]).hexdigest() + '  SapLink-1.0.1-skill.zip\n').encode()
+        for asset in release['assets']:
+            asset['size'] = len(bodies[asset['id']]); asset.pop('digest')
+        with self.assertRaisesRegex(ValueError, 'differs from the release tag'):
+            load_release(self.api, release, lambda url, **kw: io.BytesIO(bodies[int(url.rsplit('/', 1)[-1])]))
+
+    def test_traversal_and_duplicate_zip_paths_are_rejected(self):
+        from skill_archive import archive_files
+        bad = io.BytesIO()
+        with zipfile.ZipFile(bad, 'w') as z:
+            z.writestr('saplink-manager/../secret', b'data')
+        with self.assertRaisesRegex(ValueError, 'Unsafe'):
+            archive_files(bad.getvalue())
+        duplicate = io.BytesIO()
+        with warnings.catch_warnings(), zipfile.ZipFile(duplicate, 'w') as z:
+            warnings.simplefilter('ignore', UserWarning)
+            z.writestr('saplink-manager/SKILL.md', b'first')
+            z.writestr('saplink-manager/SKILL.md', b'second')
+        with self.assertRaisesRegex(ValueError, 'Invalid'):
+            archive_files(duplicate.getvalue())
 
 
 if __name__ == '__main__':

@@ -52,7 +52,7 @@ SapLink 的图标由三个相扣的圆环构成：左右两个大圆环代表 **
 AI 客户端 → SapLink 本地 MCP 服务 → SAP ADT → SAP ABAP 系统
 ```
 
-1. **下载并安装**：从 [GitHub Releases](https://github.com/OneOFF-ive/saplink/releases) 下载适合本机架构的 Windows 安装包，安装后通过快捷方式打开管理页面。安装包内置运行环境，无需另装 Node.js。
+1. **下载并安装**：通过 [官网下载入口](https://saplink.cloud/download.html)从 COS 获取适合本机架构的 Windows 安装包，或使用 [GitHub Releases](https://github.com/OneOFF-ive/saplink/releases)，安装后通过快捷方式打开管理页面。安装包内置运行环境，无需另装 Node.js。
 2. **添加 SAP 连接**：输入 ADT 地址、Client、用户名和语言，在本机填写密码并测试连接。
 3. **接入 AI 客户端**：创建访问令牌、启动 MCP，将服务地址与令牌配置到客户端。
 4. **开始操作**：让 agent 先确认目标系统，再按任务读取、查询或执行已授权的开发变更。
@@ -66,7 +66,7 @@ AI 客户端 → SapLink 本地 MCP 服务 → SAP ADT → SAP ABAP 系统
 
 完整步骤见 [Windows 安装指南](docs/windows-installer.md) 与 [部署与运维手册](docs/operations.md)。从源码运行与制作安装包见 [开发与构建指南](docs/development.md)。
 
-应用会自动检查新版本，也可运行 `saplink update check` 手动检查。支持的 Windows 安装版可在用户确认后下载、校验并安装更新，不会未经确认自行升级。详细步骤见 [版本检查](docs/operations.md#检查新版本) 与 [用户确认的自动安装](docs/operations.md#用户确认的自动安装)。各版本变更见 [GitHub Releases](https://github.com/OneOFF-ive/saplink/releases)。
+应用启动时检查新版本，运行期间每小时刷新；发现新版后侧栏“软件更新”显示红色 New，不弹窗。也可运行 `saplink update check` 手动检查。支持的 Windows 安装版可在用户确认后下载、校验并安装更新，不会未经确认自行升级。详细步骤见 [版本检查](docs/operations.md#检查新版本) 与 [用户确认的自动安装](docs/operations.md#用户确认的自动安装)。已发布版本变更见 [GitHub Releases](https://github.com/OneOFF-ive/saplink/releases)。
 
 ## 🛡️ 变更有明确的步骤
 

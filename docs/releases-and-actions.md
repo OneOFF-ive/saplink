@@ -34,14 +34,14 @@ COS 工作流固定安装 cos-python-sdk-v5==1.9.44，并先运行离线同步�
 
 1. 在 Windows 构建机使用 `release.ps1 -Version <三段数字版本>` 构建，执行项目及安装包验收。命令、架构限制见 [开发指南](development.md#更新版本并打包)。
 2. 准备两个架构的安装包，确保 package.json、锁文件、产品版本和标签版本一致；两个架构必须来自同一待发布版本。
-3. 创建对应代码提交的 Release 草稿，标签必须是 `vMAJOR.MINOR.PATCH`，例如 v1.0.1。本地构建脚本的 -Version 不带 v，Release 标签必须带 v。
-4. 上传 `SapLink-<version>-win-x64-setup.exe` 和 `SapLink-<version>-win-arm64-setup.exe`，建议同时附上本地产生的 `.sha256` 与真实变更说明。
+3. 确认安装包和 Skill 对应的技能源码均已提交。Windows 打包将 Markdown/YAML 换行统一为 LF，Action 会逐文件核对标签内容；未提交的技能修改不会被标签包含。创建对应代码提交的 Release 草稿，标签必须是 `vMAJOR.MINOR.PATCH`，例如 v1.0.1。本地构建脚本的 -Version 不带 v，Release 标签必须带 v。
+4. 上传 `SapLink-<version>-win-x64-setup.exe` 和 `SapLink-<version>-win-arm64-setup.exe`，同时上传 `SapLink-<version>-skill.zip`、`SapLink-<version>-skill.zip.sha256`、安装包的 `.sha256` 与真实变更说明。
 5. 附件上传完成后发布为最新正式 Release，不设为 prerelease。确认 COS Action 启动并检查结果。
 6. 验证官网技能入口和 COS 清单，再在客户端运行 `saplink update check --force --json` 检查来源、版本和架构下载信息。检查源码版本等于远端版本时不会提示升级，这是正常行为。
 
 同步脚本需要两个架构的附件，以及 GitHub API 提供的 SHA-256 digest 和 uploaded 状态。每个附件须大于 0 且不超过 256 MiB。脚本最多探测 18 次，间隔 10 秒，单次网络请求另有超时；缺少架构、附件重名或 digest 未就绪会等待后失败，不发布半套下载。
 
-`.sha256` 附件不是同步脚本的输入依据：准备脚本重新下载两个官方 exe，核对大小和 GitHub digest。它不会从源码重新构建，也不执行下载的安装程序。
+安装包的 `.sha256` 附件不是同步脚本的输入依据：准备脚本重新下载两个官方 exe，核对大小和 GitHub digest。它不会从源码重新构建，也不执行下载的安装程序。
 
 ## 4. 触发方式与补同步
 
@@ -57,7 +57,7 @@ COS 工作流固定安装 cos-python-sdk-v5==1.9.44，并先运行离线同步�
 
 如果其他工作流使用默认 GITHUB_TOKEN 创建 Release，不能依赖其 published 事件继续触发同步。应在附件就绪后显式调用 reusable workflow，并传入所需 secrets，或手动 dispatch。此行为依据 [GitHub 工作流触发规则](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow)。当前仓库没有这样的上游发布工作流。
 
-## 5. 两个同步目标的结果
+## 5. COS 发布结果与官网下载入口
 
 ### COS 更新源
 
@@ -65,6 +65,7 @@ COS 工作流固定安装 cos-python-sdk-v5==1.9.44，并先运行离线同步�
 
 - 版本文件位于 saplink/v<version>/，包括两个 exe 与各自 `.sha256`。
 - 安装包使用 1 MiB 分块、最多三线程上传，SDK 校验远端已完成块后续传；需补齐[分块上传权限](development.md#github-release-自动同步到-cos)。初始化及最终合并都禁止覆盖同名对象。
+- Skill 的来源选择不会跳过 SHA-256 或标签源码校验；附件已下载但校验失败时停止，不能以重新生成掩盖冲突。
 - 客户端清单位于 saplink/latest.json，使用 schema_version、version、published_at、downloads。
 - 先上传并匿名 HTTPS 下载验证各安装包，最后更新 latest.json；同版本内容冲突或损坏文件报错，不静默覆盖。
 - 匿名校验按 1 MiB Range 顺序读取，失败段最多尝试三次，核对长度、ETag 及完整 SHA-256；日志显示上传、回读、清单提交阶段及字节进度。
@@ -73,7 +74,7 @@ COS 工作流固定安装 cos-python-sdk-v5==1.9.44，并先运行离线同步�
 
 公开清单：[COS latest.json](https://saplink-1302377695.cos.ap-shanghai.myqcloud.com/saplink/latest.json)。应用正常时优先使用 COS，不同时查询所有源取最大版本；因此发版必须确认清单已同步。
 
-同一 COS Action 从 Release 标签源码生成技能 ZIP，和两个架构安装包统一放在 `saplink/v<version>/`。三个文件全部上传并通过匿名下载 SHA-256 校验后，先更新 `saplink/skill-latest.json`，再更新保持旧格式的安装包清单 `saplink/latest.json`。
+同一 COS Action 优先使用经过校验的 Release 技能 ZIP 与校验附件，附件缺失或无法下载时从对应标签源码生成，和两个架构安装包统一放在 `saplink/v<version>/`。三个文件全部上传并通过匿名下载 SHA-256 校验后，先更新 `saplink/skill-latest.json`，再更新保持旧格式的安装包清单 `saplink/latest.json`。
 
 - 技能文件：`saplink/v<version>/SapLink-<version>-skill.zip` 及 `.zip.sha256`。
 - 安装包清单只包含 schema_version、version、published_at、downloads；独立技能清单 skill-latest.json 包含 schema_version、version、published_at 和 skill（commit、filename、url、size、sha256）。skill.url 为 COS 完整下载地址。
@@ -84,7 +85,7 @@ COS 工作流固定安装 cos-python-sdk-v5==1.9.44，并先运行离线同步�
 
 官网不再存储安装包或技能 ZIP，不再使用 SSH 上传接收器。官网代理 COS 的两个小型清单，浏览器从 COS 直接下载文件。旧的 `Sync website skill` 工作流及接收器已从源码删除，不应恢复或重新配置 `SAPLINK_WEBSITE_SYNC_KEY`。
 
-Skill ZIP 由 `skill_archive.py` 从 Release 标签源码生成，保留顶层 `saplink-manager/`、`SKILL.md`、`agents/`、`references/`。修改技能后需发布包含修改的新标签；不覆盖同版本不可变 ZIP。
+Skill ZIP 由 `skill_archive.py` 优先读取 Release ZIP 与校验附件，附件不可用时才从 Release 标签源码生成；已下载但校验失败时中止，不覆盖或绕过。其内容必须与标签中的技能源码一致，保留顶层 `saplink-manager/`、`SKILL.md`、`agents/`、`references/`。修改技能后需发布包含修改的新标签；不覆盖同版本不可变 ZIP。
 
 ## 6. 常见问题
 

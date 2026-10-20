@@ -166,4 +166,5 @@ try {
     "$hash  $([IO.Path]::GetFileName($target))" | Set-Content -LiteralPath ($target + '.sha256') -Encoding ASCII
     Write-Host "Created: $target"
   }
+  & (Join-Path $PSScriptRoot 'package-skill.ps1') -Version $package.version -OutputDirectory $output
 } finally { Pop-Location }

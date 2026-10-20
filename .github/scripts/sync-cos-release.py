@@ -204,12 +204,12 @@ def verify_public(key, expected_size, expected_hash):
         raise SyncError('Public COS download failed SHA-256 verification')
 
 
-def sync_release(path, store, latest_release, api, verify=verify_public, read_public=public_bytes):
+def sync_release(path, store, latest_release, api, verify=verify_public, read_public=public_bytes, request=None):
     print('Checking latest GitHub release and local installer checksums...', flush=True)
     release = latest_release()
     candidate, files = prepare_manifest(path, release)
-    from skill_archive import build
-    content, metadata = build(api, candidate['version'])
+    from skill_archive import load_release
+    content, metadata = load_release(api, release, request)
     skill_key = f'saplink/v{candidate["version"]}/{metadata["filename"]}'
     skill = {key: value for key, value in metadata.items() if key != 'version'}
     skill['url'] = f'{ORIGIN}/{skill_key}'
@@ -355,7 +355,7 @@ def main():
     spec.loader.exec_module(github)
     path = Path(os.environ['RELEASE_MANIFEST'])
     latest = lambda: github.api('releases/latest')
-    sync_release(path, store, latest, github.api)
+    sync_release(path, store, latest, github.api, request=github.request)
 
 
 if __name__ == '__main__':
