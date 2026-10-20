@@ -119,6 +119,12 @@ export async function startAdmin(store: ConfigStore, credentials: Credentials, p
     if (req.method !== 'GET' && updater.busy) return next(new AppError('BUSY', '更新任务正在执行，请等待完成。'));
     next();
   });
+  // Both polling routes must use the newest manual or background check.
+  const latestUpdate = () => {
+    const background = getAutomaticUpdate();
+    return updater.latest && (!background || updater.latest.checked_at >= background.checked_at)
+      ? updater.latest : background ?? null;
+  };
   app.get('/api/state', async (_req, res) => {
     const config = await store.load();
     res.json({
@@ -129,8 +135,7 @@ export async function startAdmin(store: ConfigStore, credentials: Credentials, p
         created_at
       })),
       running: Boolean(state.current),
-      update: updater.latest && (!getAutomaticUpdate() || updater.latest.checked_at >= getAutomaticUpdate()!.checked_at)
-        ? updater.latest : getAutomaticUpdate() ?? null,
+      update: latestUpdate(),
       update_install: await updater.status(),
       mcp_port: state.port,
       busy
@@ -142,7 +147,7 @@ export async function startAdmin(store: ConfigStore, credentials: Credentials, p
     res.json({ update: result, update_install: await updater.status() });
   });
   app.get('/api/updates/status', async (_req, res) => {
-    res.json({ update: updater.latest ?? getAutomaticUpdate() ?? null, update_install: await updater.status() });
+    res.json({ update: latestUpdate(), update_install: await updater.status() });
   });
   app.post('/api/updates/install', async (req, res) => {
     const { version } = z.object({ version: z.string().regex(/^\d+\.\d+\.\d+$/) }).strict().parse(req.body);

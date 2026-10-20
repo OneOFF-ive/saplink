@@ -175,7 +175,9 @@ export function startAutomaticUpdates(currentVersion: string, directory: string,
     if (checking || controller.signal.aborted || options.disabled) return;
     checking = true;
     try {
-      const result = await checkForUpdate(currentVersion, directory, { fetcher: options.fetcher, signal: controller.signal, manifestUrl: options.manifestUrl });
+      // Refresh background metadata even when a CLI check populated the 24-hour cache.
+      await Promise.resolve();
+      const result = await checkForUpdate(currentVersion, directory, { force: true, fetcher: options.fetcher, signal: controller.signal, manifestUrl: options.manifestUrl });
       if (controller.signal.aborted) return;
       automaticResult = result;
       if (result.update_available && result.latest_version !== notified) {
@@ -186,21 +188,14 @@ export function startAutomaticUpdates(currentVersion: string, directory: string,
     finally { checking = false; }
   };
   const initialCheck = check();
-  const timer = options.disabled ? undefined : setInterval(() => { void check(); }, options.intervalMs ?? cacheLifetime);
+  const timer = options.disabled ? undefined : setInterval(() => { void check(); }, options.intervalMs ?? 60 * 60 * 1000);
   timer?.unref();
   return { initialCheck, check, stop: () => { controller.abort(); if (timer) clearInterval(timer); } };
 }
 
 export function startRuntimeUpdateChecks(directory: string) {
   return startAutomaticUpdates(appVersion, directory, {
-    disabled: process.env.SAPLINK_AUTO_UPDATE_CHECK === '0',
-    notify: async result => {
-      console.error(`SapLink ${result.latest_version} is available (current ${appVersion}). Download: ${result.release_url}`);
-      for (const item of result.downloads) console.error(`Windows ${item.architecture}: ${item.url}`);
-      try {
-        await mkdir(directory, { recursive: true });
-        await writeFile(join(directory, 'update-notice.json'), JSON.stringify(result, null, 2), { mode: 0o600 });
-      } catch { /* A notification file failure must not interrupt the service. */ }
-    }
+    // The management UI displays update availability without popups or notice files.
+    disabled: process.env.SAPLINK_AUTO_UPDATE_CHECK === '0'
   });
 }

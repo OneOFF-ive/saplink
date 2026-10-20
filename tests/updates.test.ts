@@ -100,7 +100,7 @@ test('CLI exposes cached update and download information in text and JSON modes'
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('automatic checks reuse cache, notify once per version and stop cleanly', async () => {
+test('automatic checks refresh metadata, notify once per version and stop cleanly', async () => {
   const directory = await temporaryDirectory();
   let calls = 0; let notices = 0;
   const automatic = startAutomaticUpdates('0.1.0', directory, {
@@ -110,8 +110,8 @@ test('automatic checks reuse cache, notify once per version and stop cleanly', a
   try {
     await automatic.initialCheck;
     await automatic.check();
-    assert.equal(calls, 1); assert.equal(notices, 1);
-    automatic.stop(); await automatic.check(); assert.equal(calls, 1);
+    assert.equal(calls, 2); assert.equal(notices, 1);
+    automatic.stop(); await automatic.check(); assert.equal(calls, 2);
   } finally { automatic.stop(); await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -127,7 +127,7 @@ test('automatic checks can be disabled and failures stay isolated', async () => 
   } finally { disabled.stop(); enabled.stop(); await rm(directory, { recursive: true, force: true }); }
 });
 
-test('stopping during a pending cache read prevents a new network request', async () => {
+test('stopping before a queued refresh prevents a new network request', async () => {
   const directory = await temporaryDirectory();
   let calls = 0;
   const automatic = startAutomaticUpdates('0.1.0', directory, {
@@ -231,4 +231,27 @@ test('cancellation during COS failure prevents a fallback request', async () => 
     }) as typeof fetch }));
     assert.equal(calls, 1);
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+
+test('startup bypasses a fresh old COS cache and subsequent checks discover newly published versions', async () => {
+  const directory = await temporaryDirectory();
+  await checkDualSource('0.1.0', directory, { fetcher: fetcher(manifest) });
+  let version = '0.3.0';
+  let calls = 0;
+  const automatic = startDualAutomatic('0.1.0', directory, { fetcher: (async () => {
+    calls++;
+    return new Response(JSON.stringify({ ...manifest, version, downloads: [{ ...manifest.downloads[0],
+      url: new URL(`v${version}/SapLink-${version}-win-x64-setup.exe`, defaultManifestUrl).href }] }));
+  }) as typeof fetch });
+  try {
+    await automatic.initialCheck;
+    const { getAutomaticUpdate } = await import('../src/updates.js');
+    assert.equal(getAutomaticUpdate()?.latest_version, '0.3.0');
+    assert.equal(getAutomaticUpdate()?.cached, false);
+    version = '0.4.0';
+    await automatic.check();
+    assert.equal(getAutomaticUpdate()?.latest_version, '0.4.0');
+    assert.equal(calls, 2);
+  } finally { automatic.stop(); await rm(directory, { recursive: true, force: true }); }
 });

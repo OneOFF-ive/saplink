@@ -6,7 +6,7 @@
 
 ## 1. 目标与范围
 
-版本检查由 `src/updates.ts` 提供：优先 COS 清单，不可用时回退 GitHub 最新正式 Release，共用 24 小时缓存。长期运行的 CLI/UI 启动后异步检查，进程内每 24 小时调度；不创建系统任务。新版本通过 stderr 和配置目录的 `update-notice.json` 提示，并经受保护的管理状态接口提供给 Web。检查不经过 MCP 或 SAP ADT，不持有配置锁，也不会自行下载安装。`SAPLINK_AUTO_UPDATE_CHECK=0` 可关闭自动检查。命令与缓存规则见 [版本检查](operations.md#检查新版本)。
+版本检查由 `src/updates.ts` 提供：优先 COS 清单，不可用时回退 GitHub 最新正式 Release。CLI 普通检查缓存 24 小时；长期运行的 CLI/UI 启动后异步重新查询更新源，此后每小时重新查询，不复用旧缓存，不创建系统任务。新版本经受保护的状态接口提供给 Web，侧栏“软件更新”显示红色 New，进入页面直接显示版本及自动更新操作；无新版本时保留手动检查。后台检测不弹窗、不写历史通知文件，也不会自行安装。`SAPLINK_AUTO_UPDATE_CHECK=0` 可关闭自动检查。命令与缓存规则见 [版本检查](operations.md#检查新版本)。
 
 用户确认后的更新安装由 `src/self-update.ts` 与独立原生助手 `packaging/windows/update-runner.ps1` 完成：重新核对版本和架构、下载并校验安装包，再正常关闭当前应用、等待在途操作收尾，在原目录安装并尝试恢复原运行方式。仅支持包含助手的 Windows 安装版，不提供强杀、自动回滚或未经确认的静默升级。详见 [开发验证](development.md#自动更新实现与验证) 和 [运维流程](operations.md#用户确认的自动安装)。
 

@@ -41,7 +41,9 @@ function renderUpdate() {
   const update = state.update;
   const install = state.update_install;
   const running = ['downloading', 'verifying', 'preparing', 'installing'].includes(install?.phase);
+  $('#update-new').hidden = !update?.update_available;
   const check = $('#check-updates');
+  check.hidden = Boolean(update?.update_available) && !updateCheckError;
   check.disabled = updateChecking || running;
   check.textContent = updateChecking ? '正在检查…' : '检查版本更新';
   const installButton = $('#install-update');
