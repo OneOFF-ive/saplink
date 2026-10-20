@@ -99,7 +99,7 @@ client-config 验证令牌属于当前配置且尚未撤销，再导出 `transpo
 
 ## 一个 skill 完成配置、接入与 SAP 工作
 
-项目附带 [saplink-manager](../skills/saplink-manager/SKILL.md)，面向具有本机终端能力的 AI 客户端。用户要使用产品且确认本机未安装时，Agent 先询问安装意愿并确认安装目录，默认 `~\AppData\Local\Programs\SapLink`；得到同意后按官网、COS、GitHub 的顺序获取官方安装包，核对架构和完整性后安装。随后负责连接与凭据录入引导、令牌管理、服务启停、给当前客户端配置 `saplink-mcp`、验证 MCP，以及按用户意图执行 SAP 查询或 ABAP 开发。不要求 MCP 预先运行，不通过构建源码替代产品安装。下载、安装和卸载细节见[技能中的产品安装管理](../skills/saplink-manager/references/installation.md)。
+项目附带 [saplink-manager](../skills/saplink-manager/SKILL.md)，面向具有本机终端能力的 AI 客户端。用户要使用产品且确认本机未安装时，Agent 先询问安装意愿并确认安装目录，默认 `~\AppData\Local\Programs\SapLink`；得到同意后优先从 COS、其次从 GitHub 获取官方安装包，官网不再托管或提供安装包更新源，核对架构和完整性后安装。随后负责连接与凭据录入引导、令牌管理、服务启停、给当前客户端配置 `saplink-mcp`、验证 MCP，以及按用户意图执行 SAP 查询或 ABAP 开发。不要求 MCP 预先运行，不通过构建源码替代产品安装。下载、安装和卸载细节见[技能中的产品安装管理](../skills/saplink-manager/references/installation.md)。
 
 将整个技能目录（包括 `references`、`agents`）导入客户端。Codex 默认个人位置为 `%USERPROFILE%\.codex\skills\saplink-manager`，自定义 `CODEX_HOME` 时使用其 skills 目录。用户可以直接说“帮我配置 SapLink 并连接这个 SAP 系统”“查询物料”“修改这个 ABAP 程序”，由 Agent 按需读取配置管理、客户端接入或 SAP 工具说明。不要只分发 SKILL.md 而遗漏引用文件。
 

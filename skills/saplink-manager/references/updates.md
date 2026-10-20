@@ -18,7 +18,7 @@ saplink update check --force --json
 - `cached=true`：说明来自缓存；`checked_at` 是 UTC 检查时间，不能声称刚刚联网确认。
 - `UPDATE_CHECK_FAILED` / `UPDATE_RESPONSE_INVALID`：报告未能确认版本及错误原因，不把错误或历史通知当作更新结论，不循环重试。
 
-默认先读取 COS 清单，不可用时回退 `OneOFF-ive/saplink` 的 GitHub 最新正式 Release，缓存 24 小时。UI 和服务还会在启动后及每 24 小时自动检查；配置目录的 `update-notice.json` 是历史通知。`SAPLINK_AUTO_UPDATE_CHECK=0` 并重启可关闭自动检查，手动检查和安装仍可用。仅查版本时不为此重启程序。
+默认先读取 COS 清单，不可用时回退 `OneOFF-ive/saplink` 的 GitHub 最新正式 Release；不从官网查询或下载安装包。CLI 普通检查缓存 24 小时；新版 UI 和服务启动后重新联网检查，此后每小时刷新。管理页侧栏以红色 New 表示有新版本，不弹提醒窗口，进入后直接显示自动更新操作；无新版本时保留手动检查。旧版本可能仍使用历史检查周期和通知文件，不将其视为当前检测结果。`SAPLINK_AUTO_UPDATE_CHECK=0` 并重启可关闭自动检查，手动检查和安装仍可用。仅查版本时不为此重启程序。
 
 `SAPLINK_UPDATE_URL` 可指定 HTTPS 清单地址，`github` 表示仅使用 GitHub；只有用户要求更换信任源时才修改。不要向公共更新源发送 SAP 凭据或 MCP 令牌。
 

@@ -16,6 +16,7 @@ BUCKET = 'saplink-1302377695'
 REGION = 'ap-shanghai'
 ORIGIN = f'https://{BUCKET}.cos.{REGION}.myqcloud.com'
 LATEST_KEY = 'saplink/latest.json'
+SKILL_LATEST_KEY = 'saplink/skill-latest.json'
 MAX_INSTALLER_SIZE = 256 * 1024 * 1024
 TRANSFER_CHUNK = 1024 * 1024
 
@@ -75,9 +76,76 @@ def may_publish(existing, candidate):
         return False
     if current == proposed:
         # Never silently replace an already published version with different binaries.
-        if (existing.get('downloads') != candidate['downloads']
-                or ('skill' in existing and existing['skill'] != candidate.get('skill'))):
+        if existing.get('downloads') != candidate['downloads']:
             raise SyncError('Same-version manifest conflicts with published downloads; publish a new version')
+    return True
+
+
+def publish_skill_manifest(store, candidate, read_public):
+    """Publish an independent pointer without changing the legacy installer contract."""
+    existing = store.read_manifest(SKILL_LATEST_KEY)
+    if existing:
+        if existing.get('schema_version') != 1:
+            raise SyncError('Unsupported skill manifest schema')
+        current, proposed = version_tuple(existing.get('version')), version_tuple(candidate['version'])
+        if current > proposed:
+            return
+        if current == proposed and existing.get('skill') != candidate['skill']:
+            raise SyncError('Same-version skill manifest conflicts; publish a new version')
+    if existing != candidate:
+        store.put_bytes(SKILL_LATEST_KEY, (json.dumps(candidate, indent=2) + '\n').encode(), immutable=False)
+    if store.read_manifest(SKILL_LATEST_KEY) != candidate or json.loads(read_public(SKILL_LATEST_KEY, 256 * 1024)) != candidate:
+        raise SyncError('Published skill manifest verification failed')
+
+
+def repair_existing_manifest(store, read_public=None):
+    """Migrate only verified metadata, leaving all published binaries untouched."""
+    read_public = read_public or public_bytes
+    existing = store.read_manifest()
+    required = {'schema_version', 'version', 'published_at', 'downloads'}
+    if not existing or existing.get('schema_version') != 1 or not required <= set(existing) or set(existing) - required - {'skill'}:
+        raise SyncError('Unexpected installer manifest; inspect it manually')
+    version_tuple(existing['version'])
+    if 'skill' not in existing:
+        print('Installer metadata is already compatible; nothing changed.')
+        return False
+    version = existing['version']
+    architectures = set()
+    for item in existing['downloads']:
+        architecture = item.get('architecture')
+        if (set(item) != {'architecture', 'url', 'sha256'} or architecture not in {'x64', 'arm64'}
+                or architecture in architectures or item['url'] != f'{ORIGIN}/saplink/v{version}/SapLink-{version}-win-{architecture}-setup.exe'
+                or not re.fullmatch(r'[a-f0-9]{64}', item['sha256'])):
+            raise SyncError('Invalid installer metadata; nothing changed')
+        architectures.add(architecture)
+    if architectures != {'x64', 'arm64'}:
+        raise SyncError('Both installer architectures are required')
+    skill = existing['skill']
+    filename = f'SapLink-{version}-skill.zip'
+    if (set(skill) != {'commit', 'filename', 'url', 'size', 'sha256'}
+            or skill['filename'] != filename or skill['url'] != f'{ORIGIN}/saplink/v{version}/{filename}'
+            or not re.fullmatch(r'[a-f0-9]{40}', skill['commit']) or not re.fullmatch(r'[a-f0-9]{64}', skill['sha256'])
+            or type(skill['size']) is not int or not 0 < skill['size'] <= 16 * 1024 * 1024):
+        raise SyncError('Invalid skill metadata; nothing changed')
+    package = read_public(f'saplink/v{version}/{filename}', 16 * 1024 * 1024)
+    if len(package) != skill['size'] or hashlib.sha256(package).hexdigest() != skill['sha256']:
+        raise SyncError('Skill ZIP verification failed; nothing changed')
+    if json.loads(read_public(LATEST_KEY, 256 * 1024)) != existing:
+        raise SyncError('Public and authenticated metadata differ; nothing changed')
+    encoded = (json.dumps(existing, indent=2) + '\n').encode()
+    backup = f'saplink/manifest-backups/latest-{version}-{hashlib.sha256(encoded).hexdigest()}.json'
+    if not store.exists(backup):
+        store.put_bytes(backup, encoded, immutable=True)
+    if read_public(backup, 256 * 1024) != encoded:
+        raise SyncError('Metadata backup verification failed')
+    publish_skill_manifest(store, {key: existing[key] for key in ('schema_version', 'version', 'published_at', 'skill')}, read_public)
+    if store.read_manifest() != existing:
+        raise SyncError('Installer metadata changed during repair; retry after checking concurrent publishers')
+    repaired = {key: existing[key] for key in ('schema_version', 'version', 'published_at', 'downloads')}
+    store.put_bytes(LATEST_KEY, (json.dumps(repaired, indent=2) + '\n').encode(), immutable=False)
+    if store.read_manifest() != repaired or json.loads(read_public(LATEST_KEY, 256 * 1024)) != repaired:
+        raise SyncError('Repaired installer metadata verification failed')
+    print(f'Restored legacy installer metadata: v{version}; backup: {backup}')
     return True
 
 
@@ -143,8 +211,8 @@ def sync_release(path, store, latest_release, api, verify=verify_public, read_pu
     from website_skill import build
     content, metadata = build(api, candidate['version'])
     skill_key = f'saplink/v{candidate["version"]}/{metadata["filename"]}'
-    candidate['skill'] = {key: value for key, value in metadata.items() if key != 'version'}
-    candidate['skill']['url'] = f'{ORIGIN}/{skill_key}'
+    skill = {key: value for key, value in metadata.items() if key != 'version'}
+    skill['url'] = f'{ORIGIN}/{skill_key}'
     print('Reading existing COS latest.json...', flush=True)
     if not may_publish(store.read_manifest(), candidate):
         print('Skipping: COS already advertises a newer version.')
@@ -182,7 +250,14 @@ def sync_release(path, store, latest_release, api, verify=verify_public, read_pu
     if not may_publish(existing, candidate):
         print('Skipping latest.json: COS already advertises a newer version.')
         return False
-    expected = {**existing, 'skill': candidate['skill']} if existing and existing['version'] == candidate['version'] else candidate
+    # Publish the small skill pointer first. Old clients must see exactly the original
+    # four installer keys, including when repairing an already polluted same-version pointer.
+    if existing and existing['version'] == candidate['version'] and existing.get('skill', skill) != skill:
+        raise SyncError('Existing combined skill metadata conflicts; inspect it manually')
+    publish_skill_manifest(store, {'schema_version': 1, 'version': candidate['version'],
+                                 'published_at': candidate['published_at'], 'skill': skill}, read_public)
+    expected = {key: existing[key] for key in ('schema_version', 'version', 'published_at', 'downloads')} \
+        if existing and existing['version'] == candidate['version'] else candidate
     if existing != expected:
         print('Both installers and skill ZIP verified; publishing latest.json...', flush=True)
         encoded = (json.dumps(expected, indent=2) + '\n').encode()
@@ -210,9 +285,9 @@ class CosStore:
                 return False
             raise
 
-    def read_manifest(self):
+    def read_manifest(self, key=LATEST_KEY):
         try:
-            response = self.client.get_object(Bucket=BUCKET, Key=LATEST_KEY)
+            response = self.client.get_object(Bucket=BUCKET, Key=key)
         except self.service_error as error:
             if error.get_status_code() == 404 and error.get_error_code() == 'NoSuchKey':
                 return None
@@ -271,11 +346,14 @@ def main():
         raise SyncError('Missing COS_SECRET_ID or COS_SECRET_KEY')
     config = CosConfig(Region=REGION, SecretId=secret_id, SecretKey=secret_key, Scheme='https', Timeout=60, AllowRedirects=False)
     client = create_cos_client(config)
+    store = CosStore(client, CosServiceError)
+    if os.environ.get('REPAIR_METADATA_ONLY') == '1':
+        repair_existing_manifest(store)
+        return
     spec = importlib.util.spec_from_file_location('prepare_release', Path(__file__).with_name('prepare-website-release.py'))
     github = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(github)
     path = Path(os.environ['RELEASE_MANIFEST'])
-    store = CosStore(client, CosServiceError)
     latest = lambda: github.api('releases/latest')
     sync_release(path, store, latest, github.api)
 

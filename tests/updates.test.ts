@@ -274,3 +274,20 @@ test('startup bypasses a fresh old COS cache and subsequent checks discover newl
     assert.equal(calls, 2);
   } finally { automatic.stop(); await rm(directory, { recursive: true, force: true }); }
 });
+
+
+test('the published 1.0.4 strict schema accepts the installer manifest without skill metadata', async () => {
+  const { z } = await import('zod');
+  // Preserve the published client's contract; changing today's parser cannot repair old installations.
+  const legacy = z.object({ schema_version: z.literal(1), version: z.string().regex(/^\d+\.\d+\.\d+$/),
+    published_at: z.string().datetime(), downloads: z.array(z.object({ architecture: z.enum(['x64', 'arm64']),
+      url: z.string().url(), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict()).min(1).max(2) }).strict();
+  assert.equal(legacy.safeParse(manifest).success, true);
+  assert.equal(legacy.safeParse({ ...manifest, skill: {} }).success, false);
+  const directory = await temporaryDirectory();
+  try {
+    const result = await checkDualSource('0.1.0', directory, { force: true, fetcher: fetcher(manifest) });
+    assert.equal(result.source, 'cos');
+    assert.equal(result.update_available, true);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

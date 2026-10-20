@@ -9,6 +9,11 @@ on:
         description: Stable release tag to sync; leave empty for latest
         required: false
         type: string
+      repair_metadata:
+        description: Repair existing installer metadata for older clients without uploading installers
+        required: false
+        default: false
+        type: boolean
   workflow_call:
     inputs:
       release_tag:
@@ -51,6 +56,7 @@ jobs:
           fi
 
       - name: Download and verify both official installers
+        if: inputs.repair_metadata != true
         id: prepare
         env:
           GH_TOKEN: ${{ github.token }}
@@ -58,11 +64,11 @@ jobs:
         run: python3 .github/scripts/prepare-website-release.py
 
       - name: Install Tencent COS SDK
-        if: steps.prepare.outputs.ready == 'true'
+        if: inputs.repair_metadata == true || steps.prepare.outputs.ready == 'true'
         run: python3 -m pip install --disable-pip-version-check cos-python-sdk-v5==1.9.44
 
       - name: Check publishing invariants and SDK compatibility without cloud access
-        if: steps.prepare.outputs.ready == 'true'
+        if: inputs.repair_metadata == true || steps.prepare.outputs.ready == 'true'
         run: |
           python3 .github/scripts/test-sync-cos-release.py -v
           python3 .github/scripts/test-website-skill.py -v
@@ -74,4 +80,12 @@ jobs:
           COS_SECRET_ID: ${{ secrets.COS_SECRET_ID }}
           COS_SECRET_KEY: ${{ secrets.COS_SECRET_KEY }}
           RELEASE_MANIFEST: ${{ steps.prepare.outputs.manifest }}
+        run: python3 .github/scripts/sync-cos-release.py
+
+      - name: Repair existing COS metadata for legacy clients
+        if: inputs.repair_metadata == true
+        env:
+          COS_SECRET_ID: ${{ secrets.COS_SECRET_ID }}
+          COS_SECRET_KEY: ${{ secrets.COS_SECRET_KEY }}
+          REPAIR_METADATA_ONLY: '1'
         run: python3 .github/scripts/sync-cos-release.py

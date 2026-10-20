@@ -1,4 +1,4 @@
-name: Sync website downloads
+name: Sync website skill
 
 on:
   release:
@@ -38,24 +38,23 @@ jobs:
           persist-credentials: false
           sparse-checkout: .github/scripts
 
-      - name: Download and verify the official release
+      - name: Select the latest stable skill release
         id: prepare
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
+          SKILL_ONLY: '1'
         run: python3 .github/scripts/prepare-website-release.py
 
-      - name: Check resumable upload invariants without network access
+      - name: Check skill publication invariants without network access
         run: |
-          python3 .github/scripts/test-website-upload.py -v
           python3 .github/scripts/test-website-skill.py -v
+          python3 .github/scripts/test-prepare-skill.py -v
 
-      - name: Upload to the restricted website receiver
+      - name: Upload skill to the restricted website receiver
         if: steps.prepare.outputs.ready == 'true'
         env:
           SSH_PRIVATE_KEY: ${{ secrets.SAPLINK_WEBSITE_SYNC_KEY }}
-          METADATA: ${{ steps.prepare.outputs.metadata }}
-          MANIFEST: ${{ steps.prepare.outputs.manifest }}
           RELEASE_VERSION: ${{ steps.prepare.outputs.version }}
         shell: bash
         run: |
@@ -69,26 +68,15 @@ jobs:
           unset SSH_PRIVATE_KEY
           printf '%s\n' '118.89.185.57 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINE72nJcd/l97GmHpxJ1UXLwLjR6J4ZMl/3+0IO/RiCl' > "$hosts"
           export SYNC_SSH_KEY="$key" SYNC_SSH_HOSTS="$hosts"
-          python3 .github/scripts/upload-website-release.py
           python3 .github/scripts/sync-website-skill.py
 
-      - name: Verify public download endpoints
+      - name: Verify public skill endpoint
         if: steps.prepare.outputs.ready == 'true'
         env:
           EXPECTED_VERSION: ${{ steps.prepare.outputs.version }}
         run: |
           python3 - <<'PY'
           import hashlib, json, os, urllib.request
-          url = 'http://118.89.185.57/downloads/latest/'
-          with urllib.request.urlopen(url + 'releases.json', timeout=30) as response:
-              manifest = json.load(response)
-          if manifest['version'] != os.environ['EXPECTED_VERSION']:
-              raise SystemExit('Public version verification failed')
-          for arch, asset in manifest['platforms'].items():
-              request = urllib.request.Request(url + f'SapLink-win-{arch}-setup.exe', method='HEAD')
-              with urllib.request.urlopen(request, timeout=30) as response:
-                  if int(response.headers['Content-Length']) != asset['size']:
-                      raise SystemExit('Public installer size verification failed')
           skills = 'http://118.89.185.57/downloads/skills/latest/'
           with urllib.request.urlopen(skills + 'skill.json', timeout=30) as response:
               skill = json.load(response)
@@ -98,5 +86,5 @@ jobs:
               content = response.read(skill['size'] + 1)
           if len(content) != skill['size'] or hashlib.sha256(content).hexdigest() != skill['sha256']:
               raise SystemExit('Public skill ZIP verification failed')
-          print('Website installers and skill synchronization verified: v' + manifest['version'])
+          print('Website skill synchronization verified: v' + skill['version'])
           PY

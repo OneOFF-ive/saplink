@@ -23,8 +23,8 @@ class Store:
     def exists(self, key):
         return key in self.objects
 
-    def read_manifest(self):
-        return json.loads(self.objects[sync.LATEST_KEY]) if sync.LATEST_KEY in self.objects else None
+    def read_manifest(self, key=sync.LATEST_KEY):
+        return json.loads(self.objects[key]) if key in self.objects else None
 
     def put_file(self, key, path):
         self.put_bytes(key, path.read_bytes(), immutable=True)
@@ -78,8 +78,9 @@ class SyncTests(unittest.TestCase):
         manifest = self.store.read_manifest()
         self.assertEqual(manifest['published_at'], self.release['published_at'])
         self.assertEqual({item['architecture'] for item in manifest['downloads']}, {'x64', 'arm64'})
-        self.assertEqual(len(self.store.writes), 7)
-        skill = manifest['skill']
+        self.assertEqual(len(self.store.writes), 8)
+        self.assertEqual(set(manifest), {'schema_version', 'version', 'published_at', 'downloads'})
+        skill = self.store.read_manifest(sync.SKILL_LATEST_KEY)['skill']
         self.store.verify(skill['url'].removeprefix(sync.ORIGIN + '/'), skill['size'], skill['sha256'])
         self.assertEqual(skill['commit'], 'a' * 40)
 
@@ -94,17 +95,59 @@ class SyncTests(unittest.TestCase):
             self.run_sync(verify=verify)
         self.assertEqual(self.store.read_manifest(), previous)
         self.assertTrue(self.run_sync())
-        self.assertIn('skill', self.store.read_manifest())
+        self.assertNotIn('skill', self.store.read_manifest())
+        self.assertIn('skill', self.store.read_manifest(sync.SKILL_LATEST_KEY))
 
     def test_existing_installer_only_manifest_can_add_skill(self):
         self.run_sync()
         manifest = self.store.read_manifest()
-        del manifest['skill']
+        del self.store.objects[sync.SKILL_LATEST_KEY]
         self.store.objects[sync.LATEST_KEY] = json.dumps(manifest).encode()
         self.store.writes.clear()
         self.assertTrue(self.run_sync())
-        self.assertEqual(self.store.writes, [sync.LATEST_KEY])
+        self.assertEqual(self.store.writes, [sync.SKILL_LATEST_KEY])
         self.assertEqual(self.store.read_manifest()['downloads'], manifest['downloads'])
+
+    def test_repairs_combined_manifest_without_changing_installers(self):
+        self.run_sync()
+        original = self.store.read_manifest()
+        combined = {**original, 'skill': self.store.read_manifest(sync.SKILL_LATEST_KEY)['skill']}
+        self.store.objects[sync.LATEST_KEY] = json.dumps(combined).encode()
+        del self.store.objects[sync.SKILL_LATEST_KEY]
+        self.store.writes.clear()
+        self.assertTrue(self.run_sync())
+        self.assertEqual(self.store.read_manifest(), original)
+        self.assertEqual(self.store.writes, [sync.SKILL_LATEST_KEY, sync.LATEST_KEY])
+        self.assertEqual(self.store.read_manifest(sync.SKILL_LATEST_KEY)['skill'], combined['skill'])
+
+    def test_metadata_only_repair_preserves_links_hashes_and_binaries(self):
+        self.run_sync()
+        original = self.store.read_manifest()
+        combined = {**original, 'skill': self.store.read_manifest(sync.SKILL_LATEST_KEY)['skill']}
+        self.store.objects[sync.LATEST_KEY] = json.dumps(combined).encode()
+        del self.store.objects[sync.SKILL_LATEST_KEY]
+        binaries = {key: data for key, data in self.store.objects.items() if key.endswith(('.exe', '.zip'))}
+        self.store.writes.clear()
+        self.assertTrue(sync.repair_existing_manifest(self.store, self.store.public))
+        self.assertEqual(self.store.read_manifest(), original)
+        self.assertEqual(self.store.read_manifest(sync.SKILL_LATEST_KEY)['skill'], combined['skill'])
+        self.assertEqual({key: self.store.objects[key] for key in binaries}, binaries)
+        self.assertTrue(self.store.writes[0].startswith('saplink/manifest-backups/'))
+        self.assertEqual(json.loads(self.store.objects[self.store.writes[0]]), combined)
+        self.store.writes.clear()
+        self.assertFalse(sync.repair_existing_manifest(self.store, self.store.public))
+        self.assertEqual(self.store.writes, [])
+
+    def test_metadata_only_repair_rejects_a_corrupt_skill_without_changing_pointers(self):
+        self.run_sync()
+        combined = {**self.store.read_manifest(), 'skill': self.store.read_manifest(sync.SKILL_LATEST_KEY)['skill']}
+        self.store.objects[sync.LATEST_KEY] = json.dumps(combined).encode()
+        self.store.objects['saplink/v1.0.1/SapLink-1.0.1-skill.zip'] = b'corrupt'
+        self.store.writes.clear()
+        with self.assertRaises(sync.SyncError):
+            sync.repair_existing_manifest(self.store, self.store.public)
+        self.assertEqual(self.store.read_manifest(), combined)
+        self.assertEqual(self.store.writes, [])
 
     def test_same_version_changed_skill_metadata_is_rejected(self):
         self.run_sync()

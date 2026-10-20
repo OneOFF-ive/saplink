@@ -55,6 +55,14 @@ def main():
     if not re.fullmatch(r'v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)', tag):
         raise ValueError('Expected a stable vMAJOR.MINOR.PATCH tag')
     version = tag[1:]
+    # Website publication now ships only the skill; installers go to COS.
+    if os.environ.get('SKILL_ONLY') == '1':
+        release = api('releases/tags/' + tag)
+        if release.get('draft') or release.get('prerelease') or not release.get('published_at'):
+            raise ValueError('The release is not a published stable version')
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+            output.write(f'ready=true\nversion={version}\n')
+        return
     manifest = None
     selected = {}
     for attempt in range(18):

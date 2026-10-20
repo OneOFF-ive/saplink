@@ -25,15 +25,14 @@
 
 | 优先级 | 发布入口与元数据 | 取得安装包的方法 |
 | --- | --- | --- |
-| 1 官网 | [官网下载页](https://saplink.cloud/download.html)，[官网版本清单](https://saplink.cloud/downloads/latest/releases.json) | 清单的 `version`、`platforms.x64/arm64` 包含文件名、相对 URL、大小和 SHA-256；相对路径以官网根地址解析，不能以 `downloads/latest/` 目录拼接 |
-| 2 COS | [COS 版本清单](https://saplink-1302377695.cos.ap-shanghai.myqcloud.com/saplink/latest.json) | `schema_version=1`，从 `downloads` 取匹配 `architecture` 的 `url`、`sha256`，并读取 `version` |
-| 3 GitHub | [正式发布页](https://github.com/OneOFF-ive/saplink/releases)，API `https://api.github.com/repos/OneOFF-ive/saplink/releases/latest` | 从非 draft、非 prerelease 的正式 Release 选择标准附件，并核对 API `digest` 中的 SHA-256；不安装源码归档 |
+| 1 COS | [COS 版本清单](https://saplink-1302377695.cos.ap-shanghai.myqcloud.com/saplink/latest.json) | `schema_version=1`，从 `downloads` 取匹配 `architecture` 的 `url`、`sha256`，并读取 `version` |
+| 2 GitHub | [正式发布页](https://github.com/OneOFF-ive/saplink/releases)，API `https://api.github.com/repos/OneOFF-ive/saplink/releases/latest` | 从非 draft、非 prerelease 的正式 Release 选择标准附件，并核对 API `digest` 中的 SHA-256；不安装源码归档 |
 
 安装版本必须为正式三段版本，对应文件名为 `SapLink-<version>-win-<architecture>-setup.exe`。固定首次确认的目标版本和架构，回退来源时不得混用其他版本的哈希或静默降级；如后备源仅有其他正式版本，说明差异并让用户选择。不要将不同来源的清单当成同一种 schema。
 
-官网或 COS 以对应 HTTPS 发布清单中的 SHA-256 为基准；能读取 GitHub 同版本的官方 digest 时也应交叉核对。若可信元数据之间相互矛盾，停止并说明，不能任选一个来执行。不猜安装包 URL，不使用不明镜像。官网 HTTPS 不可用时按顺序回退，不改用明文 IP 地址或忽略 TLS 证书校验。
+COS 以对应 HTTPS 发布清单中的 SHA-256 为基准；能读取 GitHub 同版本的官方 digest 时也应交叉核对。若可信元数据之间相互矛盾，停止并说明，不能任选一个来执行。不猜安装包 URL，不使用不明镜像。官网不再托管安装包，不请求官网版本清单或历史安装包地址。COS 不可用时回退 GitHub，不改用明文 IP 地址或忽略 TLS 证书校验。
 
-将安装包保存到当前用户私有的临时目录；下载不携带 SAP 密码、MCP 令牌或管理会话凭据。只允许已核实的官网/COS 地址及 GitHub 官方附件重定向；不把 GitHub API 认证头转发到附件 CDN。下载流最大 256 MiB，有超时；校验非空、元数据声明的大小（如有）、Windows 可执行文件头及 `Get-FileHash -Algorithm SHA256`。可读取版本资源核对产品 SapLink 与版本。未签名不等于来源已核实，签名不能替代上述哈希校验。
+将安装包保存到当前用户私有的临时目录；下载不携带 SAP 密码、MCP 令牌或管理会话凭据。只允许已核实的 COS 地址及 GitHub 官方附件重定向；不把 GitHub API 认证头转发到附件 CDN。下载流最大 256 MiB，有超时；校验非空、元数据声明的大小（如有）、Windows 可执行文件头及 `Get-FileHash -Algorithm SHA256`。可读取版本资源核对产品 SapLink 与版本。未签名不等于来源已核实，签名不能替代上述哈希校验。
 
 哈希不符或下载未完成时，不执行该文件；报告当前源失败，按既定优先级取得同一目标版本的有效文件。所有来源均失败或校验无法完成时，停止并明确提醒用户从已知官方入口手动下载、安装，安装完成后再继续配置。
 
