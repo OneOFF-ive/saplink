@@ -182,6 +182,25 @@ test('COS is preferred, exposes verified download metadata and caches it', async
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+test('unified COS manifest accepts skill metadata without treating it as an installer', async () => {
+  const directory = await temporaryDirectory();
+  const skill = { commit: 'b'.repeat(40), filename: 'SapLink-0.2.0-skill.zip',
+    url: new URL('v0.2.0/SapLink-0.2.0-skill.zip', defaultManifestUrl).href,
+    size: 1024, sha256: 'c'.repeat(64) };
+  let calls = 0;
+  try {
+    const mock = (async (url) => {
+      calls++; assert.equal(url, defaultManifestUrl);
+      return new Response(JSON.stringify({ ...manifest, skill }));
+    }) as typeof fetch;
+    const result = await checkDualSource('0.1.0', directory, { fetcher: mock, force: true });
+    assert.equal(result.source, 'cos');
+    assert.equal(result.update_available, true);
+    assert.deepEqual(result.downloads, manifest.downloads);
+    assert.equal(calls, 1);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test('missing, offline, oversized or unsafe COS metadata falls back to GitHub', async () => {
   const directory = await temporaryDirectory();
   const invalid = [

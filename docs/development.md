@@ -158,7 +158,9 @@ node scripts/create-update-manifest.mjs --version 0.1.0 --architectures x64
 
 如果 Release 是由其他工作流用默认 `GITHUB_TOKEN` 创建，GitHub 通常不会再触发 release 工作流；发布流程应在附件上传完成后显式调用此 reusable workflow（`workflow_call` 并传递这两个 secrets），或手动 dispatch。主分支没有工作流/脚本时，仅配置 secrets 不会自动上传。
 
-本地隔离回归：`python .github/scripts/test-sync-cos-release.py -v`。只使用模拟安装包和内存 COS，不读取密钥或操作云端。
+同一 Action 将发布标签中的 `skills/saplink-manager/` 打包为 `saplink/v<version>/SapLink-<version>-skill.zip`，与两个架构安装包一同校验公开下载 SHA-256，全部成功后更新唯一的 `saplink/latest.json`。清单在安装包 downloads 之外新增 skill（源码提交、文件名、下载 URL、大小和 SHA-256），共用顶层版本，不提供独立技能版本清单。技能包禁止覆盖同版本内容，失败可重跑补齐。流程和旧客户端兼容说明见 [发布指南](releases-and-actions.md#cos-更新源)。
+
+本地隔离回归：`python .github/scripts/test-sync-cos-release.py -v` 和 `python .github/scripts/test-website-skill.py -v`。只使用模拟安装包、技能源码和内存 COS，不读取密钥或操作云端。
 
 ## 自动更新实现与验证
 

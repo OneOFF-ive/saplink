@@ -63,9 +63,11 @@ jobs:
 
       - name: Check publishing invariants and SDK compatibility without cloud access
         if: steps.prepare.outputs.ready == 'true'
-        run: python3 .github/scripts/test-sync-cos-release.py -v
+        run: |
+          python3 .github/scripts/test-sync-cos-release.py -v
+          python3 .github/scripts/test-website-skill.py -v
 
-      - name: Upload, verify public downloads, then publish latest.json
+      - name: Upload and verify installers and skill ZIP, then publish latest.json
         if: steps.prepare.outputs.ready == 'true'
         env:
           GH_TOKEN: ${{ github.token }}

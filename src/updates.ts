@@ -25,7 +25,12 @@ const downloadSchema = z.object({
 }).strict();
 const manifestSchema = z.object({
   schema_version: z.literal(1), version: z.string().regex(/^\d+\.\d+\.\d+$/),
-  published_at: z.string().datetime(), downloads: z.array(downloadSchema).min(1).max(2)
+  published_at: z.string().datetime(), downloads: z.array(downloadSchema).min(1).max(2),
+  skill: z.object({
+    commit: z.string().regex(/^[a-f0-9]{40}$/), filename: z.string().max(256),
+    url: z.string().url(), size: z.number().int().positive().max(16 * 1024 * 1024),
+    sha256: z.string().regex(/^[a-f0-9]{64}$/)
+  }).strict().optional()
 }).strict();
 const cacheSchema = z.object({
   checked_at: z.number(), manifest_url: z.string().nullable(), source: z.enum(['cos', 'github']),

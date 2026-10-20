@@ -11,6 +11,7 @@ flowchart TD
     Release --> COS[Sync COS downloads]
     Release --> Website[Sync website downloads]
     COS --> Manifest[COS 安装包与 latest.json]
+    COS --> CosSkill[同版本 skill ZIP]
     Website --> Downloads[官网下载文件与 releases.json]
     Website --> Skill[Release 标签源码的 skill ZIP 与 skill.json]
     Manifest --> Client[SapLink 检查版本与用户确认更新]
@@ -77,6 +78,13 @@ COS 工作流固定安装 cos-python-sdk-v5==1.9.44，并先运行离线同步�
 
 公开清单：[COS latest.json](https://saplink-1302377695.cos.ap-shanghai.myqcloud.com/saplink/latest.json)。应用正常时优先使用 COS，不同时查询所有源取最大版本；因此发版必须确认清单已同步。
 
+同一 COS Action 从 Release 标签源码生成与官网一致的技能 ZIP，和两个架构安装包统一放在 `saplink/v<version>/`。三个文件全部上传并通过匿名下载 SHA-256 校验后，才更新唯一版本清单 `saplink/latest.json`。
+
+- 技能文件：`saplink/v<version>/SapLink-<version>-skill.zip` 及 `.zip.sha256`。
+- 清单保留 schema_version、version、published_at、downloads，并新增 skill 对象（commit、filename、url、size、sha256），共同使用顶层 version，不提供独立技能版本清单。skill.url 是 COS 完整下载地址。
+
+清单使用 no-cache，版本文件长期缓存且禁止覆盖；同版本技能冲突报错。已有同版本安装包清单可以补入 skill，安装包链接和哈希保持不变。技能上传或校验失败时不发布新清单，重跑可复用并核验已有对象。仍使用原 secrets 和 `saplink/` 对象授权范围。客户端已兼容可选 skill 字段；此前使用严格旧结构的已安装客户端会回退到 GitHub 检查更新，需升级后才能继续读取包含 skill 的 COS 清单。
+
 ### 官网下载
 
 通过 SSH 向受限接收器提交数据。check 返回无需上传时仅同步元数据；否则使用 prepare / chunk / promote 协议，每块 2 MiB，最多重试三次，并在日志显示架构和进度。重新运行工作流会复核服务器已有块的 SHA-256，跳过一致内容；缺块或损坏内容不会被发布。单块服务端时限为 180 秒，客户端为 210 秒，准备和最终切换分别为 300 秒。SSH 强制校验固定主机公钥，不自动信任新的服务器公钥。
@@ -99,9 +107,9 @@ sudo python3 /path/to/install-website-upload.py
 - 固定最新版下载：`/downloads/skills/latest/saplink-manager.zip`。
 - 版本、源码提交、文件大小和 SHA-256：`/downloads/skills/latest/skill.json`。
 
-服务器在核验成功后原子替换 skill 的 latest 指针，同版本内容冲突会报错；不改动安装包的 releases.json，也不向 COS 上传 skill。官网页面的下载按钮可使用上述固定下载地址。最终 Actions 会回读公开 ZIP 并校验 SHA-256。skill 与安装包分别发布；skill 失败时 Actions 标红，但此前成功的安装包同步不会回滚，重跑可以补齐 skill。旧版 skill 保存在 skills 子目录，不参与安装包旧版本清理。
+服务器在核验成功后原子替换 skill 的 latest 指针，同版本内容冲突会报错；不改动安装包的 releases.json。官网页面的下载按钮可使用上述固定下载地址。最终 Actions 会回读公开 ZIP 并校验 SHA-256。skill 与安装包分别发布；skill 失败时 Actions 标红，但此前成功的安装包同步不会回滚，重跑可以补齐 skill。旧版 skill 保存在 skills 子目录，不参与安装包旧版本清理。COS Action 独立发布相同标签源码生成的技能包，见上文。
 
-首次启用此功能必须先重新部署上述接收器扩展，再推送工作流；COS 工作流及其安装包、latest.json 同步保持不变。
+首次启用官网技能同步必须先重新部署上述接收器扩展，再推送工作流。COS 技能同步不需要更改官网接收器。
 
 工作流最终核对 `http://118.89.185.57/downloads/latest/releases.json` 中的版本，以及各 `SapLink-win-<arch>-setup.exe` 公开入口的 Content-Length。该最终检查不是对官网公开二进制再次做完整 SHA-256 下载验证；准备阶段已校验 GitHub 原始附件。
 

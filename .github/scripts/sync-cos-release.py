@@ -75,7 +75,8 @@ def may_publish(existing, candidate):
         return False
     if current == proposed:
         # Never silently replace an already published version with different binaries.
-        if existing.get('downloads') != candidate['downloads']:
+        if (existing.get('downloads') != candidate['downloads']
+                or ('skill' in existing and existing['skill'] != candidate.get('skill'))):
             raise SyncError('Same-version manifest conflicts with published downloads; publish a new version')
     return True
 
@@ -135,10 +136,15 @@ def verify_public(key, expected_size, expected_hash):
         raise SyncError('Public COS download failed SHA-256 verification')
 
 
-def sync_release(path, store, latest_release, verify=verify_public, read_public=public_bytes):
+def sync_release(path, store, latest_release, api, verify=verify_public, read_public=public_bytes):
     print('Checking latest GitHub release and local installer checksums...', flush=True)
     release = latest_release()
     candidate, files = prepare_manifest(path, release)
+    from website_skill import build
+    content, metadata = build(api, candidate['version'])
+    skill_key = f'saplink/v{candidate["version"]}/{metadata["filename"]}'
+    candidate['skill'] = {key: value for key, value in metadata.items() if key != 'version'}
+    candidate['skill']['url'] = f'{ORIGIN}/{skill_key}'
     print('Reading existing COS latest.json...', flush=True)
     if not may_publish(store.read_manifest(), candidate):
         print('Skipping: COS already advertises a newer version.')
@@ -158,6 +164,15 @@ def sync_release(path, store, latest_release, verify=verify_public, read_public=
         if read_public(checksum_key, 1024).decode('utf-8-sig').strip() != checksum.decode().strip():
             raise SyncError('Public COS checksum sidecar is inconsistent')
         print(f'Verified public COS download: {local.name}', flush=True)
+    print(f'Uploading and verifying skill ZIP: {skill_key}', flush=True)
+    if not store.exists(skill_key):
+        store.put_bytes(skill_key, content, immutable=True)
+    verify(skill_key, metadata['size'], metadata['sha256'])
+    checksum = f'{metadata["sha256"]}  {metadata["filename"]}\n'.encode()
+    if not store.exists(skill_key + '.sha256'):
+        store.put_bytes(skill_key + '.sha256', checksum, immutable=True)
+    if read_public(skill_key + '.sha256', 1024).decode('utf-8-sig').strip() != checksum.decode().strip():
+        raise SyncError('Public COS skill checksum is inconsistent')
     # Release events may queue while a newer release is being published.
     latest = latest_release()
     if latest.get('id') != release['id'] or latest.get('tag_name') != release['tag_name']:
@@ -167,11 +182,11 @@ def sync_release(path, store, latest_release, verify=verify_public, read_public=
     if not may_publish(existing, candidate):
         print('Skipping latest.json: COS already advertises a newer version.')
         return False
-    if existing is None or existing['version'] != candidate['version']:
-        print('Both installers verified; publishing latest.json...', flush=True)
-        encoded = (json.dumps(candidate, indent=2) + '\n').encode()
+    expected = {**existing, 'skill': candidate['skill']} if existing and existing['version'] == candidate['version'] else candidate
+    if existing != expected:
+        print('Both installers and skill ZIP verified; publishing latest.json...', flush=True)
+        encoded = (json.dumps(expected, indent=2) + '\n').encode()
         store.put_bytes(LATEST_KEY, encoded, immutable=False)
-    expected = candidate if existing is None or existing['version'] != candidate['version'] else existing
     # Compare JSON semantically: manually uploaded metadata may use different whitespace.
     if store.read_manifest() != expected:
         raise SyncError('Published COS manifest verification failed')
@@ -229,7 +244,7 @@ class CosStore:
         # SDK 1.9.44 passes custom HTTP headers through Metadata, without adding a prefix.
         options = {'Metadata': {'x-cos-forbid-overwrite': 'true'}} if immutable else {}
         self.client.put_object(Bucket=BUCKET, Key=key, Body=data, EnableMD5=True,
-                               ContentType='text/plain' if immutable else 'application/json',
+                               ContentType='application/zip' if key.endswith('.zip') else ('text/plain' if immutable else 'application/json'),
                                CacheControl='public, max-age=31536000, immutable' if immutable else 'no-cache', **options)
 
 
@@ -259,7 +274,10 @@ def main():
     spec = importlib.util.spec_from_file_location('prepare_release', Path(__file__).with_name('prepare-website-release.py'))
     github = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(github)
-    sync_release(Path(os.environ['RELEASE_MANIFEST']), CosStore(client, CosServiceError), lambda: github.api('releases/latest'))
+    path = Path(os.environ['RELEASE_MANIFEST'])
+    store = CosStore(client, CosServiceError)
+    latest = lambda: github.api('releases/latest')
+    sync_release(path, store, latest, github.api)
 
 
 if __name__ == '__main__':

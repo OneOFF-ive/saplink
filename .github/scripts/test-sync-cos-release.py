@@ -63,10 +63,14 @@ class SyncTests(unittest.TestCase):
         self.path = root / 'releases.json'
         self.path.write_text(json.dumps({'version': '1.0.1', 'release_id': 101, 'platforms': platforms}), encoding='utf-8')
         self.store = Store()
+        self.skill_content = b'reproducible skill ZIP fixture'
+        self.skill_metadata = {'version': '1.0.1', 'commit': 'a' * 40, 'filename': 'SapLink-1.0.1-skill.zip',
+                               'url': '/unused', 'size': len(self.skill_content),
+                               'sha256': hashlib.sha256(self.skill_content).hexdigest()}
 
     def run_sync(self, latest=None, verify=None):
-        with contextlib.redirect_stdout(io.StringIO()):
-            return sync.sync_release(self.path, self.store, latest or (lambda: self.release), verify or self.store.verify, self.store.public)
+        with patch('website_skill.build', return_value=(self.skill_content, self.skill_metadata)), contextlib.redirect_stdout(io.StringIO()):
+            return sync.sync_release(self.path, self.store, latest or (lambda: self.release), lambda endpoint: None, verify or self.store.verify, self.store.public)
 
     def test_uploads_both_architectures_and_commits_pointer_last(self):
         self.assertTrue(self.run_sync())
@@ -74,7 +78,49 @@ class SyncTests(unittest.TestCase):
         manifest = self.store.read_manifest()
         self.assertEqual(manifest['published_at'], self.release['published_at'])
         self.assertEqual({item['architecture'] for item in manifest['downloads']}, {'x64', 'arm64'})
-        self.assertEqual(len(self.store.writes), 5)
+        self.assertEqual(len(self.store.writes), 7)
+        skill = manifest['skill']
+        self.store.verify(skill['url'].removeprefix(sync.ORIGIN + '/'), skill['size'], skill['sha256'])
+        self.assertEqual(skill['commit'], 'a' * 40)
+
+    def test_skill_failure_keeps_unified_pointer_and_retry_recovers(self):
+        previous = {'schema_version': 1, 'version': '1.0.0', 'downloads': []}
+        self.store.objects[sync.LATEST_KEY] = json.dumps(previous).encode()
+        def verify(key, size, digest):
+            if key.endswith('.zip'):
+                raise ValueError('skill download failed')
+            self.store.verify(key, size, digest)
+        with self.assertRaises(ValueError):
+            self.run_sync(verify=verify)
+        self.assertEqual(self.store.read_manifest(), previous)
+        self.assertTrue(self.run_sync())
+        self.assertIn('skill', self.store.read_manifest())
+
+    def test_existing_installer_only_manifest_can_add_skill(self):
+        self.run_sync()
+        manifest = self.store.read_manifest()
+        del manifest['skill']
+        self.store.objects[sync.LATEST_KEY] = json.dumps(manifest).encode()
+        self.store.writes.clear()
+        self.assertTrue(self.run_sync())
+        self.assertEqual(self.store.writes, [sync.LATEST_KEY])
+        self.assertEqual(self.store.read_manifest()['downloads'], manifest['downloads'])
+
+    def test_same_version_changed_skill_metadata_is_rejected(self):
+        self.run_sync()
+        self.skill_metadata['commit'] = 'b' * 40
+        self.store.writes.clear()
+        with self.assertRaises(sync.SyncError):
+            self.run_sync()
+        self.assertEqual(self.store.writes, [])
+
+    def test_corrupt_existing_skill_is_not_overwritten(self):
+        key = 'saplink/v1.0.1/SapLink-1.0.1-skill.zip'
+        self.store.objects[key] = b'corrupt'
+        with self.assertRaises(ValueError):
+            self.run_sync()
+        self.assertEqual(self.store.objects[key], b'corrupt')
+        self.assertNotIn(sync.LATEST_KEY, self.store.objects)
 
     def test_retry_reuses_existing_files_and_preserves_manifest(self):
         self.run_sync()
@@ -176,6 +222,9 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(calls[-1]['headers']['x-cos-forbid-overwrite'], 'true')
         self.assertIn('Content-MD5', calls[-1]['headers'])
         store.put_bytes('saplink/v1.0.1/test.sha256', b'test', immutable=True)
+        self.assertEqual(calls[-1]['headers']['x-cos-forbid-overwrite'], 'true')
+        store.put_bytes('saplink/v1.0.1/test.zip', b'zip', immutable=True)
+        self.assertEqual(calls[-1]['headers']['Content-Type'], 'application/zip')
         self.assertEqual(calls[-1]['headers']['x-cos-forbid-overwrite'], 'true')
         store.put_bytes(sync.LATEST_KEY, b'{}', immutable=False)
         self.assertNotIn('x-cos-forbid-overwrite', calls[-1]['headers'])
