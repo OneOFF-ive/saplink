@@ -2,7 +2,6 @@
 import base64
 import hashlib
 import io
-import json
 import re
 from pathlib import PurePosixPath
 import zipfile
@@ -54,52 +53,6 @@ def build(api, version):
         raise ValueError('Skill ZIP is too large')
     name = f'SapLink-{version}-skill.zip'
     metadata = {'version': version, 'commit': commit['sha'], 'filename': name,
-                'url': f'/downloads/skills/v{version}/{name}', 'size': len(content),
+                'size': len(content),
                 'sha256': hashlib.sha256(content).hexdigest()}
     return content, metadata
-
-
-def receive(stream, downloads, version, api, get_latest):
-    # The caller holds the same lock used by installer publication.
-    import os
-    from pathlib import Path
-    import tempfile
-    latest = get_latest()
-    if (latest.get('tag_name') != 'v' + version or latest.get('draft')
-            or latest.get('prerelease') or not latest.get('published_at')):
-        raise ValueError('Only the latest stable release skill may be published')
-    expected, metadata = build(api, version)
-    content = stream.read(MAX_ZIP + 1)
-    if content != expected:
-        raise ValueError('Skill ZIP differs from official release source')
-    root = Path(downloads) / 'skills'
-    if root.is_symlink():
-        raise ValueError('Unexpected skill download directory')
-    root.mkdir(mode=0o755, exist_ok=True)
-    target = root / ('v' + version)
-    if target.is_symlink():
-        raise ValueError('Unexpected skill release directory')
-    with tempfile.TemporaryDirectory(prefix='.skill-', dir=root) as temporary:
-        work = Path(temporary)
-        if target.exists():
-            if (target / metadata['filename']).is_symlink() or (target / metadata['filename']).read_bytes() != expected:
-                raise ValueError('Existing skill version conflicts with official source')
-            if json.loads((target / 'skill.json').read_text()) != metadata:
-                raise ValueError('Existing skill metadata conflicts with official source')
-        else:
-            work.chmod(0o755)
-            (work / metadata['filename']).write_bytes(content)
-            (work / metadata['filename']).chmod(0o644)
-            (work / 'skill.json').write_text(json.dumps(metadata, indent=2) + '\n')
-            (work / 'skill.json').chmod(0o644)
-        if get_latest().get('id') != latest['id']:
-            raise ValueError('A newer release was published during skill transfer')
-        if not target.exists():
-            (work / 'saplink-manager.zip').symlink_to(metadata['filename'])
-            os.rename(work, target)
-        # Use a separate pointer so installer pruning and metadata are unaffected.
-        with tempfile.TemporaryDirectory(prefix='.skill-pointer-', dir=root) as pointer:
-            link = Path(pointer) / 'latest'
-            link.symlink_to('v' + version)
-            os.replace(link, root / 'latest')
-    return {'status': 'synced', **metadata}

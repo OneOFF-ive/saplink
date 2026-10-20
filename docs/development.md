@@ -2,7 +2,7 @@
 
 本指南面向修改源码、运行测试和制作安装包的开发者。普通用户请阅读 [Windows 安装指南](windows-installer.md)；已安装应用的日常操作统一使用 [运维手册](operations.md) 中的 `saplink` 命令。
 
-GitHub Release 附件要求、两条同步 Actions 的触发条件、secrets 和恢复步骤集中见 [发布与 GitHub Actions](releases-and-actions.md)。当前 Actions 只同步已构建的正式版附件，不承担源码构建或 push/PR 自动测试。
+GitHub Release 附件要求、COS 同步 Action 的触发条件、secrets 和恢复步骤集中见 [发布与 GitHub Actions](releases-and-actions.md)。当前 Actions 只同步已构建的正式版附件，不承担源码构建或 push/PR 自动测试。
 
 ## 从源码运行
 
@@ -160,7 +160,7 @@ node scripts/create-update-manifest.mjs --version 0.1.0 --architectures x64
 
 同一 Action 将发布标签中的 `skills/saplink-manager/` 打包为 `saplink/v<version>/SapLink-<version>-skill.zip`。安装包与技能文件全部校验通过后，先发布独立的 `saplink/skill-latest.json`（schema_version、version、published_at、skill），再提交 `saplink/latest.json`。安装包清单严格只包含 schema_version、version、published_at、downloads，兼容已发布的 1.0.4 等严格校验客户端；禁止向其中追加 skill 字段。技能清单保留 commit、filename、url、size、sha256，官网单独读取，异常不影响安装包下载。修复误加 skill 的线上清单时，在 Sync COS downloads 手动运行中勾选 repair_metadata；该模式校验并备份现有清单，只迁移元数据，不下载、修改或重传安装包。
 
-本地隔离回归：`python .github/scripts/test-sync-cos-release.py -v` 和 `python .github/scripts/test-website-skill.py -v`。只使用模拟安装包、技能源码和内存 COS，不读取密钥或操作云端。
+本地隔离回归：`python .github/scripts/test-sync-cos-release.py -v` 和 `python .github/scripts/test-skill-archive.py -v`。只使用模拟安装包、技能源码和内存 COS，不读取密钥或操作云端。
 
 ## 自动更新实现与验证
 

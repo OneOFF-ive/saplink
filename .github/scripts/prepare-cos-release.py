@@ -1,17 +1,15 @@
 import hashlib
-import io
 import json
 import os
 from pathlib import Path
 import re
-import tarfile
 import time
 import urllib.parse
 import urllib.request
 
 REPO = 'OneOFF-ive/saplink'
 TOKEN = os.environ.get('GH_TOKEN', '')
-ROOT = Path(os.environ['RUNNER_TEMP']) / 'saplink-website-sync'
+ROOT = Path(os.environ['RUNNER_TEMP']) / 'saplink-cos-release'
 ROOT.mkdir(exist_ok=True)
 
 
@@ -31,7 +29,7 @@ opener = urllib.request.build_opener(SafeRedirect())
 
 
 def request(url, binary=False):
-    headers = {'User-Agent': 'SapLink-Website-Sync',
+    headers = {'User-Agent': 'SapLink-COS-Release',
                'Accept': 'application/octet-stream' if binary else 'application/vnd.github+json'}
     if TOKEN:
         headers['Authorization'] = 'Bearer ' + TOKEN
@@ -55,14 +53,6 @@ def main():
     if not re.fullmatch(r'v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)', tag):
         raise ValueError('Expected a stable vMAJOR.MINOR.PATCH tag')
     version = tag[1:]
-    # Website publication now ships only the skill; installers go to COS.
-    if os.environ.get('SKILL_ONLY') == '1':
-        release = api('releases/tags/' + tag)
-        if release.get('draft') or release.get('prerelease') or not release.get('published_at'):
-            raise ValueError('The release is not a published stable version')
-        with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-            output.write(f'ready=true\nversion={version}\n')
-        return
     manifest = None
     selected = {}
     for attempt in range(18):
@@ -86,7 +76,7 @@ def main():
             selected[arch] = asset
             platforms[arch] = {
                 'name': 'Windows ' + ('ARM64' if arch == 'arm64' else 'x64'),
-                'filename': name, 'url': f'downloads/{tag}/{name}',
+                'filename': name,
                 'size': size, 'sha256': digest[7:]
             }
         if len(platforms) == 2:
@@ -114,23 +104,10 @@ def main():
             raise ValueError('Official installer checksum verification failed')
         print('Verified ' + target.name, flush=True)
 
-    payload = ROOT / 'installers.tar'
-    encoded = (json.dumps(manifest, indent=2) + '\n').encode()
     manifest_path = ROOT / 'releases.json'
-    manifest_path.write_bytes(encoded)
-    metadata_payload = ROOT / 'metadata.tar'
-    with tarfile.open(metadata_payload, 'w') as archive:
-        entry = tarfile.TarInfo('releases.json')
-        entry.size = len(encoded)
-        archive.addfile(entry, io.BytesIO(encoded))
-    with tarfile.open(payload, 'w') as archive:
-        entry = tarfile.TarInfo('releases.json')
-        entry.size = len(encoded)
-        archive.addfile(entry, io.BytesIO(encoded))
-        for asset in manifest['platforms'].values():
-            archive.add(ROOT / asset['filename'], arcname=asset['filename'], recursive=False)
+    manifest_path.write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
     with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-        output.write(f'ready=true\nversion={version}\npayload={payload}\nmetadata={metadata_payload}\nmanifest={manifest_path}\n')
+        output.write(f'ready=true\nversion={version}\nmanifest={manifest_path}\n')
 
 
 if __name__ == '__main__':

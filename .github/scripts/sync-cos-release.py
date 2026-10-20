@@ -208,7 +208,7 @@ def sync_release(path, store, latest_release, api, verify=verify_public, read_pu
     print('Checking latest GitHub release and local installer checksums...', flush=True)
     release = latest_release()
     candidate, files = prepare_manifest(path, release)
-    from website_skill import build
+    from skill_archive import build
     content, metadata = build(api, candidate['version'])
     skill_key = f'saplink/v{candidate["version"]}/{metadata["filename"]}'
     skill = {key: value for key, value in metadata.items() if key != 'version'}
@@ -350,7 +350,7 @@ def main():
     if os.environ.get('REPAIR_METADATA_ONLY') == '1':
         repair_existing_manifest(store)
         return
-    spec = importlib.util.spec_from_file_location('prepare_release', Path(__file__).with_name('prepare-website-release.py'))
+    spec = importlib.util.spec_from_file_location('prepare_release', Path(__file__).with_name('prepare-cos-release.py'))
     github = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(github)
     path = Path(os.environ['RELEASE_MANIFEST'])

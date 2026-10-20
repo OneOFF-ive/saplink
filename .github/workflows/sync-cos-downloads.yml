@@ -61,7 +61,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
-        run: python3 .github/scripts/prepare-website-release.py
+        run: python3 .github/scripts/prepare-cos-release.py
 
       - name: Install Tencent COS SDK
         if: inputs.repair_metadata == true || steps.prepare.outputs.ready == 'true'
@@ -71,7 +71,8 @@ jobs:
         if: inputs.repair_metadata == true || steps.prepare.outputs.ready == 'true'
         run: |
           python3 .github/scripts/test-sync-cos-release.py -v
-          python3 .github/scripts/test-website-skill.py -v
+          python3 .github/scripts/test-skill-archive.py -v
+          python3 .github/scripts/test-prepare-cos-release.py -v
 
       - name: Upload and verify installers and skill ZIP, then publish latest.json
         if: steps.prepare.outputs.ready == 'true'

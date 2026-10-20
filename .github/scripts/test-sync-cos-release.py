@@ -69,7 +69,7 @@ class SyncTests(unittest.TestCase):
                                'sha256': hashlib.sha256(self.skill_content).hexdigest()}
 
     def run_sync(self, latest=None, verify=None):
-        with patch('website_skill.build', return_value=(self.skill_content, self.skill_metadata)), contextlib.redirect_stdout(io.StringIO()):
+        with patch('skill_archive.build', return_value=(self.skill_content, self.skill_metadata)), contextlib.redirect_stdout(io.StringIO()):
             return sync.sync_release(self.path, self.store, latest or (lambda: self.release), lambda endpoint: None, verify or self.store.verify, self.store.public)
 
     def test_uploads_both_architectures_and_commits_pointer_last(self):

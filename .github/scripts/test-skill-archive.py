@@ -1,15 +1,12 @@
-"""Offline source integrity, reproducibility and publication regression checks."""
+"""Offline source integrity and reproducibility regression checks."""
 import base64
 import copy
 import hashlib
 import io
-import json
-from pathlib import Path
-import tempfile
 import unittest
 import zipfile
 
-from website_skill import build, receive
+from skill_archive import build
 
 
 class SkillTests(unittest.TestCase):
@@ -24,13 +21,6 @@ class SkillTests(unittest.TestCase):
             self.entries.append({'path': 'skills/saplink-manager/' + name, 'type': 'blob',
                                  'mode': '100644', 'size': len(data), 'sha': sha})
             self.blobs[sha] = {'encoding': 'base64', 'content': base64.b64encode(data).decode()}
-        self.latest = {'id': 10, 'tag_name': 'v1.0.1', 'published_at': '2026-10-19T00:00:00Z'}
-        test_root = Path(__file__).resolve().parents[2] / '.saplink/tests'
-        test_root.mkdir(parents=True, exist_ok=True)
-        self.temp = tempfile.TemporaryDirectory(dir=test_root)
-        self.addCleanup(self.temp.cleanup)
-        self.downloads = Path(self.temp.name)
-
     def api(self, path):
         if path == 'commits/v1.0.1':
             return {'sha': 'a' * 40, 'commit': {'tree': {'sha': 'b' * 40}}}
@@ -75,36 +65,6 @@ class SkillTests(unittest.TestCase):
                         build(self.api, '1.0.1')
                 finally:
                     self.entries = saved
-
-    def test_tampered_upload_preserves_existing_downloads(self):
-        sentinel = self.downloads / 'installer.exe'
-        sentinel.write_bytes(b'unchanged')
-        with self.assertRaisesRegex(ValueError, 'differs'):
-            receive(io.BytesIO(b'bad zip'), self.downloads, '1.0.1', self.api, lambda: self.latest)
-        self.assertFalse((self.downloads / 'skills').exists())
-        self.assertEqual(sentinel.read_bytes(), b'unchanged')
-
-    @unittest.skipIf(__import__('os').name == 'nt', 'Publication uses Linux symlinks')
-    def test_publishes_zip_metadata_alias_and_idempotent_retry(self):
-        content, metadata = build(self.api, '1.0.1')
-        for _ in range(2):
-            receive(io.BytesIO(content), self.downloads, '1.0.1', self.api, lambda: self.latest)
-        latest = self.downloads / 'skills/latest'
-        self.assertEqual((latest / 'saplink-manager.zip').read_bytes(), content)
-        self.assertEqual(json.loads((latest / 'skill.json').read_text()), metadata)
-
-    def test_old_release_and_pre_release_cannot_publish(self):
-        content, _ = build(self.api, '1.0.1')
-        for latest in ({**self.latest, 'tag_name': 'v1.0.2'}, {**self.latest, 'prerelease': True}):
-            with self.assertRaises(ValueError):
-                receive(io.BytesIO(content), self.downloads, '1.0.1', self.api, lambda: latest)
-
-    def test_new_release_during_transfer_does_not_switch_pointer(self):
-        content, _ = build(self.api, '1.0.1')
-        releases = iter([self.latest, {**self.latest, 'id': 11}])
-        with self.assertRaisesRegex(ValueError, 'newer release'):
-            receive(io.BytesIO(content), self.downloads, '1.0.1', self.api, lambda: next(releases))
-        self.assertFalse((self.downloads / 'skills/latest').exists())
 
 
 if __name__ == '__main__':
