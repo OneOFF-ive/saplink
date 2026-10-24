@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { tableQuery, readOnlySql, queryCapabilities } from '../src/data-query.js';
-import { AdtBackend } from '../src/adt.js';
+import { AdtBackend, type AdtBackendOptions } from '../src/adt.js';
 import { connectionSchema } from '../src/config.js';
 import { safeError } from '../src/errors.js';
 
@@ -49,28 +49,32 @@ test('discovery reports independent endpoint advertisement without assuming auth
   ] }] }]).sql_query.advertised, true);
 });
 
-async function fixture(status = 200, body?: string) {
+async function fixture(status: number | ((calls: number, logins: number) => number) = 200, body?: string, loginStatus = 200, options: AdtBackendOptions = {}, logoutStatus = 200) {
   const calls: { url: URL; method?: string; body: string; session?: string; cookie?: string }[] = [];
   const logins: URL[] = [];
+  const logouts: URL[] = [];
   const server = createServer(async (req, res) => {
     let text = ''; for await (const chunk of req) text += chunk;
     const url = new URL(req.url!, 'http://local');
     res.setHeader('Content-Type', 'application/xml');
     if (url.pathname.endsWith('/compatibility/graph')) {
-      logins.push(url); res.setHeader('x-csrf-token', 'test');
-      res.setHeader('set-cookie', 'SAP_SESSIONID_MOCK_001=fake; Path=/'); res.end('<graph/>');
+      logins.push(url); res.statusCode = loginStatus; res.setHeader('x-csrf-token', 'test');
+      res.setHeader('set-cookie', 'SAP_SESSIONID_MOCK_001=fake' + logins.length + '; Path=/'); res.end('<graph/>');
+    }
+    else if (url.pathname.endsWith('/icf/logoff')) {
+      logouts.push(url); res.statusCode = logoutStatus; res.end('');
     }
     else if (url.pathname.includes('/datapreview/')) {
       calls.push({ url, method: req.method, body: text, session: req.headers['x-sap-adt-sessiontype'] as string, cookie: req.headers.cookie });
-      res.statusCode = status;
+      res.statusCode = typeof status === 'function' ? status(calls.length, logins.length) : status;
       res.end(body ?? '<tableData><columns><metadata name="MATNR" type="N"/><dataSet><data>000001</data><data>000002</data></dataSet></columns><columns><metadata name="AMOUNT" type="P"/><dataSet><data>123456789012345678.90</data><data>0.00</data></dataSet></columns></tableData>');
     } else res.end('');
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const address = server.address(); assert.ok(address && typeof address !== 'string');
   const backend = new AdtBackend(connectionSchema.parse({ connection_id: randomUUID(), name: 'mock',
-    base_url: `http://127.0.0.1:${address.port}`, client: '001', language: 'EN', username: 'TEST' }), 'fake');
-  return { backend, calls, logins, close: async () => { await backend.close(); await new Promise<void>(resolve => server.close(() => resolve())); } };
+    base_url: `http://127.0.0.1:${address.port}`, client: '001', language: 'EN', username: 'TEST' }), 'fake', options);
+  return { backend, calls, logins, logouts, close: async () => { try { await backend.close(); } finally { await new Promise<void>(resolve => server.close(() => resolve())); } } };
 }
 
 test('DDIC and freestyle use independent stateless endpoints and preserve precision with bounded results', async () => {
@@ -102,8 +106,9 @@ for (const status of [404, 405, 501, 403, 401]) {
     const f = await fixture(status, '<error/>');
     try {
       await assert.rejects(f.backend.queryTable({ table_name: 'MARA' }), e => {
-        assert.equal(safeError(e).code, [404, 405, 501].includes(status) ? 'CAPABILITY_UNSUPPORTED' : status === 401 ? 'AUTH_FAILED' : 'HTTP_FORBIDDEN'); return true;
+        assert.equal(safeError(e).code, [404, 405, 501].includes(status) ? 'DATA_PREVIEW_FAILED' : status === 401 ? 'AUTH_FAILED' : 'HTTP_FORBIDDEN'); return true;
       });
+      assert.equal(f.calls.length, status === 404 ? 2 : 1);
     } finally { await f.close(); }
   });
 }
@@ -115,4 +120,170 @@ test('empty result retains columns and malformed response fails explicitly', asy
   const malformed = await fixture(200, '<html>login</html>');
   try { await assert.rejects(malformed.backend.querySql({ sql: 'SELECT * FROM mara' }), /tabular query metadata/); }
   finally { await malformed.close(); }
+});
+
+test('a stale preview reader is refreshed once while preserving the query and stateless isolation', async () => {
+  const f = await fixture((calls, logins) => calls > 1 && logins === 1 ? 404 : 200);
+  const input = { table_name: 'MARA', fields: ['MATNR'], filters: [{ field: 'MTART', operator: 'eq' as const, value: 'FERT' }], limit: 1 };
+  try {
+    await f.backend.queryTable(input);
+    const recovered = await f.backend.queryTable(input);
+    assert.equal(recovered.session_recovery, 'reader_recreated_after_http_404');
+    assert.equal(recovered.row_count, 1);
+    assert.equal(f.logins.length, 2);
+    assert.equal(f.calls.length, 3);
+    assert.equal(f.calls[1].body, f.calls[2].body);
+    assert.equal(f.calls[1].url.search, f.calls[2].url.search);
+    assert.ok(f.calls[1].cookie?.includes('fake1'));
+    assert.ok(f.calls[2].cookie?.includes('fake2'));
+    assert.ok(f.calls.every(call => call.session === 'stateless'));
+  } finally { await f.close(); }
+});
+
+test('SQL preview also recovers once on a fresh reader', async () => {
+  const f = await fixture(calls => calls === 1 ? 404 : 200);
+  try {
+    const result = await f.backend.querySql({ sql: 'SELECT matnr FROM mara', limit: 1 });
+    assert.equal(result.session_recovery, 'reader_recreated_after_http_404');
+    assert.equal(f.calls.length, 2);
+    assert.equal(f.calls[0].body, f.calls[1].body);
+  } finally { await f.close(); }
+});
+
+test('persistent preview failure is bounded and preserves sanitized SAP diagnostic details', async () => {
+  const body = '<exc:exception xmlns:exc="http://www.sap.com/abapxml/types/communicationframework"><type id="PreviewResourceMissing"/><message lang="en">Resource unavailable password=SECRET</message><localizedMessage lang="en">Resource unavailable password=SECRET</localizedMessage></exc:exception>';
+  const f = await fixture(404, body);
+  try {
+    await assert.rejects(f.backend.queryTable({ table_name: 'MARA' }), error => {
+      const failure = safeError(error);
+      assert.equal(failure.code, 'DATA_PREVIEW_FAILED');
+      const details = failure.details as Record<string, unknown>;
+      assert.equal(details.http_status, 404);
+      assert.equal(details.request_path, '/sap/bc/adt/datapreview/ddic');
+      assert.equal(details.request_method, 'POST');
+      assert.equal(details.attempts, 2);
+      assert.equal(details.reader_recreated, true);
+      assert.equal(details.sap_error_type, 'PreviewResourceMissing');
+      assert.match(String(details.sap_message), /Resource unavailable/);
+      assert.equal(JSON.stringify(failure).includes('SECRET'), false);
+      return true;
+    });
+    assert.equal(f.calls.length, 2);
+  } finally { await f.close(); }
+});
+
+test('a login 404 is identified as a login path failure rather than unsupported data preview', async () => {
+  const f = await fixture(200, undefined, 404);
+  try {
+    await assert.rejects(f.backend.queryTable({ table_name: 'MARA' }), error => {
+      const failure = safeError(error);
+      assert.equal(failure.code, 'OBJECT_NOT_FOUND');
+      const details = failure.details as Record<string, unknown>;
+      assert.equal(details.request_path, '/sap/bc/adt/compatibility/graph');
+      assert.equal(details.reader_recreated, false);
+      return true;
+    });
+    assert.equal(f.calls.length, 0);
+    assert.equal(f.logins.length, 1);
+  } finally { await f.close(); }
+});
+
+test('query idle timeout reuses active sessions and refreshes exactly at the threshold for table and SQL', async () => {
+  let now = 10000;
+  const f = await fixture(200, undefined, 200, { queryIdleTimeoutMs: 1000, now: () => now });
+  const input = { table_name: 'MARA', fields: ['MATNR'], limit: 1 };
+  try {
+    // An unused reader must not be refreshed, regardless of the clock value.
+    assert.equal((await f.backend.queryTable(input)).session_recovery, undefined);
+    now += 999;
+    assert.equal((await f.backend.queryTable(input)).session_recovery, undefined);
+    now += 999;
+    assert.equal((await f.backend.queryTable(input)).session_recovery, undefined);
+    assert.equal(f.logins.length, 1);
+    assert.equal(f.logouts.length, 0);
+    now += 1000;
+    const result = await f.backend.querySql({ sql: 'SELECT matnr FROM mara', limit: 1 });
+    assert.equal(result.session_recovery, 'reader_recreated_after_idle_timeout');
+    assert.equal(f.logins.length, 2);
+    assert.equal(f.logouts.length, 1);
+    assert.ok(f.calls[3].cookie?.includes('fake2'));
+    assert.ok(f.calls.every(call => call.session === 'stateless'));
+    // The replacement remains reusable; idle refresh does not happen on every query.
+    assert.equal((await f.backend.queryTable(input)).session_recovery, undefined);
+    assert.equal(f.logins.length, 2);
+  } finally { await f.close(); }
+});
+
+test('idle time starts when the reader request finishes rather than when it starts', async () => {
+  let now = 0;
+  const f = await fixture(calls => { if (calls === 1) now = 5000; return 200; }, undefined, 200,
+    { queryIdleTimeoutMs: 1000, now: () => now });
+  try {
+    await f.backend.queryTable({ table_name: 'MARA', limit: 1 });
+    now = 5999;
+    assert.equal((await f.backend.queryTable({ table_name: 'MARA', limit: 1 })).session_recovery, undefined);
+    assert.equal(f.logins.length, 1);
+  } finally { await f.close(); }
+});
+
+test('idle refresh creates a clean reader even if the expired reader cannot log out', async () => {
+  let now = 0;
+  const f = await fixture(200, undefined, 200, { queryIdleTimeoutMs: 1000, now: () => now }, 500);
+  try {
+    await f.backend.queryTable({ table_name: 'MARA', limit: 1 });
+    now = 1000;
+    const result = await f.backend.queryTable({ table_name: 'MARA', limit: 1 });
+    assert.equal(result.session_recovery, 'reader_recreated_after_idle_timeout');
+    assert.equal(f.logins.length, 2);
+    assert.ok(f.calls[1].cookie?.includes('fake2'));
+  } finally { await f.close().catch(() => {}); }
+});
+
+test('404 recovery remains bounded after an idle refresh', async () => {
+  let now = 0;
+  const f = await fixture(calls => calls === 2 ? 404 : 200, undefined, 200,
+    { queryIdleTimeoutMs: 1000, now: () => now });
+  try {
+    await f.backend.queryTable({ table_name: 'MARA', limit: 1 });
+    now = 1000;
+    const result = await f.backend.queryTable({ table_name: 'MARA', limit: 1 });
+    assert.equal(result.session_recovery, 'reader_recreated_after_http_404');
+    assert.equal(f.calls.length, 3);
+    assert.equal(f.logins.length, 3);
+  } finally { await f.close(); }
+});
+
+test('idle timeout environment setting has a five minute default and rejects invalid values', async () => {
+  const original = process.env.SAPLINK_QUERY_IDLE_TIMEOUT_SECONDS;
+  const connection = connectionSchema.parse({ connection_id: randomUUID(), name: 'mock',
+    base_url: 'http://127.0.0.1:1', client: '001', language: 'EN', username: 'TEST' });
+  try {
+    for (const value of ['', '0', '-1', '1.5', 'abc', '86401']) {
+      process.env.SAPLINK_QUERY_IDLE_TIMEOUT_SECONDS = value;
+      assert.throws(() => new AdtBackend(connection, 'fake'), /SAPLINK_QUERY_IDLE_TIMEOUT_SECONDS/);
+    }
+    for (const value of [0, -1, NaN, Infinity, 1.5, 86400001])
+      assert.throws(() => new AdtBackend(connection, 'fake', { queryIdleTimeoutMs: value }), /idle timeout/);
+    delete process.env.SAPLINK_QUERY_IDLE_TIMEOUT_SECONDS;
+    let now = 0;
+    const f = await fixture(200, undefined, 200, { now: () => now });
+    try {
+      await f.backend.queryTable({ table_name: 'MARA', limit: 1 });
+      now = 300000;
+      assert.equal((await f.backend.queryTable({ table_name: 'MARA', limit: 1 })).session_recovery,
+        'reader_recreated_after_idle_timeout');
+    } finally { await f.close(); }
+    process.env.SAPLINK_QUERY_IDLE_TIMEOUT_SECONDS = '10';
+    now = 0;
+    const configured = await fixture(200, undefined, 200, { now: () => now });
+    try {
+      await configured.backend.queryTable({ table_name: 'MARA', limit: 1 });
+      now = 10000;
+      assert.equal((await configured.backend.queryTable({ table_name: 'MARA', limit: 1 })).session_recovery,
+        'reader_recreated_after_idle_timeout');
+    } finally { await configured.close(); }
+  } finally {
+    if (original === undefined) delete process.env.SAPLINK_QUERY_IDLE_TIMEOUT_SECONDS;
+    else process.env.SAPLINK_QUERY_IDLE_TIMEOUT_SECONDS = original;
+  }
 });

@@ -21,6 +21,7 @@
 - 本地 Web 管理界面、双击启动脚本、连接与令牌管理、MCP 服务启停。
 - HTTP MCP 服务及本地访问令牌认证。
 - 搜索对象、浏览包、读取源码。
+- 只读查询 DDIC 字段、数据元素、域固定值、引用与定义位置、类及接口成员和类型继承关系，见 [仓库语义查询](repository-query.md)。
 - 通过独立 DDIC 和 freestyle Data Preview 接口查询表数据及执行只读 ABAP SQL。
 - 创建 REPORT、Include、模块池和子程序池；修改与激活 Program（PROG/P）和 Include（PROG/I）的主源码，提供语法检查。
 - 创建函数组与空函数模块，浏览成员，修改及检查函数模块和组内 Include；通过组快照校验整体激活。
@@ -67,6 +68,8 @@ flowchart LR
 | 文件 | 职责 |
 | --- | --- |
 | `src/tool-definitions.ts` | 导出 toolSchemas、ToolName 和 toolDescription，集中维护参数校验及客户端描述 |
+| `src/reference-query.ts` | where-used 节点与片段两阶段查询、XML 标识转义、位置去重和展开预算及部分结果 |
+| `src/repository-query.ts` | 仓库语义查询的 schema、只读 ADT 适配、源码定位、域值字符串解析及嵌套结果数量限制 |
 | `src/tool-policy.ts` | 导出 writeTools，统一定义需要写保护的工具集合 |
 | `src/server.ts` | 使用上述定义注册 MCP tools、生成 annotations，并提供 HTTP 认证和传输 |
 | `src/operations.ts` | 根据同一 writeTools 执行写入开关、会话预检、请求去重及业务流程 |
@@ -76,7 +79,7 @@ flowchart LR
 
 新增写工具时必须同步工具 schema、描述、writeTools 和操作实现，避免 annotations 声明为只读却执行写入，或遗漏写入保护。当前 writeTools 包含 create_program、create_function_group、create_function_module、create_transport_request、update_source、activate_objects 六项。
 
-这次抽离不改变 18 个工具的名称与 JSON Schema、HTTP 地址或认证方式；客户端仍通过运行时 tools/list 获取接口，不依赖源码文件布局。
+工具模块抽离不改变 HTTP 地址或认证方式。新增仓库语义查询工具通过同一注册流程接入；客户端通过运行时 tools/list 获取当前接口，不依赖源码文件布局或固定工具数量。
 
 ## 3. 连接模型
 
@@ -242,6 +245,7 @@ create_transport_request 是写操作，复用连接 write_enabled、串行队�
 | `HTTP_FORBIDDEN` / `CSRF_FAILED` | HTTP 403 按后端错误消息分类，不能单凭 403 判断开发权限 |
 | `ADT_UNAVAILABLE` | 连接地址或 ADT 服务不可用 |
 | `CAPABILITY_UNSUPPORTED` | 当前后端不支持该操作 |
+| `DATA_PREVIEW_FAILED` | 数据预览 HTTP 请求失败；结合请求路径、状态和恢复次数诊断，不等同于不支持 |
 | `WRITE_DISABLED` | 本地连接未启用写入 |
 | `OBJECT_NOT_FOUND` | HTTP 404；可能是对象不存在或接口路径不可用 |
 | `CREATE_VALIDATION_FAILED` | 创建前验证未通过；其他后端创建错误可能归入 ADT_ERROR |
@@ -269,7 +273,7 @@ create_transport_request 是写操作，复用连接 write_enabled、串行队�
 
 ## 10. 本地数据与操作记录
 
-非敏感连接配置为 JSON；写操作记录使用 JSONL 文件，不引入数据库。目录为 `%LOCALAPPDATA%\saplink\logs`，可由 SAPLINK_LOG_DIR 覆盖。每行一个 UTF-8 JSON 对象，阶段事件追加写入，不修改旧行。实际字段包括 schema_version、time（UTC）、operation_id、request_id、connection_id、event、completed_steps，以及可用的 tool、object_uri 或 error_code；当前不写前后 revision。创建和批量激活事件未逐项记录目标 URI，应结合返回结果核实。
+非敏感连接配置为 JSON；写操作和数据查询摘要使用 JSONL 文件，不引入数据库。目录为 `%LOCALAPPDATA%\saplink\logs`，可由 SAPLINK_LOG_DIR 覆盖。每行一个 UTF-8 JSON 对象，阶段事件追加写入，不修改旧行。实际字段包括 schema_version、time（UTC）、operation_id、request_id、connection_id、event、completed_steps，以及可用的 tool、object_uri 或 error_code；当前不写前后 revision。数据查询事件记录完成/失败、行数和会话恢复摘要，不记录 SQL、筛选值或数据行。创建和批量激活事件未逐项记录目标 URI，应结合返回结果核实。
 
 日志由单一队列串行写入，按 UTC 日期和约 5 MiB 大小轮转，不自动删除历史文件。当前没有日志读取或重放命令；人工或外部工具读取时需处理异常退出留下的不完整末行。首个写操作事件无法记录时，在 SAP 写请求前返回日志错误；SAP 已执行后日志失败通过 LOG_WRITE_FAILED warning 返回，不覆盖已知 SAP 状态。
 

@@ -744,7 +744,7 @@ test('real MCP SDK HTTP client initializes, lists tools and reads source; HTTP r
     assert.ok(instructions.includes('VERSION_CONFLICT'));
     assert.ok(instructions.includes('runtime enablement'));
     const listedTools = (await client.listTools()).tools;
-    assert.equal(listedTools.length, 18);
+    assert.equal(listedTools.length, 25);
     const queryTableTool = listedTools.find(t => t.name === 'query_table')!;
     assert.ok((queryTableTool.inputSchema.properties?.filters as { description?: string }).description?.includes('AND-combined'));
     assert.ok((queryTableTool.inputSchema.properties?.connection_id as { description?: string }).description?.includes('list_connections'));
@@ -804,4 +804,82 @@ test('query tools work with writes disabled and validate through the MCP boundar
     }
     assert.equal(calls.length, 2); assert.equal(f.backend.locks, 0); assert.equal(f.backend.saves, 0);
   } finally { await client.close(); await runtime.close(); await f.cleanup(); }
+});
+
+test('query audit records operation IDs and recovery without query values or returned data', async () => {
+  const f = await fixture();
+  Object.assign(f.backend, {
+    queryTable: async () => ({ row_count: 1, rows: [{ MATNR: 'PRIVATE_ROW' }], session_recovery: 'reader_recreated_after_idle_timeout' }),
+    querySql: async () => { throw new AppError('DATA_PREVIEW_FAILED', 'failed', {
+      http_status: 404, request_path: '/sap/bc/adt/datapreview/freestyle', attempts: 2, reader_recreated: true,
+      sap_message: 'PRIVATE_MESSAGE'
+    }); }
+  });
+  try {
+    const good = await f.operations.run('query_table', { connection_id: f.connection.connection_id, table_name: 'MARA',
+      filters: [{ field: 'MATNR', operator: 'eq', value: 'PRIVATE_FILTER' }] });
+    const bad = await f.operations.run('query_sql', { connection_id: f.connection.connection_id,
+      sql: "SELECT * FROM mara WHERE matnr = 'PRIVATE_SQL'" });
+    assert.equal(good.status, 'success');
+    assert.ok(good.completed_steps.includes('query_reader_recreated'));
+    assert.equal(bad.status, 'error');
+    const log = await readFile(join(f.logDirectory, (await readdir(f.logDirectory))[0]), 'utf8');
+    const events = log.trim().split('\n').map(line => JSON.parse(line));
+    assert.equal(events[0].operation_id, good.operation_id);
+    assert.equal(events[0].event, 'data_query_completed');
+    assert.equal(events[0].session_recovery, 'reader_recreated_after_idle_timeout');
+    assert.equal(events[1].operation_id, bad.operation_id);
+    assert.equal(events[1].event, 'data_query_failed');
+    assert.equal(events[1].attempts, 2);
+    assert.equal(events[1].http_status, 404);
+    assert.equal(log.includes('PRIVATE_'), false);
+  } finally { await f.cleanup(); }
+});
+
+test('repository tools register as read-only, preserve schema refinements and run with writes disabled', async () => {
+  const { makeMcp } = await import('../src/server.js');
+  const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+  const { repositorySchemas } = await import('../src/repository-query.js');
+  const f = await fixture();
+  await f.store.save({ schema_version: 1, connections: [{ ...f.connection, write_enabled: false }], tokens: [] });
+  let dispatched = 0;
+  Object.assign(f.backend, { inspectRepository: async (tool: string, args: unknown) => { dispatched++; return { tool, args }; } });
+  const server = makeMcp(f.operations);
+  const client = new Client({ name: 'repository-test', version: '1' });
+  const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
+  try {
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    const { tools } = await client.listTools();
+    for (const name of Object.keys(repositorySchemas)) {
+      const tool = tools.find(t => t.name === name)!;
+      assert.ok(tool, name); assert.equal(tool.annotations?.readOnlyHint, true);
+      assert.equal(tool.annotations?.destructiveHint, false);
+    }
+    const inputs = {
+      get_ddic_definition: { entity_name: 'EKKO', field_name: 'EBELN' },
+      get_data_element: { data_element_uri: '/sap/bc/adt/ddic/dataelements/ebeln' },
+      get_domain_values: { domain_uri: '/sap/bc/adt/ddic/domains/ebeln' },
+      find_references: { object_uri: object },
+      find_definition: { object_uri: object, line: 1, column: 8 },
+      get_class_structure: { object_uri: '/sap/bc/adt/oo/classes/ztest' },
+      get_type_hierarchy: { object_uri: object, line: 1, column: 8 }
+    };
+    for (const [name, args] of Object.entries(inputs)) {
+      const result = await client.callTool({ name, arguments: { ...args, connection_id: f.connection.connection_id } });
+      assert.equal(result.isError, false, name);
+      const data = (result.structuredContent as any).data;
+      assert.equal(data.tool, name);
+      assert.equal(data.args.connection_id, undefined, 'backend receives only query parameters');
+    }
+    const invalid = await client.callTool({ name: 'find_references', arguments: {
+      connection_id: f.connection.connection_id, object_uri: object, line: 1
+    } });
+    assert.equal(invalid.isError, true);
+    assert.equal(dispatched, 7, 'invalid coordinates are rejected before dispatch');
+    assert.equal(f.backend.locks, 0); assert.equal(f.backend.saves, 0);
+    assert.equal((await f.operations.run('get_ddic_definition', {
+      connection_id: f.connection.connection_id, entity_name: 'EKKO', limit: 501
+    })).status, 'error', 'direct Operations callers also get validation');
+  } finally { await client.close(); await server.close(); await f.cleanup(); }
 });

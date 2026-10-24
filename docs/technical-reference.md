@@ -6,6 +6,10 @@ Windows 本地 Web 管理界面 + Streamable HTTP MCP 服务，通过 HTTP ADT �
 
 支持多连接管理、对象搜索、源码读取、Program、Include、Function Group 与 Function Module 创建，以及主源码修改、语法检查和激活。写入默认关闭，可按连接启用。
 
+## 仓库语义查询
+
+新增 `get_ddic_definition`、`get_data_element`、`get_domain_values`、`find_references`、`find_definition`、`get_class_structure`、`get_type_hierarchy` 七项只读工具。参数、示例、坐标和覆盖限制见 [数据字典、引用与类结构查询](repository-query.md)。不需要启用写入；域固定值不等于全部业务有效值，空引用结果不证明不存在影响。
+
 ## 文档入口
 
 本地版本查询使用 `saplink version`；远程更新检查使用 `saplink update check`，只提示正式版和下载页面。命令及错误语义见 [AI 管理说明](ai-management.md#检查新版本)，缓存位置见 [本地数据](local-data.md)，模块实现与离线验证见 [开发指南](development.md#测试与接口维护)。它不是 SAP MCP tool，不需要连接目标 SAP。
@@ -154,7 +158,7 @@ SQL 必须以 SELECT 开始并包含 FROM。不接受注释、语句结束符（
 
 两个工具默认最多返回 100 行，上限 500；后端多取一行判断 `truncated`。返回 `columns`、`rows`、`row_count`、`limit`、`truncated` 和 `pagination_supported=false`。数值、日期、编号保留为字符串，不转换为 JavaScript 数字或日期，避免前导零及大数精度丢失。结果不缓存到请求去重表，不记录查询文本、筛选值或结果到操作日志。没有稳定排序或分页承诺，limit 只限制返回行数，不限制数据库扫描成本。沿用 HTTP 请求 15 秒超时和 4 MiB 响应上限；客户端超时不保证后端立即取消执行。
 
-查询不需要开启 `write_enabled`，使用连接配置中的 Client 和 SAP 用户权限。`get_capabilities.data_query` 分别提供两个接口的 discovery `advertised` 标记；未声明不等于不支持，实际查询验证可用性。HTTP 404/405/501 返回 `CAPABILITY_UNSUPPORTED`（也可能是路由或服务配置缺失），401/403 保留认证或权限错误，不将其误判为版本不支持。支持的 CDS 类型、字段语法和具体接口兼容性仍需在目标 SAP 验证。
+查询不需要开启 `write_enabled`，使用连接配置中的 Client 和 SAP 用户权限。`get_capabilities.data_query` 分别提供两个接口的 discovery `advertised` 标记；未声明不等于不支持，实际查询验证可用性。数据预览请求本身返回 HTTP 404 时，只重建独立的无状态 reader 并重试一次，保留编辑会话和锁；恢复成功返回 `data.session_recovery`，操作阶段包含 `query_reader_recreated`。持续 404 或 HTTP 405/501 返回 `DATA_PREVIEW_FAILED`，保留脱敏 SAP 错误、实际失败请求路径、尝试次数和 reader 重建标记，不根据 HTTP 状态断言版本不支持。登录路径上的 404 单独保留为 `OBJECT_NOT_FOUND`，不会伪装成数据预览失败。401/403 保留认证或权限错误。查询完成和失败追加审计事件，可以用 operation_id 检索；仅记录状态、行数及恢复摘要，不记录 SQL、筛选值、返回行或原始 HTTP 数据。支持的 CDS 类型、字段语法和具体接口兼容性仍需在目标 SAP 验证。
 
 `search_objects` 的完整类型如 `PROG/P` 会精确过滤，类型族如 `PROG` 返回该族对象；`limit` 默认 100，最大 500。精确类型搜索在后端类型族结果中最多扫描 501 条，`truncated=true` 表示结果可能不完整，可缩小搜索条件。包列表排除没有 `OBJECT_URI` 的分类节点，先过滤再限量；返回后端节点字段，不提供分页游标。读取仅支持对象发现的主源码，不支持任意 include 片段选择。
 
@@ -276,6 +280,13 @@ ENDFUNCTION.
 当定义区经等价比较通过时，`source_save.normalization_applied=true`。定义区注释变化返回 `FUNCTION_DEFINITION_COMMENTS_CHANGED` 警告，不承诺保留注释。无法解析的语法退回原有校验，不猜测等价；校验失败的 `source_save.difference` 区分 `interface`、`implementation`、`unsupported_definition` 或其他对象的 `source`。复杂表类型、组件路径、pragma、字符串模板默认值等暂不做等价解析；返回的源码和 revision 始终来自实际回读，不使用规范化源码替代。
 
 后端操作失败时，`error.details` 按可用信息返回 `http_status`、脱敏的 `sap_message`、`sap_error_type`、`sap_message_id` 和 `sap_message_number`。不返回原始响应、请求头或认证信息，消息中的锁句柄等敏感值被替换。`get_capabilities` 的 `source_lock_policy.function_module` 应为 `module`，可用于确认服务已加载函数模块自身锁的实现。重试写操作需使用新的 request_id；旧 ID 返回缓存结果。
+
+
+数据查询前会检查独立只读会话的空闲时间，默认 **300 秒（5 分钟）**。空闲时间从该 reader 最近一次 HTTP 请求结束时计算，读源码等使用同一 reader 的请求也会刷新活动时间。达到阈值后，下次 `query_table` 或 `query_sql` 发出前先尝试注销旧 reader，再创建新 reader，由库正常登录；注销失败不阻止丢弃仅用于无状态读取的本地会话。首次查询不额外重建，持续使用时复用原会话，没有后台清理定时器。此机制不清理编辑会话或其锁，也不删除连接配置、凭据和写入防重复记录。
+
+环境变量 `SAPLINK_QUERY_IDLE_TIMEOUT_SECONDS` 可设为 **1–86400 的整数秒数**，未设置时使用 300；无效值返回 `INVALID_CONFIG`。环境变量须由启动 SapLink 的进程继承，调整后重新启动进程生效。例如在 PowerShell 中设置 `$env:SAPLINK_QUERY_IDLE_TIMEOUT_SECONDS = '600'` 可使用 10 分钟阈值。该值是本地会话更新策略，不代表 SAP 服务端的实际超时时间。
+
+空闲重建成功时，查询结果包含 `data.session_recovery = "reader_recreated_after_idle_timeout"`，操作阶段记录 `query_reader_recreated`，审计摘要同时记录重建原因。如果新会话的数据预览仍返回 404，保留现有的一次 404 恢复重试上限。
 
 ## 数据与日志
 

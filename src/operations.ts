@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { repositorySchemas, type RepositoryInput, type RepositoryTool } from './repository-query.js';
 import { searchEnhancements } from './enhancements.js';
 import { AdtBackend, adtUri, programUri, functionGroupUri, isFunctionGroup, compareSavedSource, savedSourceHash, definitionCommentsHash, type Backend, type Version, type ProgramKind } from './adt.js';
 import { ConfigStore, digest, type Connection, type Credentials } from './config.js';
@@ -8,7 +9,7 @@ import { functionModuleGuidance } from './function-help.js';
 import { tableQuerySchema, readOnlySql, type TableQuery } from './data-query.js';
 import { writeTools } from './tool-policy.js';
 
-export type Input = {
+export type Input = RepositoryInput & {
   connection_id?: string;
   query?: string;
   type?: string;
@@ -238,6 +239,18 @@ export class Operations {
         context.steps.push('session_recreated');
         data = await this.dispatch(tool, input, connection, backend, context);
       }
+      if (tool === 'query_table' || tool === 'query_sql') {
+        const queryData = data as { row_count?: number; session_recovery?: string };
+        if (queryData.session_recovery) context.steps.push('query_reader_recreated');
+        try {
+          await this.audit.append({
+            operation_id: id, connection_id: input.connection_id, tool,
+            event: 'data_query_completed', completed_steps: [...context.steps],
+            row_count: queryData.row_count, reader_recreated: Boolean(queryData.session_recovery),
+            session_recovery: queryData.session_recovery
+          });
+        } catch { context.warnings.push('LOG_WRITE_FAILED'); }
+      }
       return {
         operation_id: id,
         status: 'success',
@@ -285,6 +298,19 @@ export class Operations {
             'Read inactive and active source before retrying with a new request_id; do not assume the backend is unchanged.'
           ]
         };
+      }
+      if (tool === 'query_table' || tool === 'query_sql') {
+        const queryDetails = failure.details as Record<string, unknown> | undefined;
+        try {
+          // Never persist query text, filters, returned rows, or raw HTTP data.
+          await this.audit.append({
+            operation_id: id, connection_id: input.connection_id, tool,
+            event: 'data_query_failed', completed_steps: [...context.steps],
+            error_code: failure.code, http_status: queryDetails?.http_status,
+            request_path: queryDetails?.request_path, attempts: queryDetails?.attempts,
+            reader_recreated: queryDetails?.reader_recreated, session_recovery: queryDetails?.session_recovery
+          });
+        } catch { context.warnings.push('LOG_WRITE_FAILED'); }
       }
       if (writeTools.has(tool)) {
         try {
@@ -382,6 +408,14 @@ export class Operations {
   }
 
   private async dispatch(tool: string, input: Input, connection: Connection, backend: Backend, context: Context): Promise<unknown> {
+    if (Object.hasOwn(repositorySchemas, tool)) {
+      const name = tool as RepositoryTool;
+      const { connection_id: _connectionId, ...args } = input;
+      const query = repositorySchemas[name].parse(args);
+      if (!backend.inspectRepository)
+        throw new AppError('CAPABILITY_UNSUPPORTED', 'Repository inspection is unavailable in this backend');
+      return backend.inspectRepository(name, query);
+    }
     switch (tool) {
       case 'get_capabilities':
         return backend.capabilities();

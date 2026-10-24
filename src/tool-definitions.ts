@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { repositorySchemas, repositoryDescriptions } from './repository-query.js';
 import { enhancementTypes } from './enhancements.js';
 import { tableQuerySchema, sqlQuerySchema } from './data-query.js';
 import { functionModuleSyntaxHelp } from './function-help.js';
@@ -26,6 +27,13 @@ const requestIdSchema = z.string().min(1).max(128).describe(("Unique ID for one 
   "uncertain writes with a new ID."));
 
 export const toolSchemas = {
+  get_ddic_definition: repositorySchemas.get_ddic_definition.extend(connection),
+  get_data_element: repositorySchemas.get_data_element.extend(connection),
+  get_domain_values: repositorySchemas.get_domain_values.extend(connection),
+  find_references: repositorySchemas.find_references.safeExtend(connection),
+  find_definition: repositorySchemas.find_definition.safeExtend(connection),
+  get_class_structure: repositorySchemas.get_class_structure.extend(connection),
+  get_type_hierarchy: repositorySchemas.get_type_hierarchy.extend(connection),
   list_connections: z.object({}).strict(),
   get_capabilities: z.object(connection).strict(),
   search_enhancements: z.object({
@@ -123,6 +131,7 @@ export const toolSchemas = {
 };
 
 const toolDescriptions: Record<ToolName, string> = {
+  ...repositoryDescriptions,
   list_connections: ("List configured SAP connections with Client, language, username, backend URL and write policy. Confirm " +
     "the intended system and Client before writing."),
   get_capabilities: 'Probe ADT discovery. A capability does not imply write authorization.',

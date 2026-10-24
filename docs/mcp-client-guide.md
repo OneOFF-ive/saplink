@@ -1,8 +1,12 @@
 # MCP 客户端 SAP 操作手册
 
-供 agent、MCP 客户端开发者和使用者阅读。适用 SapLink 1.0.0，核对日期：2026-10-15。本文描述本项目实际工具，不是任意 SAP MCP 服务的通用接口。运行时 `instructions` 和 `tools/list` 是当前工具定义的依据；不发送 schema 未定义的字段。
+供 agent、MCP 客户端开发者和使用者阅读。按当前源码核对，日期：2026-10-24；发布版本的工具范围以运行时列表为准。本文描述本项目实际工具，不是任意 SAP MCP 服务的通用接口。运行时 `instructions` 和 `tools/list` 是当前工具定义的依据；不发送 schema 未定义的字段。
 
-当前工具定义在 `src/tool-definitions.ts`，写操作分类在 `src/tool-policy.ts`。本次代码重构未改变 18 个工具的 JSON Schema，本文调用流程继续适用；客户端无需因文件拆分修改配置或参数。
+当前工具定义在 `src/tool-definitions.ts`，写操作分类在 `src/tool-policy.ts`。现有调用流程继续适用；新增仓库语义工具复用同一 MCP 连接及认证方式，客户端可通过 tools/list 发现。
+
+## 数据字典、引用与类结构
+
+查询前可用 `get_ddic_definition` 确认字段，结合 `get_data_element` 和 `get_domain_values` 理解标签与域编码。分析代码时用 `find_references`、`find_definition`、`get_class_structure` 和 `get_type_hierarchy`。均为只读；对象 URI 从 SAP 搜索获取，定位坐标使用活动主源码，行列从 1 开始。域固定值不是全部业务有效值，空引用或截断结果不代表没有影响。完整输入、示例和覆盖限制见 [仓库语义查询](repository-query.md)。
 
 ## 1. 快速开始
 

@@ -1,4 +1,5 @@
 import { ADTClient, session_types, type HttpClient } from 'abap-adt-api';
+import { RepositoryQueries, repositorySchemas, type RepositoryTool, type RepositoryInput } from './repository-query.js';
 import { HttpClientException, type HttpClientOptions } from 'abap-adt-api/build/AdtHTTP.js';
 import axios from 'axios';
 import { XMLBuilder } from 'fast-xml-parser';
@@ -100,6 +101,7 @@ export function sourceResult(connectionId: string, object: string, uri: string, 
     revision: digest(JSON.stringify([connectionId, uri, version, hash])) };
 }
 export interface Backend {
+  inspectRepository?(tool: RepositoryTool, input: RepositoryInput): Promise<unknown>;
   enhancementActivation?(object: string, name: string, type: string): Promise<EnhancementActivation>;
   queryTable?(input: TableQuery): Promise<unknown>;
   querySql?(input: SqlQuery): Promise<unknown>;
@@ -127,8 +129,10 @@ export interface Backend {
 
 // Use a bounded client that never redirects authentication to another server.
 class BoundedHttp implements HttpClient {
-  constructor(private base: string) {}
+  lastFailure?: { http_status: number; request_path: string; request_method: string };
+  constructor(private base: string, private onActivity?: () => void) {}
   async request(o: HttpClientOptions) {
+    this.lastFailure = undefined;
     const url = new URL(o.url, this.base);
     if (url.origin !== this.base) throw new AppError('INVALID_URI', 'Cross-origin backend request rejected');
     try {
@@ -136,6 +140,9 @@ class BoundedHttp implements HttpClient {
       params: o.qs, auth: o.auth, data: o.body, timeout: 15000, maxRedirects: 0,
       maxContentLength: 4 * 1024 * 1024, maxBodyLength: 2 * 1024 * 1024, responseType: 'text', proxy: false,
       validateStatus: () => true });
+    if (r.status >= 400) this.lastFailure = {
+      http_status: r.status, request_path: url.pathname, request_method: o.method ?? 'GET'
+    };
     // ADT must process cookies even on error responses before classifying the error.
     if (r.status >= 300 && r.status < 400) throw new HttpClientException('Backend HTTP request failed', undefined, r.status, undefined, o,
       { body: r.data, status: r.status, statusText: r.statusText, headers: {} });
@@ -144,27 +151,53 @@ class BoundedHttp implements HttpClient {
       if (error instanceof HttpClientException) throw error;
       throw new HttpClientException('Backend network request failed', axios.isAxiosError(error) ? error.code : undefined,
         undefined, undefined, o);
-    }
+    } finally { this.onActivity?.(); }
   }
 }
+
+export type AdtBackendOptions = { queryIdleTimeoutMs?: number; now?: () => number };
+
+function queryIdleTimeoutMs() {
+  const seconds = process.env.SAPLINK_QUERY_IDLE_TIMEOUT_SECONDS ?? '300';
+  if (!/^[1-9]\d*$/.test(seconds) || Number(seconds) > 86400)
+    throw new AppError('INVALID_CONFIG', 'SAPLINK_QUERY_IDLE_TIMEOUT_SECONDS must be an integer between 1 and 86400');
+  return Number(seconds) * 1000;
+}
+
 export class AdtBackend implements Backend {
   private client: ADTClient;
   private reader: ADTClient;
-  constructor(private connection: Connection, password: string) {
+  private readerHttp: BoundedHttp;
+  private createReader: () => ADTClient;
+  private readerLastActivity?: number;
+  private readonly queryIdleTimeoutMs: number;
+  private readonly now: () => number;
+  constructor(private connection: Connection, password: string, options: AdtBackendOptions = {}) {
+    this.queryIdleTimeoutMs = options.queryIdleTimeoutMs ?? queryIdleTimeoutMs();
+    if (!Number.isSafeInteger(this.queryIdleTimeoutMs) || this.queryIdleTimeoutMs < 1 || this.queryIdleTimeoutMs > 86400000)
+      throw new AppError('INVALID_CONFIG', 'Query reader idle timeout must be between 1 and 86400000 milliseconds');
+    this.now = options.now ?? (() => performance.now());
     this.client = new ADTClient(new BoundedHttp(connection.base_url), connection.username, password, connection.client, connection.language);
     this.client.stateful = session_types.stateful;
     // Version probes must not alter the stateful editor context that owns SAP locks.
-    this.reader = new ADTClient(new BoundedHttp(connection.base_url), connection.username, password, connection.client, connection.language);
+    this.readerHttp = new BoundedHttp(connection.base_url, () => { this.readerLastActivity = this.now(); });
+    this.createReader = () => new ADTClient(this.readerHttp, connection.username, password, connection.client, connection.language);
+    this.reader = this.createReader();
   }
   async capabilities() {
     const discovery = await this.client.adtDiscovery();
     if (!discovery.length) throw new AppError('ADT_UNAVAILABLE', 'Backend did not return a usable ADT discovery document');
     return { discovery, data_query: queryCapabilities(discovery), probed_at: new Date().toISOString(),
       source_lock_policy: { function_module: 'module', function_group_include: 'parent_group' },
+      repository_query: { tools: Object.keys(repositorySchemas), source_version: 'active', max_items: 500,
+        availability_policy: 'Tools are implemented locally; backend availability and authorization must be verified by actual calls' },
       source_read_policy: 'separate_stateless_session',
       source_verification_policy: 'conservative_function_definition_tokens_v1',
       transport_policy: 'sap_cts_preflight_when_task_omitted',
       limitations: ['Programs, Includes, function groups and function modules are supported subject to SAP permissions', 'Function module signature editing requires backend support for source-based declarations; no structured parameter tool is provided', 'Source revision checks use hashes under SAP object locks'] };
+  }
+  async inspectRepository(tool: RepositoryTool, input: RepositoryInput) {
+    return new RepositoryQueries(this.reader, (object, version) => this.read(object, version), adtUri).run(tool, input);
   }
   async search(query: string, type: string | undefined, limit: number) {
     const requestedType = type?.toUpperCase();
@@ -185,16 +218,43 @@ export class AdtBackend implements Backend {
       return { name: metaData['adtcore:name'], type: metaData['adtcore:type'], version: metaData['adtcore:version'] };
     }, name, type);
   }
+  private async recreateReader() {
+    if (this.reader.loggedin) await this.reader.logout().catch(() => {});
+    this.reader = this.createReader();
+    this.readerLastActivity = undefined;
+  }
   private async dataQuery(run: () => Promise<{ columns: unknown[]; values: unknown[] }>, limit: number) {
-    try { return queryResult(await run(), limit); }
-    catch (error) {
-      const failure = safeError(error);
-      const status = (failure.details as { http_status?: number } | undefined)?.http_status;
-      if (status && [404, 405, 501].includes(status)) {
-        throw new AppError('CAPABILITY_UNSUPPORTED', 'SAP data preview endpoint is unavailable on this system', { http_status: status });
-      }
-      throw error;
+    let sessionRecovery: string | undefined;
+    if (this.readerLastActivity !== undefined && this.now() - this.readerLastActivity >= this.queryIdleTimeoutMs) {
+      await this.recreateReader();
+      sessionRecovery = 'reader_recreated_after_idle_timeout';
     }
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const result = queryResult(await run(), limit);
+        return { ...result, ...(sessionRecovery ? { session_recovery: sessionRecovery } : {}) };
+      }
+      catch (error) {
+        const failure = safeError(error);
+        const transport = this.readerHttp.lastFailure;
+        const status = (failure.details as { http_status?: number } | undefined)?.http_status;
+        const previewFailure = transport && ['/sap/bc/adt/datapreview/ddic', '/sap/bc/adt/datapreview/freestyle'].includes(transport.request_path);
+        if (attempt === 1 && status === 404 && previewFailure) {
+          // Refresh only the stateless reader, preserving the editor and its locks.
+          await this.recreateReader();
+          sessionRecovery = 'reader_recreated_after_http_404';
+          continue;
+        }
+        if (status && [404, 405, 501].includes(status)) {
+          throw new AppError(previewFailure ? 'DATA_PREVIEW_FAILED' : failure.code,
+            previewFailure ? 'SAP data preview request failed; HTTP status alone does not establish missing capability'
+              : failure.message,
+            { ...(failure.details as Record<string, unknown> | undefined), ...transport, attempts: attempt, reader_recreated: Boolean(sessionRecovery), session_recovery: sessionRecovery });
+        }
+        throw error;
+      }
+    }
+    throw new AppError('DATA_PREVIEW_FAILED', 'SAP data preview retry exhausted');
   }
   async queryTable(input: TableQuery) {
     const p = tableQuery(input);

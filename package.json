@@ -1,6 +1,6 @@
 {
   "name": "saplink",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "private": true,
   "type": "module",
   "description": "Local HTTP MCP server for SAP ABAP development",
