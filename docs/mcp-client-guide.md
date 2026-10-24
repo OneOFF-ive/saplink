@@ -8,6 +8,10 @@
 
 查询前可用 `get_ddic_definition` 确认字段，结合 `get_data_element` 和 `get_domain_values` 理解标签与域编码。分析代码时用 `find_references`、`find_definition`、`get_class_structure` 和 `get_type_hierarchy`。均为只读；对象 URI 从 SAP 搜索获取，定位坐标使用活动主源码，行列从 1 开始。域固定值不是全部业务有效值，空引用或截断结果不代表没有影响。完整输入、示例和覆盖限制见 [仓库语义查询](repository-query.md)。
 
+## ATC、Unit 与版本差异
+
+先读取 [质量与版本工具说明](quality-tools.md)。ATC 先确认变式，再对获授权的单对象执行并读取结果；提交成功或零 finding 不等于通过。Unit 会执行后端代码，必须得到执行授权，连接开启写入，传 confirm_execution=true 与唯一 request_id；默认仅 harmless/short，不自动重试未知执行。无测试、跳过、unknown 和 warning 不报告为全部通过。历史比较只使用 active/inactive 或同对象 list_source_versions 返回的 version_id，缺少 inactive 时不静默替换。
+
 ## 1. 快速开始
 
 管理员先配置 SAP 连接、测试 ADT，并启动本地 MCP。客户端使用 Streamable HTTP，URL 为 `http://127.0.0.1:8765/mcp`，认证头为 `Authorization: Bearer <token>`。配置与排障见 [运维手册](operations.md)。

@@ -10,6 +10,10 @@ Windows 本地 Web 管理界面 + Streamable HTTP MCP 服务，通过 HTTP ADT �
 
 新增 `get_ddic_definition`、`get_data_element`、`get_domain_values`、`find_references`、`find_definition`、`get_class_structure`、`get_type_hierarchy` 七项只读工具。参数、示例、坐标和覆盖限制见 [数据字典、引用与类结构查询](repository-query.md)。不需要启用写入；域固定值不等于全部业务有效值，空引用结果不证明不存在影响。
 
+## 代码质量与版本差异
+
+`get_atc_configuration`、`run_atc`、`get_atc_results`、`run_unit_tests`、`list_source_versions`、`compare_source_versions` 的参数、执行权限、结果状态及覆盖限制见 [ATC、Unit 与版本差异](quality-tools.md)。ATC/Unit 执行不视为只读；历史与差异仅提供主源码读取，不执行恢复。
+
 ## 文档入口
 
 本地版本查询使用 `saplink version`；远程更新检查使用 `saplink update check`，只提示正式版和下载页面。命令及错误语义见 [AI 管理说明](ai-management.md#检查新版本)，缓存位置见 [本地数据](local-data.md)，模块实现与离线验证见 [开发指南](development.md#测试与接口维护)。它不是 SAP MCP tool，不需要连接目标 SAP。

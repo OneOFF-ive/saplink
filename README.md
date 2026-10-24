@@ -80,6 +80,7 @@ SapLink 是开发与查询工具，不是完整 IDE。目前不提供调试、�
 | --- | --- |
 | 安装、升级或卸载 | [Windows 安装指南](docs/windows-installer.md) |
 | 配置连接、接入客户端与排查故障 | [部署与运维手册](docs/operations.md) |
+| 检查代码质量、运行测试与比较版本 | [ATC、Unit 与版本差异](docs/quality-tools.md) |
 | 理解字段、引用影响与类结构 | [仓库语义查询](docs/repository-query.md) |
 | 让 agent 快速学习 SAP 操作 | [MCP 客户端 SAP 操作手册](docs/mcp-client-guide.md) |
 | 让终端型 AI 客户端管理本地服务 | [AI 终端管理](docs/ai-management.md) |

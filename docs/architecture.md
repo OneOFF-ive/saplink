@@ -68,6 +68,9 @@ flowchart LR
 | 文件 | 职责 |
 | --- | --- |
 | `src/tool-definitions.ts` | 导出 toolSchemas、ToolName 和 toolDescription，集中维护参数校验及客户端描述 |
+| `src/quality-tools.ts` | ATC/Unit schema、单对象执行、结果汇总和版本读取；分析会话禁用隐式执行重放 |
+| `src/source-versions.ts` | 历史 Atom 解析和发现资源的同源 ADT 链接校验 |
+| `src/source-diff.ts` | 有界行差异计算和输出截断 |
 | `src/reference-query.ts` | where-used 节点与片段两阶段查询、XML 标识转义、位置去重和展开预算及部分结果 |
 | `src/repository-query.ts` | 仓库语义查询的 schema、只读 ADT 适配、源码定位、域值字符串解析及嵌套结果数量限制 |
 | `src/tool-policy.ts` | 导出 writeTools，统一定义需要写保护的工具集合 |
@@ -77,7 +80,7 @@ flowchart LR
 | `src/config.ts` | 连接 schema、URL 规范化、配置及令牌校验、Windows 凭据访问 |
 | `src/errors.ts` | 后端错误分类与脱敏，由 safeError 形成对外错误 |
 
-新增写工具时必须同步工具 schema、描述、writeTools 和操作实现，避免 annotations 声明为只读却执行写入，或遗漏写入保护。当前 writeTools 包含 create_program、create_function_group、create_function_module、create_transport_request、update_source、activate_objects 六项。
+新增写工具时必须同步工具 schema、描述、writeTools 和操作实现，避免 annotations 声明为只读却执行写入，或遗漏写入保护。当前 writeTools 包含 create_program、create_function_group、create_function_module、create_transport_request、update_source、activate_objects，以及 run_atc、run_unit_tests 共八项。后两项不保存源码，但会创建检查记录或执行后端测试代码，因此同样需要开启写入、明确执行确认和请求防重复。
 
 工具模块抽离不改变 HTTP 地址或认证方式。新增仓库语义查询工具通过同一注册流程接入；客户端通过运行时 tools/list 获取当前接口，不依赖源码文件布局或固定工具数量。
 

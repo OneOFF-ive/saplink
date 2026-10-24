@@ -1,7 +1,8 @@
 import { ADTClient, session_types, type HttpClient } from 'abap-adt-api';
 import { RepositoryQueries, repositorySchemas, type RepositoryTool, type RepositoryInput } from './repository-query.js';
-import { HttpClientException, type HttpClientOptions } from 'abap-adt-api/build/AdtHTTP.js';
+import { AdtHTTP, HttpClientException, type HttpClientOptions } from 'abap-adt-api/build/AdtHTTP.js';
 import axios from 'axios';
+import { QualityTools, qualitySchemas, type QualityTool, type QualityInput } from './quality-tools.js';
 import { XMLBuilder } from 'fast-xml-parser';
 import type { Connection } from './config.js';
 import { digest } from './config.js';
@@ -101,6 +102,7 @@ export function sourceResult(connectionId: string, object: string, uri: string, 
     revision: digest(JSON.stringify([connectionId, uri, version, hash])) };
 }
 export interface Backend {
+  quality?(tool: QualityTool, input: QualityInput): Promise<unknown>;
   inspectRepository?(tool: RepositoryTool, input: RepositoryInput): Promise<unknown>;
   enhancementActivation?(object: string, name: string, type: string): Promise<EnhancementActivation>;
   queryTable?(input: TableQuery): Promise<unknown>;
@@ -166,6 +168,7 @@ function queryIdleTimeoutMs() {
 
 export class AdtBackend implements Backend {
   private client: ADTClient;
+  private qualityHttp: AdtHTTP;
   private reader: ADTClient;
   private readerHttp: BoundedHttp;
   private createReader: () => ADTClient;
@@ -183,6 +186,9 @@ export class AdtBackend implements Backend {
     this.readerHttp = new BoundedHttp(connection.base_url, () => { this.readerLastActivity = this.now(); });
     this.createReader = () => new ADTClient(this.readerHttp, connection.username, password, connection.client, connection.language);
     this.reader = this.createReader();
+    this.qualityHttp = new AdtHTTP(new BoundedHttp(connection.base_url), connection.username, password, connection.client, connection.language);
+    // Disable the ADT library's implicit login-error replay for backend executions.
+    this.qualityHttp.stateful = session_types.stateful;
   }
   async capabilities() {
     const discovery = await this.client.adtDiscovery();
@@ -191,10 +197,16 @@ export class AdtBackend implements Backend {
       source_lock_policy: { function_module: 'module', function_group_include: 'parent_group' },
       repository_query: { tools: Object.keys(repositorySchemas), source_version: 'active', max_items: 500,
         availability_policy: 'Tools are implemented locally; backend availability and authorization must be verified by actual calls' },
+      quality_tools: { tools: Object.keys(qualitySchemas), execution_policy: 'write_enabled_confirm_execution_request_id',
+        unit_risk: 'harmless_only', unit_default_duration: 'short', history_source_part: 'main' },
       source_read_policy: 'separate_stateless_session',
       source_verification_policy: 'conservative_function_definition_tokens_v1',
       transport_policy: 'sap_cts_preflight_when_task_omitted',
       limitations: ['Programs, Includes, function groups and function modules are supported subject to SAP permissions', 'Function module signature editing requires backend support for source-based declarations; no structured parameter tool is provided', 'Source revision checks use hashes under SAP object locks'] };
+  }
+  async quality(tool: QualityTool, input: QualityInput) {
+    return new QualityTools(this.qualityHttp, this.reader, (object, version) => this.read(object, version),
+      this.connection.connection_id, this.connection.base_url, adtUri).run(tool, input);
   }
   async inspectRepository(tool: RepositoryTool, input: RepositoryInput) {
     return new RepositoryQueries(this.reader, (object, version) => this.read(object, version), adtUri).run(tool, input);
@@ -543,6 +555,9 @@ export class AdtBackend implements Backend {
   }
   async close() {
     try { if (this.client.loggedin) await this.client.logout(); }
-    finally { if (this.reader.loggedin) await this.reader.logout(); }
+    finally {
+      try { if (this.reader.loggedin) await this.reader.logout(); }
+      finally { if (this.qualityHttp.loggedin) await this.qualityHttp.logout(); }
+    }
   }
 }

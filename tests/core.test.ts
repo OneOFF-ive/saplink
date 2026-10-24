@@ -744,7 +744,7 @@ test('real MCP SDK HTTP client initializes, lists tools and reads source; HTTP r
     assert.ok(instructions.includes('VERSION_CONFLICT'));
     assert.ok(instructions.includes('runtime enablement'));
     const listedTools = (await client.listTools()).tools;
-    assert.equal(listedTools.length, 25);
+    assert.equal(listedTools.length, 31);
     const queryTableTool = listedTools.find(t => t.name === 'query_table')!;
     assert.ok((queryTableTool.inputSchema.properties?.filters as { description?: string }).description?.includes('AND-combined'));
     assert.ok((queryTableTool.inputSchema.properties?.connection_id as { description?: string }).description?.includes('list_connections'));
@@ -881,5 +881,67 @@ test('repository tools register as read-only, preserve schema refinements and ru
     assert.equal((await f.operations.run('get_ddic_definition', {
       connection_id: f.connection.connection_id, entity_name: 'EKKO', limit: 501
     })).status, 'error', 'direct Operations callers also get validation');
+  } finally { await client.close(); await server.close(); await f.cleanup(); }
+});
+
+test('quality executions require write authorization and confirmation, are audited and never replay unknown runs', async () => {
+  const f = await fixture();
+  let executions = 0;
+  Object.assign(f.backend, { quality: async (tool: string) => {
+    if (tool === 'run_unit_tests' || tool === 'run_atc') executions++;
+    return { test_status: 'passed', run_id: 'WL_1' };
+  } });
+  try {
+    await f.store.save({ schema_version: 1, connections: [{ ...f.connection, write_enabled: false }], tokens: [] });
+    const args = { connection_id: f.connection.connection_id, object_uri: object, request_id: 'test-one', confirm_execution: true as const };
+    const blocked = await f.operations.run('run_unit_tests', args);
+    assert.equal(blocked.error?.code, 'WRITE_DISABLED'); assert.equal(executions, 0);
+    for (const name of ['get_atc_configuration', 'get_atc_results', 'list_source_versions', 'compare_source_versions']) {
+      const result = await f.operations.run(name, { connection_id: f.connection.connection_id,
+        ...(name === 'get_atc_results' ? { run_id: 'WL_1' } : name === 'get_atc_configuration' ? {} : { object_uri: object }) });
+      assert.equal(result.status, 'success', name);
+    }
+    await f.store.save({ schema_version: 1, connections: [f.connection], tokens: [] });
+    const missingConfirm = await f.operations.run('run_unit_tests', { ...args, request_id: 'missing-confirm', confirm_execution: undefined });
+    assert.equal(missingConfirm.status, 'error'); assert.equal(executions, 0);
+    const actual = await f.operations.run('run_unit_tests', { ...args, request_id: 'authorized' });
+    assert.equal(actual.outcome, 'confirmed'); assert.equal(actual.write_dispatched, true); assert.equal(executions, 1);
+    assert.equal((await f.operations.run('run_unit_tests', { ...args, request_id: 'authorized' })).operation_id, actual.operation_id);
+    assert.equal(executions, 1);
+    Object.assign(f.backend, { quality: async () => { executions++; throw new AppError('OUTCOME_UNKNOWN', 'Timed out'); } });
+    const failed = await f.operations.run('run_atc', { ...args, request_id: 'unknown-run', check_variant: 'DEFAULT' });
+    assert.equal(failed.outcome, 'unknown'); assert.equal(failed.write_dispatched, true);
+    await f.operations.run('run_atc', { ...args, request_id: 'unknown-run', check_variant: 'DEFAULT' });
+    assert.equal(executions, 2, 'unknown backend execution is not automatically repeated');
+    const logs = await readdir(f.logDirectory);
+    const text = (await Promise.all(logs.map(name => readFile(join(f.logDirectory, name), 'utf8')))).join('');
+    assert.ok(text.includes('quality_execution_started')); assert.ok(text.includes('quality_execution_completed'));
+    assert.ok(!text.includes('check_variant')); assert.equal(f.backend.locks, 0); assert.equal(f.backend.saves, 0);
+  } finally { await f.cleanup(); }
+});
+
+test('quality tools advertise actual execution policy and reject missing confirmation through MCP', async () => {
+  const { makeMcp } = await import('../src/server.js');
+  const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+  const f = await fixture();
+  let dispatched = 0;
+  Object.assign(f.backend, { quality: async () => { dispatched++; return { test_status: 'no_tests' }; } });
+  const server = makeMcp(f.operations); const client = new Client({ name: 'quality-test', version: '1' });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  try {
+    await server.connect(a); await client.connect(b);
+    const tools = (await client.listTools()).tools;
+    for (const name of ['run_atc', 'run_unit_tests']) {
+      const tool = tools.find(t => t.name === name)!;
+      assert.equal(tool.annotations?.readOnlyHint, false); assert.equal(tool.annotations?.idempotentHint, false);
+      assert.ok(tool.inputSchema.required?.includes('request_id')); assert.ok(tool.inputSchema.required?.includes('confirm_execution'));
+    }
+    for (const name of ['get_atc_configuration', 'get_atc_results', 'list_source_versions', 'compare_source_versions'])
+      assert.equal(tools.find(t => t.name === name)?.annotations?.readOnlyHint, true);
+    const invalid = await client.callTool({ name: 'run_unit_tests', arguments: { connection_id: f.connection.connection_id, object_uri: object, request_id: 'one' } });
+    assert.equal(invalid.isError, true); assert.equal(dispatched, 0);
+    const result = await client.callTool({ name: 'run_unit_tests', arguments: { connection_id: f.connection.connection_id, object_uri: object, request_id: 'two', confirm_execution: true } });
+    assert.equal(result.isError, false); assert.equal(dispatched, 1);
+    assert.equal((result.structuredContent as any).data.test_status, 'no_tests');
   } finally { await client.close(); await server.close(); await f.cleanup(); }
 });

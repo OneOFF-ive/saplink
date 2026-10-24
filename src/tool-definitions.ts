@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { qualitySchemas, qualityDescriptions } from './quality-tools.js';
 import { repositorySchemas, repositoryDescriptions } from './repository-query.js';
 import { enhancementTypes } from './enhancements.js';
 import { tableQuerySchema, sqlQuerySchema } from './data-query.js';
@@ -27,6 +28,12 @@ const requestIdSchema = z.string().min(1).max(128).describe(("Unique ID for one 
   "uncertain writes with a new ID."));
 
 export const toolSchemas = {
+  get_atc_configuration: qualitySchemas.get_atc_configuration.extend(connection),
+  run_atc: qualitySchemas.run_atc.extend(connection),
+  get_atc_results: qualitySchemas.get_atc_results.extend(connection),
+  run_unit_tests: qualitySchemas.run_unit_tests.extend(connection),
+  list_source_versions: qualitySchemas.list_source_versions.extend(connection),
+  compare_source_versions: qualitySchemas.compare_source_versions.extend(connection),
   get_ddic_definition: repositorySchemas.get_ddic_definition.extend(connection),
   get_data_element: repositorySchemas.get_data_element.extend(connection),
   get_domain_values: repositorySchemas.get_domain_values.extend(connection),
@@ -132,6 +139,7 @@ export const toolSchemas = {
 
 const toolDescriptions: Record<ToolName, string> = {
   ...repositoryDescriptions,
+  ...qualityDescriptions,
   list_connections: ("List configured SAP connections with Client, language, username, backend URL and write policy. Confirm " +
     "the intended system and Client before writing."),
   get_capabilities: 'Probe ADT discovery. A capability does not imply write authorization.',

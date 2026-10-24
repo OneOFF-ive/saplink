@@ -7,6 +7,7 @@
 | 了解产品与主要能力 | [SapLink 产品介绍](../README.md) |
 | 安装应用、首次打开与升级卸载 | [Windows 安装指南](windows-installer.md) |
 | 检查新版本与用户确认安装 | [版本检查](operations.md#检查新版本)、[确认安装](operations.md#用户确认的自动安装) |
+| 代码质量、测试与历史差异 | [ATC、Unit 与源码版本差异](quality-tools.md) |
 | agent 学习如何操作 SAP | [MCP 客户端 SAP 操作手册](mcp-client-guide.md) |
 | 管理连接、令牌、服务与日志 | [部署与运维手册](operations.md) |
 | 让终端型 AI 客户端管理本地服务 | [AI 终端管理](ai-management.md) |

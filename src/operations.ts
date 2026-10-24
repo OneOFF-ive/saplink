@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { qualitySchemas, qualityObject, type QualityInput, type QualityTool } from './quality-tools.js';
 import { repositorySchemas, type RepositoryInput, type RepositoryTool } from './repository-query.js';
 import { searchEnhancements } from './enhancements.js';
 import { AdtBackend, adtUri, programUri, functionGroupUri, isFunctionGroup, compareSavedSource, savedSourceHash, definitionCommentsHash, type Backend, type Version, type ProgramKind } from './adt.js';
@@ -9,7 +10,7 @@ import { functionModuleGuidance } from './function-help.js';
 import { tableQuerySchema, readOnlySql, type TableQuery } from './data-query.js';
 import { writeTools } from './tool-policy.js';
 
-export type Input = RepositoryInput & {
+export type Input = RepositoryInput & QualityInput & {
   connection_id?: string;
   query?: string;
   type?: string;
@@ -408,6 +409,20 @@ export class Operations {
   }
 
   private async dispatch(tool: string, input: Input, connection: Connection, backend: Backend, context: Context): Promise<unknown> {
+    if (Object.hasOwn(qualitySchemas, tool)) {
+      const name = tool as QualityTool;
+      const { connection_id: _connectionId, ...args } = input;
+      const query = qualitySchemas[name].parse(args);
+      if ('object_uri' in query && query.object_uri) qualityObject(query.object_uri, adtUri);
+      if (!backend.quality) throw new AppError('CAPABILITY_UNSUPPORTED', 'Quality/history tools are unavailable in this backend');
+      if (!writeTools.has(tool)) return backend.quality(name, query);
+      await context.event('quality_execution_started');
+      context.dispatched = true;
+      const result = await backend.quality(name, query);
+      context.confirmed = true;
+      await context.event('quality_execution_completed');
+      return result;
+    }
     if (Object.hasOwn(repositorySchemas, tool)) {
       const name = tool as RepositoryTool;
       const { connection_id: _connectionId, ...args } = input;
