@@ -98,7 +98,8 @@ export class QualityTools {
     if ('includes' in metadata) {
       const main = metadata.includes.find(include => include['class:includeType'] === 'main');
       links = main?.links ?? [];
-      if (main?.['abapsource:sourceUri']) base = versionResource(main['abapsource:sourceUri'], base, this.origin, this.validate) + '/';
+      // Include links are relative to the class document, not the main source.
+      // SAP can advertise includes/main/versions beside source/main here.
     }
     const discovered = links.find(link => link.rel === 'http://www.sap.com/adt/relations/versions')?.href;
     if (!discovered) throw new AppError('CAPABILITY_UNSUPPORTED', 'SAP metadata exposes no main-source version history');

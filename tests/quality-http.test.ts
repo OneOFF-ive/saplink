@@ -29,6 +29,15 @@ async function fixture(unitStatus = 200) {
     } else if (url.pathname === '/sap/bc/adt/abapunit/testruns') {
       res.statusCode = unitStatus;
       res.end(unitStatus === 200 ? '<aunit:runResult xmlns:aunit="http://www.sap.com/adt/aunit"><program><testClasses><testClass name="LTC_TEST" riskLevel="harmless"><testMethods><testMethod name="OK" executionTime="0.1"/></testMethods></testClass></testClasses></program></aunit:runResult>' : '<error/>');
+    } else if (url.pathname === '/sap/bc/adt/oo/classes/ztest') {
+      res.end(`<class:abapClass xmlns:class="http://www.sap.com/adt/oo/classes" xmlns:adtcore="http://www.sap.com/adt/core" xmlns:abapsource="http://www.sap.com/adt/abapsource" xmlns:atom="http://www.w3.org/2005/Atom" adtcore:name="ZTEST" adtcore:type="CLAS/OC" adtcore:version="active" class:visibility="public"><class:include class:includeType="main" abapsource:sourceUri="source/main"><atom:link rel="http://www.sap.com/adt/relations/versions" href="includes/main/versions"/><atom:link rel="http://www.sap.com/adt/relations/source" href="source/main" type="text/plain"/></class:include></class:abapClass>`);
+    } else if (url.pathname === '/sap/bc/adt/oo/classes/ztest/includes/main/versions') {
+      res.setHeader('Content-Type', 'application/atom+xml;type=feed');
+      res.end('<atom:feed xmlns:atom="http://www.w3.org/2005/Atom"><atom:entry><atom:title>Earlier class</atom:title><atom:content src="/sap/bc/adt/oo/classes/ztest/includes/main/versions/20261024000000/00001/content"/></atom:entry></atom:feed>');
+    } else if (url.pathname === '/sap/bc/adt/oo/classes/ztest/includes/main/versions/20261024000000/00001/content') {
+      res.setHeader('Content-Type', 'text/plain'); res.end('CLASS ztest DEFINITION.\nENDCLASS.');
+    } else if (url.pathname === '/sap/bc/adt/oo/classes/ztest/source/main') {
+      res.setHeader('Content-Type', 'text/plain'); res.end('CLASS ztest DEFINITION FINAL.\nENDCLASS.');
     } else if (url.pathname === object) {
       res.end(`<program:abapProgram xmlns:program="http://www.sap.com/adt/programs/programs" xmlns:adtcore="http://www.sap.com/adt/core" xmlns:abapsource="http://www.sap.com/adt/abapsource" xmlns:atom="http://www.w3.org/2005/Atom" adtcore:name="ZTEST" adtcore:type="PROG/P" adtcore:version="${url.searchParams.get('version') ?? 'active'}" abapsource:sourceUri="source/main"><atom:link rel="http://www.sap.com/adt/relations/versions" href="${object}/source/main/versions"/></program:abapProgram>`);
     } else if (url.pathname === object + '/source/main/versions') {
@@ -103,6 +112,21 @@ test('history uses Atom media type and opaque object-bound selectors for discove
     assert.equal(comparison.added_lines, 1); assert.equal(comparison.removed_lines, 1);
     assert.ok(f.calls.some(c => c.url.searchParams.get('version') === '00001'));
     await assert.rejects(f.backend.quality('compare_source_versions', { object_uri: object, from_version: 'f'.repeat(64), to_version: 'active' }), /selector is unavailable/);
+    assert.ok(f.calls.every(c => c.method === 'GET'));
+  } finally { await f.close(); }
+});
+
+
+test('class main history links resolve relative to the class document, not source/main', async () => {
+  const f = await fixture(); const classObject = '/sap/bc/adt/oo/classes/ztest';
+  try {
+    const history: any = await f.backend.quality('list_source_versions', { object_uri: classObject });
+    assert.equal(history.returned_count, 1);
+    assert.ok(f.calls.some(c => c.url.pathname === classObject + '/includes/main/versions'));
+    assert.ok(!f.calls.some(c => c.url.pathname.includes('/source/main/includes/')));
+    const result: any = await f.backend.quality('compare_source_versions', { object_uri: classObject,
+      from_version: history.items[0].version_id, to_version: 'active' });
+    assert.equal(result.equal, false); assert.equal(result.added_lines, 1); assert.equal(result.removed_lines, 1);
     assert.ok(f.calls.every(c => c.method === 'GET'));
   } finally { await f.close(); }
 });
