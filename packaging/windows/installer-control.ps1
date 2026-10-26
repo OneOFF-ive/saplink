@@ -2,9 +2,18 @@
   [Parameter(Mandatory=$true)][ValidateSet('Check','AddPath','RemovePath','RemovePayload','RefreshIcons')][string]$Action,
   [Parameter(Mandatory=$true)][string]$InstallDirectory,
   [string]$InstallerPath,
+  [string]$ReportPath,
   [switch]$TestMode
 )
 $ErrorActionPreference = 'Stop'
+function Write-InstallerMessage([string]$Message) {
+  if ($ReportPath) { [IO.File]::WriteAllText([IO.Path]::GetFullPath($ReportPath), $Message, [Text.Encoding]::Unicode) }
+  Write-Output $Message
+}
+trap {
+  Write-InstallerMessage ('安装控制脚本失败：' + $_.Exception.Message)
+  exit 1
+}
 $installRoot = [IO.Path]::GetFullPath($InstallDirectory).TrimEnd('\')
 if ($installRoot -eq [IO.Path]::GetPathRoot($installRoot).TrimEnd('\') -or $installRoot.Contains(';')) {
   throw 'Choose a dedicated application directory without semicolons.'
@@ -30,16 +39,16 @@ function Check-Installation {
   if (Test-Path -LiteralPath $installRoot) {
     $items = @(Get-ChildItem -LiteralPath $installRoot -Force)
     if ($items.Count -and !(Read-Manifest)) {
-      Write-Output "目标文件夹包含其他文件，请选择空文件夹或原 SapLink 安装目录：$installRoot"
+      Write-InstallerMessage "目标文件夹包含其他文件，请选择空文件夹或原 SapLink 安装目录：$installRoot"
       exit 13
     }
   }
   $executables = @('runtime\node.exe','bin\saplink.exe','bin\saplink-gui.exe') | ForEach-Object { Join-Path $installRoot $_ }
-  $running = @(Get-CimInstance Win32_Process -Filter "Name='node.exe' OR Name='saplink.exe' OR Name='saplink-gui.exe'" | Where-Object {
+  $running = @(Get-CimInstance Win32_Process -OperationTimeoutSec 15 -Filter "Name='node.exe' OR Name='saplink.exe' OR Name='saplink-gui.exe'" | Where-Object {
     $_.ExecutablePath -and $executables -contains $_.ExecutablePath
   })
   if ($running.Count) {
-    Write-Output "安装目录中的程序仍在运行（PID：$($running.ProcessId -join ', ')）。请从托盘退出管理界面；后台服务请运行 saplink service stop。前台运行的程序请在其终端按 Ctrl+C。"
+    Write-InstallerMessage "安装目录中的程序仍在运行（PID：$($running.ProcessId -join ', ')）。请从托盘退出管理界面；后台服务请运行 saplink service stop。前台运行的程序请在其终端按 Ctrl+C。"
     exit 10
   }
   # Match src/paths.ts.
@@ -48,7 +57,7 @@ function Check-Installation {
   $lockPath = Join-Path $configDirectory 'runtime.lock'
   $guardPath = "$lockPath.guard"
   if (Test-Path -LiteralPath $guardPath) {
-    Write-Output "运行锁正在变更，或上次操作留下了门锁。请稍后重试；若持续出现，请使用 status/doctor 诊断并核实进程后处理：$guardPath"
+    Write-InstallerMessage "运行锁正在变更，或上次操作留下了门锁。请稍后重试；若持续出现，请使用 status/doctor 诊断并核实进程后处理：$guardPath"
     exit 12
   }
   if (Test-Path -LiteralPath $lockPath) {
@@ -59,7 +68,7 @@ function Check-Installation {
     $ownerId = if ($legacy) { $record } else { $record.pid }
     $parsedId = 0
     if (![int]::TryParse([string]$ownerId, [ref]$parsedId) -or $parsedId -le 0) { throw "运行锁内容无效：$lockPath" }
-    $owner = Get-CimInstance Win32_Process -Filter "ProcessId=$parsedId"
+    $owner = Get-CimInstance Win32_Process -OperationTimeoutSec 15 -Filter "ProcessId=$parsedId"
     $sameOwner = $false
     if ($owner) {
       if ($legacy) {
@@ -69,14 +78,14 @@ function Check-Installation {
       }
     }
     if ($sameOwner) {
-      Write-Output "SapLink 仍在运行（PID：$parsedId）。请从托盘退出管理界面，或运行 saplink service stop；前台程序请按 Ctrl+C。运行锁：$lockPath"
+      Write-InstallerMessage "SapLink 仍在运行（PID：$parsedId）。请从托盘退出管理界面，或运行 saplink service stop；前台程序请按 Ctrl+C。运行锁：$lockPath"
       exit 11
     }
     # A new guard means the read may have raced a lease change. Do not act on that snapshot.
     if ((Test-Path -LiteralPath $guardPath) -or !(Test-Path -LiteralPath $lockPath)) { throw '运行状态发生变化，请稍后重试。' }
     $currentRecord = Get-Content -LiteralPath $lockPath -Raw -Encoding UTF8 | ConvertFrom-Json
     if (($record | ConvertTo-Json -Compress) -ne ($currentRecord | ConvertTo-Json -Compress)) { throw '运行状态发生变化，请稍后重试。' }
-    Write-Output "已核实 PID $parsedId 的运行锁失效，允许继续；启动时将安全回收旧锁。"
+    Write-InstallerMessage "已核实 PID $parsedId 的运行锁失效，允许继续；启动时将安全回收旧锁。"
   }
   exit 0
 }
@@ -84,7 +93,7 @@ function Check-Installation {
 if ($Action -eq 'Check') {
   try { Check-Installation }
   catch {
-    Write-Output "无法确认安装目录或运行状态，请运行 saplink status --json / saplink doctor --json 后重试。详情：$($_.Exception.Message)"
+    Write-InstallerMessage "无法确认安装目录或运行状态，请运行 saplink status --json / saplink doctor --json 后重试。详情：$($_.Exception.Message)"
     exit 14
   }
 }

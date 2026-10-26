@@ -171,3 +171,9 @@ saplink update install --yes --json
 CLI 在外部 UI/前台服务持有锁时拒绝接管，应在管理页面更新或先正常退出。命令返回“移交更新程序”不是安装成功；最终结果位于配置目录 `update-install-result.json`。下载目录为配置目录下的 `updates/job-*`，默认 `%APPDATA%\saplink\updates\job-随机字符\`；下载时为 `installer.part`，下载及 SHA-256 校验通过后改为 `installer.exe`。`updates/pending.json` 防止重复任务。安装器超时仍可能运行时保留 pending，必须核实后处理，不能删标记盲目重试。确认目标版本安装成功后、恢复服务或界面前自动删除本次 installer.exe，并短暂重试文件占用；结果文件的 installer_cleanup.status 为 deleted 或 failed，清理失败时保留路径并提醒手动删除，不影响已安装版本。下载失败或校验失败会清除本次 installer.part，其他失败阶段可能保留已下载文件供排查，不应在更新仍进行时删除任务目录。
 
 旧版本不会因为 COS 上传了安装包便自动拥有该功能。首次需要安装包含本次改动的新版本，之后才可从 Web 或 CLI 自动更新。
+
+### 安装预检耗时与结果未知
+
+Windows 安装器执行 PowerShell 控制脚本时直接等待进程退出（`ExecWait`），不再通过 `nsExec::ExecToStack` 的重定向输出管道判断完成，避免子进程退出后输出句柄仍被持有而长时间等待。中文诊断写入安装器临时目录的 UTF-16 报告文件，失败退出码仍会阻止后续安装/卸载步骤。预检的 WMI 进程查询设有 15 秒操作超时。
+
+自动更新助手最多等待安装程序 10 分钟。达到上限记录 `status=unknown`，表示安装结果尚未确认，不等于安装成功或已经回滚；会保留本次安装包和 `updates/pending.json`，避免重复安装。先核对该任务的 `result.json`、当前安装版本及实际安装进程状态。不要仅因管理页断开就再次升级，也不要删除待处理标记或强杀安装器。已运行的旧安装器需要单独核实，源码修复不能改变其行为。

@@ -7,6 +7,7 @@ SetCompressor /SOLID zlib
 !include "x64.nsh"
 !include "FileFunc.nsh"
 !include "WinMessages.nsh"
+!include "installer-control.nsh"
 
 !ifndef APP_VERSION
   !error "APP_VERSION is required"
@@ -127,9 +128,7 @@ Section "SapLink 主程序（内置 Node.js，离线安装）" Core
   InitPluginsDir
   SetOutPath "$PLUGINSDIR"
   File /oname=installer-control.ps1 "${STAGE_DIR}\installer-control.ps1"
-  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-control.ps1" -Action Check -InstallDirectory "$INSTDIR"${TEST_FLAG}'
-  Pop $0
-  Pop $1
+  !insertmacro RunInstallerControl "$PLUGINSDIR\installer-control.ps1" '-Action Check -InstallDirectory "$INSTDIR"${TEST_FLAG}'
   ${If} $0 != 0
     DetailPrint "安装检查失败（错误码：$0）：$1"
     MessageBox MB_ICONSTOP "暂时无法安装（错误码：$0）。$\r$\n$\r$\n$1" /SD IDOK
@@ -137,9 +136,7 @@ Section "SapLink 主程序（内置 Node.js，离线安装）" Core
     Abort
   ${EndIf}
   IfFileExists "$INSTDIR\install-manifest.json" 0 fresh_install
-  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-control.ps1" -Action RemovePayload -InstallDirectory "$INSTDIR"${TEST_FLAG}'
-  Pop $0
-  Pop $1
+  !insertmacro RunInstallerControl "$PLUGINSDIR\installer-control.ps1" '-Action RemovePayload -InstallDirectory "$INSTDIR"${TEST_FLAG}'
   ${If} $0 != 0
     MessageBox MB_ICONSTOP "旧版本文件无法安全更新，请保持现状并重试或修复安装。" /SD IDOK
     Abort
@@ -171,9 +168,7 @@ Section "SapLink 主程序（内置 Node.js，离线安装）" Core
 SectionEnd
 
 Section "将 saplink 加入当前用户 PATH（重新打开终端生效）" UserPath
-  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\installer-control.ps1" -Action AddPath -InstallDirectory "$INSTDIR"${TEST_FLAG}'
-  Pop $0
-  Pop $1
+  !insertmacro RunInstallerControl "$INSTDIR\installer-control.ps1" '-Action AddPath -InstallDirectory "$INSTDIR"${TEST_FLAG}'
   ${If} $0 != 0
     MessageBox MB_ICONSTOP "PATH 设置失败。可从开始菜单启动，或修复安装后重试。" /SD IDOK
     SetErrorLevel 11
@@ -185,9 +180,7 @@ Section "创建桌面快捷方式" DesktopIcon
 SectionEnd
 
 Section "-Refresh icons"
-  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\installer-control.ps1" -Action RefreshIcons -InstallDirectory "$INSTDIR" -InstallerPath "$EXEPATH"'
-  Pop $0
-  Pop $1
+  !insertmacro RunInstallerControl "$INSTDIR\installer-control.ps1" '-Action RefreshIcons -InstallDirectory "$INSTDIR" -InstallerPath "$EXEPATH"'
   ${If} $0 != 0
     DetailPrint "程序已安装，但系统图标刷新未完成：$1"
   ${EndIf}
@@ -196,25 +189,19 @@ SectionEnd
 Section "Uninstall"
   InitPluginsDir
   CopyFiles /SILENT "$INSTDIR\installer-control.ps1" "$PLUGINSDIR\installer-control.ps1"
-  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-control.ps1" -Action Check -InstallDirectory "$INSTDIR"${TEST_FLAG}'
-  Pop $0
-  Pop $1
+  !insertmacro RunInstallerControl "$PLUGINSDIR\installer-control.ps1" '-Action Check -InstallDirectory "$INSTDIR"${TEST_FLAG}'
   ${If} $0 != 0
     DetailPrint "卸载检查失败（错误码：$0）：$1"
     MessageBox MB_ICONSTOP "暂时无法卸载（错误码：$0）。$\r$\n$\r$\n$1" /SD IDOK
     SetErrorLevel 10
     Abort
   ${EndIf}
-  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-control.ps1" -Action RemovePath -InstallDirectory "$INSTDIR"${TEST_FLAG}'
-  Pop $0
-  Pop $1
+  !insertmacro RunInstallerControl "$PLUGINSDIR\installer-control.ps1" '-Action RemovePath -InstallDirectory "$INSTDIR"${TEST_FLAG}'
   ${If} $0 != 0
     MessageBox MB_ICONSTOP "无法清理本程序添加的 PATH，请检查当前用户权限后重试。" /SD IDOK
     Abort
   ${EndIf}
-  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-control.ps1" -Action RemovePayload -InstallDirectory "$INSTDIR"${TEST_FLAG}'
-  Pop $0
-  Pop $1
+  !insertmacro RunInstallerControl "$PLUGINSDIR\installer-control.ps1" '-Action RemovePayload -InstallDirectory "$INSTDIR"${TEST_FLAG}'
   ${If} $0 != 0
     MessageBox MB_ICONSTOP "部分程序文件无法移除；配置及凭据未删除。请关闭占用程序后重试。" /SD IDOK
     Abort
