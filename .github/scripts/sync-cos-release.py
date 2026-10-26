@@ -31,7 +31,7 @@ def version_tuple(value):
     return tuple(map(int, value.split('.')))
 
 
-def prepare_manifest(path, release):
+def prepare_manifest(path, release, directory=None):
     prepared = json.loads(path.read_text(encoding='utf-8'))
     version = prepared['version']
     version_tuple(version)
@@ -49,7 +49,7 @@ def prepare_manifest(path, release):
             raise SyncError('Invalid official asset name or digest')
         if type(asset.get('size')) is not int or not 0 < asset['size'] <= MAX_INSTALLER_SIZE:
             raise SyncError('Invalid installer size')
-        local = path.parent / filename
+        local = (Path(directory) if directory is not None else path.parent) / filename
         digest = hashlib.sha256()
         size = 0
         with local.open('rb') as stream:
@@ -204,10 +204,10 @@ def verify_public(key, expected_size, expected_hash):
         raise SyncError('Public COS download failed SHA-256 verification')
 
 
-def sync_release(path, store, latest_release, api, verify=verify_public, read_public=public_bytes, request=None):
+def sync_release(path, store, latest_release, api, verify=verify_public, read_public=public_bytes, request=None, asset_directory=None):
     print('Checking latest GitHub release and local installer checksums...', flush=True)
     release = latest_release()
-    candidate, files = prepare_manifest(path, release)
+    candidate, files = prepare_manifest(path, release, asset_directory)
     from skill_archive import load_release
     content, metadata = load_release(api, release, request)
     skill_key = f'saplink/v{candidate["version"]}/{metadata["filename"]}'

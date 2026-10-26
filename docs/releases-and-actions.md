@@ -87,6 +87,46 @@ COS 工作流固定安装 cos-python-sdk-v5==1.9.44，并先运行离线同步�
 
 Skill ZIP 由 `skill_archive.py` 优先读取 Release ZIP 与校验附件，附件不可用时才从 Release 标签源码生成；已下载但校验失败时中止，不覆盖或绕过。其内容必须与标签中的技能源码一致，保留顶层 `saplink-manager/`、`SKILL.md`、`agents/`、`references/`。修改技能后需发布包含修改的新标签；不覆盖同版本不可变 ZIP。
 
+## 本地手动补同步 COS
+
+当 GitHub Runner 跨境上传超时，可在本机执行 [scripts/sync-cos.ps1](../scripts/sync-cos.ps1)。此入口复用 Action 发布器，同步双架构安装包、技能 ZIP、校验文件、发布说明和现有两个下载清单，不重新构建应用，不改动官网代码或当前清单格式。
+
+先停止或等待正在运行的 COS Action 完成，再手动同步；本地进程不受 GitHub concurrency group 保护，也不要同时运行多个本地发布进程。GitHub 正式 Release 必须已发布为 latest，两个安装包附件上传完成且具有 GitHub SHA-256。旧版本、预发布和本地文件与官方附件不一致时会停止。
+
+需要 Python 3.10+。在项目根目录的 PowerShell 执行（将示例版本替换为实际最新正式版本）：
+
+```powershell
+# 先预演：读取 GitHub，核对本地安装包和官方技能；不访问 COS、不需要 COS 密钥。
+.\scripts\sync-cos.ps1 -ReleaseTag v1.0.9 -DryRun
+
+# 实际补同步；默认使用 outputs/installers/1.0.9 中的两个安装包。
+.\scripts\sync-cos.ps1 -ReleaseTag v1.0.9
+
+# 本地文件位于其他目录时：
+.\scripts\sync-cos.ps1 -ReleaseTag v1.0.9 -Directory 'D:\SapLink releases\1.0.9'
+```
+
+不传 `-ReleaseTag` 时读取 GitHub latest，并使用对应的 `outputs/installers/<version>/`。脚本不会把本地 package.json 的版本当作已发布版本。它在本地原位置读取安装包，不重新从 GitHub 下载 exe，不覆盖安装包目录中的 `latest.json`；临时工作目录位于已忽略的 `.saplink/cos-local/`，结束后清理。本地安装包 SHA-256 必须与 GitHub 一致，单独修改本地 `.sha256` 无法绕过校验。
+
+技能 ZIP 沿用 Action 策略：优先从 Release 下载 ZIP 与校验附件并验证标签源码，附件不可用时从发布标签生成，不能用当前工作目录里尚未发布的技能替代。
+
+未设置环境变量时，实际同步会依次提示隐藏输入 COS SecretId、SecretKey，只保留在本次进程内存中。也可预先在当前终端设置 `COS_SECRET_ID`、`COS_SECRET_KEY`；GitHub Actions secrets 不会自动传到本机。权限和目标与 Action 相同，不需要提供账号主密钥。GitHub API 匿名请求受限时，可在当前终端设置只读 `GH_TOKEN`；脚本不会自动读取 git 凭据，也不会将密钥写进脚本、命令参数或日志。
+
+首次实际同步会在 `.saplink/cos-local/venv/` 创建隔离 Python 环境，安装与 Action 相同的 `cos-python-sdk-v5==1.9.44`，之后复用，不污染系统 Python。预演无需 SDK。Python 不在 PATH 时，可追加 `-Python 'C:\path\to\python.exe'`。若 Windows 阻止运行本地脚本，可使用：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\sync-cos.ps1 -ReleaseTag v1.0.9
+```
+
+网络中断或 Ctrl+C 后，可重新执行同一条命令；复核并复用已上传对象和安装包分块，不覆盖同版本已发布文件。上传成功必须看到 `Local COS synchronization succeeded`，脚本退出码为 0，并再次读取公开下载和清单确认。预演只证明本地文件与 GitHub 来源一致，不验证 COS 权限、上传网络或公开下载权限。本地补同步不会改变之前 Action 的失败状态。
+
+本地也可以直接使用已装好固定版本 SDK 的 Python：
+
+```powershell
+python scripts/sync-cos-local.py --tag v1.0.9 --directory outputs/installers/1.0.9
+python scripts/test-sync-cos-local.py -v
+```
+
 ## 6. 常见问题
 
 | 现象 | 检查与处理 |

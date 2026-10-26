@@ -39,6 +39,14 @@
 
 DDIC 和类结构结果以 `items` 扁平返回；每条的 `parent_index` 指向当前列表中的父节点，根为 `null`。`truncated=true` 表示嵌套结构尚未完整返回；不是只限制根节点的直接子项。
 
+### 结构、INCLUDE 与深层类型
+
+`get_ddic_definition` 首先请求 `/sap/bc/adt/ddic/ddl/elementinfo`。部分 SAP 后端对 DDIC 结构（`TABL/DS`）返回 HTTP 200，但只有空的 `elementInfo`；这不表示结构不存在。遇到空元数据，或该接口返回 HTTP 404/405/500/501 时，工具再按同一实体名请求 `/sap/bc/adt/ddic/elementinfo`。401/403 不触发接口回退；通用接口仍失败时返回其实际错误，不伪造字段。
+
+通用接口结果会校验实体名称，并兼容 XML 命名空间前缀差异。`.INCLUDE` 节点及 SAP 已展开的字段一并返回，`properties.elementProps` 保留后端提供的 `ddicIncludeName`、`ddicIsPartOfInclude`、`ddicIncludeHierarchyLevel`。这些字段表示 INCLUDE 归属，不等于 `parent_index` 的父子层级；后者仅描述本次响应的树形结构。字段过滤与总条数限制同样生效。
+
+Proxy 等深层结构中的表类型成员保留 `ddicDataType=ttyp` 和后端返回的类型引用，不自动递归展开表类型的行结构，也不将类型引用一律视为数据元素。标签取后端可用的短文本；没有返回的长度、标签等信息不会推测补齐。
+
 ## 示例：分析类成员和引用
 
 先搜索类，再用 `get_class_structure` 查看活动版本成员。它是后端成员大纲，不承诺包含完整方法签名、全部继承成员或所有调用关系。继承分析使用 `get_type_hierarchy`，不自动递归抓取整个系统。
@@ -91,4 +99,4 @@ DDIC 和类结构结果以 `items` 扁平返回；每条的 `parent_index` 指�
 
 没有通用分页 cursor。未展开节点不能解释为无引用，节点空列表也不证明所有动态或间接调用均不存在。
 
-2026-10-24 使用本地源码 MCP 对开发系统进行了只读验证，引用展开成功定位到调用程序的具体代码行。该样例的 8 个节点经 3 个请求展开，返回 1 个实际位置；这只是该次响应的验证结果，不作为其他系统的固定预期。
+

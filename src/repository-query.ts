@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
-import type { ADTClient, ClassComponent, DdicElement } from 'abap-adt-api';
-import { AppError } from './errors.js';
+import type { ADTClient, ClassComponent } from 'abap-adt-api';
+import { AppError, safeError } from './errors.js';
 import { findReferences } from './reference-query.js';
 
 const uri = z.string().min(1).max(2048).describe('Relative ADT object URI returned by SAP search or a prior tool. No full URL, query or fragment.');
@@ -83,6 +83,58 @@ export function parseDomain(xml: string, max: number) {
     ] };
 }
 
+
+type DefinitionNode = { name: string; type: string; properties: unknown; children: DefinitionNode[] };
+
+// The generic DDIC endpoint supports structures that ddl/elementinfo reports as
+// an empty elementInfo. Parse namespaces independently and preserve include/type
+// references supplied by SAP; no recursive requests or source parsing are needed.
+export function parseDdicDefinition(xml: string, entityName: string): DefinitionNode {
+  if (/<!DOCTYPE|<!ENTITY/i.test(xml) || XMLValidator.validate(xml) !== true)
+    malformed('Invalid DDIC element metadata XML');
+  const parsed = new XMLParser({ ignoreAttributes: false, removeNSPrefix: true,
+    parseTagValue: false, parseAttributeValue: false }).parse(xml);
+  let count = 0;
+  const parseNode = (raw: unknown, depth: number): DefinitionNode => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw) || depth > 128 || ++count > 10000)
+      malformed('Invalid or excessive DDIC element metadata');
+    const node = raw as Record<string, unknown>;
+    if (typeof node['@_name'] !== 'string' || !node['@_name'] ||
+        typeof node['@_type'] !== 'string' || !node['@_type'])
+      malformed('Expected named DDIC element metadata');
+    const props: Record<string, unknown> = {};
+    const rawProperties = node.properties as { entry?: unknown } | undefined;
+    const entries = rawProperties?.entry === undefined ? [] :
+      Array.isArray(rawProperties.entry) ? rawProperties.entry : [rawProperties.entry];
+    for (const entry of entries) {
+      if (!entry || typeof entry !== 'object') malformed('Invalid DDIC property');
+      const property = entry as Record<string, unknown>;
+      const key = property['@_key'];
+      if (typeof key !== 'string' || !key || ['__proto__', 'constructor', 'prototype'].includes(key))
+        malformed('Invalid DDIC property key');
+      const value = property['#text'] ?? '';
+      if (typeof value !== 'string') malformed('Invalid DDIC property value');
+      if (key === 'ddicIsKey') props[key] = value === 'true';
+      else if (/^ddic(?:Length|Decimals|HeadingLength|Label(?:Short|Medium|Long)Length)$/.test(key)
+          && /^\d+$/.test(value) && Number.isSafeInteger(Number(value))) props[key] = Number(value);
+      else props[key] = value;
+    }
+    const documentation = node.documentation as Record<string, unknown> | undefined;
+    if (documentation?.['@_rel'] === 'shorttext' && documentation['@_type'] === 'text/plain'
+        && typeof documentation['#text'] === 'string' && props.ddicLabelLong === undefined)
+      props.ddicLabelLong = documentation['#text'];
+    const rawChildren = node.elementInfo === undefined ? [] :
+      Array.isArray(node.elementInfo) ? node.elementInfo : [node.elementInfo];
+    return { name: node['@_name'] as string, type: node['@_type'] as string,
+      properties: { elementProps: Object.keys(props).length ? props : false, annotations: [] },
+      children: rawChildren.map(child => parseNode(child, depth + 1)) };
+  };
+  const root = parseNode(parsed.elementInfo, 0);
+  if (root.name.toUpperCase() !== entityName.toUpperCase())
+    malformed('DDIC metadata does not match the requested entity');
+  return root;
+}
+
 type ReadSource = (object: string, version: 'active') => Promise<{ source_uri: string; source: string; revision: string }>;
 export class RepositoryQueries {
   constructor(private reader: ADTClient, private read: ReadSource, private validateUri: (value: string) => string) {}
@@ -90,6 +142,26 @@ export class RepositoryQueries {
     const checked = this.validateUri(value);
     if (!family.test(checked)) throw new AppError('INVALID_URI', 'Use the matching DDIC, class or interface object URI returned by SAP');
     return checked;
+  }
+
+  private async ddicDefinition(entityName: string): Promise<DefinitionNode> {
+    try {
+      const root = await this.reader.ddicElement([entityName], false, false, false);
+      if (root?.name && root.type) {
+        if (root.name.toUpperCase() !== entityName.toUpperCase())
+          malformed('DDIC metadata does not match the requested entity');
+        return root;
+      }
+    } catch (error) {
+      const status = (safeError(error).details as { http_status?: number } | undefined)?.http_status;
+      // Do not retry authentication/authorization failures via another endpoint.
+      if (!status || ![404, 405, 500, 501].includes(status)) throw error;
+    }
+    const response = await this.reader.httpClient.request('/sap/bc/adt/ddic/elementinfo', {
+      method: 'GET', headers: { Accept: 'application/vnd.sap.adt.elementinfo+xml' },
+      qs: { path: entityName }
+    });
+    return parseDdicDefinition(response.body, entityName);
   }
   private async sourcePosition(object: string, lineNumber: number, start: number, end = start) {
     const source = await this.read(this.validateUri(object), 'active');
@@ -105,12 +177,11 @@ export class RepositoryQueries {
       case 'get_ddic_definition': {
         const p = repositorySchemas[tool].parse(input);
         const path = [p.entity_name.toUpperCase(), ...(p.field_name ? [p.field_name.toUpperCase()] : [])];
-        let root = await this.reader.ddicElement([path[0]], false, false, false);
-        if (!root?.name || !root.type) malformed('Expected DDIC element metadata');
+        let root = await this.ddicDefinition(path[0]);
         if (p.field_name) {
           // Older backends ignore additional path segments and return the whole
           // entity. Select matching fields locally before applying the limit.
-          const matches: DdicElement[] = [];
+          const matches: DefinitionNode[] = [];
           const pending = [...(root.children ?? [])].reverse();
           while (pending.length) {
             const node = pending.pop()!;
@@ -121,11 +192,11 @@ export class RepositoryQueries {
             'Requested field was not found in the metadata returned by SAP', { entity_name: path[0], field_name: path[1] });
           root = { ...root, children: matches };
         }
-        const result = flattenTree<DdicElement>(root, n => n.children ?? [], p.limit);
+        const result = flattenTree<DefinitionNode>(root, n => n.children ?? [], p.limit);
         return { entity_name: path[0], field_name: path[1], version: 'active', ...result,
           items: result.items.map(({ node, parent_index }) => ({ name: node.name, type: node.type,
             parent_index, properties: node.properties })),
-          limitations: ['Only metadata exposed by this SAP endpoint; extension views and secondary objects were not requested.'] };
+          limitations: ['Only metadata exposed by SAP; extension views and secondary objects were not explicitly requested.', 'INCLUDE expansion follows the backend response; table-type references are not recursively expanded.'] };
       }
       case 'get_data_element': {
         const p = repositorySchemas[tool].parse(input);

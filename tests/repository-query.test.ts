@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { AdtBackend, adtUri, sourceResult } from '../src/adt.js';
 import { connectionSchema } from '../src/config.js';
-import { repositorySchemas, parseDomain, flattenTree } from '../src/repository-query.js';
+import { repositorySchemas, parseDomain, flattenTree, parseDdicDefinition } from '../src/repository-query.js';
 import { toolSchemas } from '../src/tool-definitions.js';
 import { safeError } from '../src/errors.js';
 
@@ -18,7 +18,7 @@ const domainXml = `<doma:domain xmlns:doma="http://www.sap.com/adt/ddic/domains"
 <doma:fixValue><doma:low>123456789012345678.90</doma:low><doma:text>Exact</doma:text></doma:fixValue>
 </doma:fixValues></doma:valueInformation></doma:content></doma:domain>`;
 
-async function fixture(status = 200) {
+async function fixture(status = 200, ddlBody?: string, genericBody?: string, genericStatus = status) {
   const calls: { url: URL; method?: string; body: string; session?: string }[] = [];
   const server = createServer(async (req, res) => {
     let body = ''; for await (const chunk of req) body += chunk;
@@ -30,9 +30,13 @@ async function fixture(status = 200) {
     if (url.pathname.endsWith('/icf/logoff')) { res.end(''); return; }
     calls.push({ url, method: req.method, body, session: req.headers['x-sap-adt-sessiontype'] as string });
     res.statusCode = status;
-    if (status !== 200) { res.end('<error/>'); return; }
+    if (status !== 200 && url.pathname !== '/sap/bc/adt/ddic/elementinfo') { res.end('<error/>'); return; }
     switch (url.pathname) {
+      case '/sap/bc/adt/ddic/elementinfo':
+        res.statusCode = genericBody === undefined ? (genericStatus === 200 ? 404 : genericStatus) : genericStatus;
+        res.end(genericBody ?? '<error/>'); break;
       case '/sap/bc/adt/ddic/ddl/elementinfo':
+        if (ddlBody !== undefined) { res.end(ddlBody); break; }
         res.end(`<abapsource:elementInfo xmlns:abapsource="http://www.sap.com/adt/abapsource" xmlns:adtcore="http://www.sap.com/adt/core" adtcore:name="EKKO" adtcore:type="TABL/DT">
         <abapsource:elementInfo adtcore:name="MANDT" adtcore:type="TABL/DF"/>
         <abapsource:elementInfo adtcore:name="EBELN" adtcore:type="TABL/DF"><abapsource:properties>
@@ -191,3 +195,85 @@ for (const status of [403, 404]) {
     } finally { await f.close(); }
   });
 }
+
+const emptyElementInfo = '<abapsource:elementInfo xmlns:abapsource="http://www.sap.com/adt/abapsource"><abapsource:properties/></abapsource:elementInfo>';
+const structureElementInfo = `<s:elementInfo xmlns:s="http://www.sap.com/adt/abapsource" xmlns:c="http://www.sap.com/adt/core" c:name="zstructure" c:type="TABL/DS">
+<s:properties/>
+<s:elementInfo c:name=".include" c:type="TABL/DS"><s:properties><s:entry s:key="ddicIncludeName">ZBASE</s:entry></s:properties></s:elementInfo>
+<s:elementInfo c:name="FIELD" c:type="TABL/DTF"><s:properties>
+<s:entry s:key="ddicIsKey">false</s:entry><s:entry s:key="ddicDataElement">ZFIELD</s:entry>
+<s:entry s:key="ddicDataType">char</s:entry><s:entry s:key="ddicLength">000010</s:entry>
+<s:entry s:key="ddicIsPartOfInclude">ZBASE</s:entry><s:entry s:key="ddicIncludeHierarchyLevel">1</s:entry>
+</s:properties><s:documentation rel="shorttext" type="text/plain">Field label</s:documentation></s:elementInfo>
+<s:elementInfo c:name="CHILD_TABLE" c:type="TABL/DTF"><s:properties><s:entry s:key="ddicDataType">ttyp</s:entry><s:entry s:key="ddicDataElement">ZCHILD_T</s:entry></s:properties></s:elementInfo>
+</s:elementInfo>`;
+
+test('structures use generic DDIC metadata when the DDL endpoint returns an empty elementInfo', async () => {
+  const f = await fixture(200, emptyElementInfo, structureElementInfo);
+  try {
+    const result: any = await f.backend.inspectRepository('get_ddic_definition', { entity_name: 'ZSTRUCTURE' });
+    assert.equal(result.items[0].type, 'TABL/DS');
+    assert.equal(result.items[1].name, '.include');
+    assert.equal(result.items[1].properties.elementProps.ddicIncludeName, 'ZBASE');
+    const field = result.items[2].properties.elementProps;
+    assert.equal(field.ddicIsKey, false);
+    assert.equal(field.ddicLength, 10);
+    assert.equal(field.ddicIsPartOfInclude, 'ZBASE');
+    assert.equal(field.ddicLabelLong, 'Field label');
+    assert.equal(result.items[3].properties.elementProps.ddicDataType, 'ttyp');
+    assert.equal(result.items[3].properties.elementProps.ddicDataElement, 'ZCHILD_T');
+    assert.equal(result.truncated, false);
+    assert.equal(f.calls.length, 2);
+    assert.equal(f.calls[1].url.pathname, '/sap/bc/adt/ddic/elementinfo');
+    assert.equal(f.calls[1].url.searchParams.get('path'), 'ZSTRUCTURE');
+    assert.ok(f.calls.every(call => call.method === 'GET' && call.session === 'stateless'));
+  } finally { await f.close(); }
+});
+
+test('generic DDIC fallback retains field filtering, bounded results and missing-field errors', async () => {
+  const f = await fixture(200, emptyElementInfo, structureElementInfo);
+  try {
+    const filtered: any = await f.backend.inspectRepository('get_ddic_definition',
+      { entity_name: 'ZSTRUCTURE', field_name: 'field' });
+    assert.equal(filtered.returned_count, 2);
+    assert.equal(filtered.items[1].name, 'FIELD');
+    const bounded: any = await f.backend.inspectRepository('get_ddic_definition',
+      { entity_name: 'ZSTRUCTURE', limit: 2 });
+    assert.equal(bounded.returned_count, 2);
+    assert.equal(bounded.truncated, true);
+    assert.equal(bounded.items[1].parent_index, 0);
+    await assert.rejects(f.backend.inspectRepository('get_ddic_definition',
+      { entity_name: 'ZSTRUCTURE', field_name: 'ABSENT' }), error => safeError(error).code === 'DDIC_FIELD_NOT_FOUND');
+  } finally { await f.close(); }
+});
+
+for (const status of [404, 405, 500, 501]) {
+  test('generic DDIC fallback recovers DDL HTTP ' + status, async () => {
+    const f = await fixture(status, undefined, structureElementInfo, 200);
+    try {
+      const result: any = await f.backend.inspectRepository('get_ddic_definition', { entity_name: 'ZSTRUCTURE' });
+      assert.equal(result.items[0].type, 'TABL/DS');
+      assert.equal(f.calls.length, 2);
+    } finally { await f.close(); }
+  });
+}
+
+for (const status of [401, 403]) {
+  test('DDIC authorization error ' + status + ' never triggers endpoint fallback', async () => {
+    const f = await fixture(status, undefined, structureElementInfo, 200);
+    try {
+      await assert.rejects(f.backend.inspectRepository('get_ddic_definition', { entity_name: 'ZSTRUCTURE' }),
+        error => safeError(error).code === (status === 401 ? 'AUTH_FAILED' : 'HTTP_FORBIDDEN'));
+      assert.equal(f.calls.length, 1);
+    } finally { await f.close(); }
+  });
+}
+
+test('generic DDIC parser validates identity, metadata and XML entities', () => {
+  assert.throws(() => parseDdicDefinition(structureElementInfo, 'WRONG'), /does not match/);
+  assert.throws(() => parseDdicDefinition(emptyElementInfo, 'ZSTRUCTURE'), /named DDIC/);
+  assert.throws(() => parseDdicDefinition('<!DOCTYPE x><elementInfo/>', 'X'), /Invalid DDIC/);
+  assert.throws(() => parseDdicDefinition(structureElementInfo.replace('s:key="ddicIncludeName"', 's:key="__proto__"'), 'ZSTRUCTURE'), /property key/);
+  const ordinary = structureElementInfo.replace(/<s:elementInfo c:name=".include"[\s\S]*?<\/s:elementInfo>/, '');
+  assert.equal(parseDdicDefinition(ordinary, 'ZSTRUCTURE').children.length, 2);
+});

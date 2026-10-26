@@ -68,9 +68,20 @@ class SyncTests(unittest.TestCase):
                                'url': '/unused', 'size': len(self.skill_content),
                                'sha256': hashlib.sha256(self.skill_content).hexdigest()}
 
-    def run_sync(self, latest=None, verify=None):
+    def run_sync(self, latest=None, verify=None, directory=None):
         with patch('skill_archive.build', return_value=(self.skill_content, self.skill_metadata)), contextlib.redirect_stdout(io.StringIO()):
-            return sync.sync_release(self.path, self.store, latest or (lambda: self.release), lambda endpoint: None, verify or self.store.verify, self.store.public)
+            return sync.sync_release(self.path, self.store, latest or (lambda: self.release), lambda endpoint: None, verify or self.store.verify, self.store.public, asset_directory=directory)
+
+    def test_local_recovery_can_keep_manifest_separate_from_installer_directory(self):
+        directory = self.path.parent
+        work = directory / 'separate-work'
+        work.mkdir()
+        target = work / 'releases.json'
+        self.path.rename(target)
+        self.path = target
+        self.assertTrue(self.run_sync(directory=directory))
+        self.assertEqual(self.store.writes[-1], sync.LATEST_KEY)
+        self.assertIn(sync.SKILL_LATEST_KEY, self.store.objects)
 
     def test_uploads_both_architectures_and_commits_pointer_last(self):
         self.assertTrue(self.run_sync())
