@@ -4,6 +4,7 @@ $job = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Plan))
 $planData = $null
 $keepPending = $false
 $pathsValidated = $false
+$installerCleanup = $null
 function Write-Json([string]$Path, $Value) {
   $text = $Value | ConvertTo-Json -Depth 5
   [IO.File]::WriteAllText($Path, $text, [Text.UTF8Encoding]::new($false))
@@ -77,6 +78,21 @@ try {
   if ($installer.ExitCode -ne 0) { throw "Installer returned exit code $($installer.ExitCode). Reopen or repair SapLink; configuration is preserved." }
   $installed = Get-Content -LiteralPath (Join-Path $installRoot 'install-manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
   if ($installed.app_id -ne 'org.saplink.desktop' -or $installed.version -ne $planData.version) { throw 'Could not verify the installed version.' }
+  # Installation is verified. Clean up before restart, which may fail independently.
+  # NSIS can briefly retain the executable after its parent process has exited.
+  $installerCleanup = @{ status='failed'; path=$planData.installer }
+  for ($attempt = 0; $attempt -lt 10; $attempt++) {
+    try {
+      if (Test-Path -LiteralPath $planData.installer) { Remove-Item -LiteralPath $planData.installer -ErrorAction Stop }
+      $installerCleanup.status = 'deleted'
+      break
+    } catch {
+      if ($attempt -lt 9) { Start-Sleep -Milliseconds 300 }
+    }
+  }
+  if ($installerCleanup.status -eq 'failed') {
+    $installerCleanup.message = 'Installation succeeded, but installer cleanup failed. Delete this file manually after the installer exits.'
+  }
   $restart = 'not_requested'
   if ($planData.mode -eq 'ui') {
     if ($planData.mcp_port) { $env:SAPLINK_RESTART_MCP_PORT = [string]$planData.mcp_port }
@@ -88,13 +104,12 @@ try {
     if ($LASTEXITCODE -ne 0 -or ($output | ConvertFrom-Json).data.state -ne 'running') { throw 'Installed successfully, but background service restart was not confirmed.' }
     $restart = 'service_running'
   }
-  $result = @{ status='installed'; version=$planData.version; restart=$restart; finished_at=[DateTime]::UtcNow.ToString('o') }
+  $result = @{ status='installed'; version=$planData.version; restart=$restart; installer_cleanup=$installerCleanup; finished_at=[DateTime]::UtcNow.ToString('o') }
   Write-Json (Join-Path $job 'result.json') $result
   Write-Json (Join-Path $configRoot 'update-install-result.json') $result
-  try { Remove-Item -LiteralPath $planData.installer -ErrorAction Stop } catch { }
 } catch {
   if ($ValidateOnly) { Write-Error $_.Exception.Message; exit 1 }
-  $result = @{ status=$(if ($keepPending) { 'unknown' } else { 'failed' }); version=$planData.version; message=$_.Exception.Message; finished_at=[DateTime]::UtcNow.ToString('o') }
+  $result = @{ status=$(if ($keepPending) { 'unknown' } else { 'failed' }); version=$planData.version; message=$_.Exception.Message; installer_cleanup=$installerCleanup; finished_at=[DateTime]::UtcNow.ToString('o') }
   Write-Json (Join-Path $job 'result.json') $result
   if ($pathsValidated) { Write-Json (Join-Path $configRoot 'update-install-result.json') $result }
   exit 1

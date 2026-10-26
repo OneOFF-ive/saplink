@@ -12,6 +12,7 @@ const cacheLifetime = 24 * 60 * 60 * 1000;
 const versionPattern = /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 const releaseSchema = z.object({
   tag_name: z.string().max(256).regex(versionPattern),
+  name: z.string().max(1024).nullable().optional(), body: z.string().max(64000).nullable().optional(),
   draft: z.literal(false), prerelease: z.literal(false),
   published_at: z.string().nullable(),
   html_url: z.string().refine(value => {
@@ -20,6 +21,8 @@ const releaseSchema = z.object({
     catch { return false; }
   })
 }).refine(value => !versionPattern.exec(value.tag_name)?.[4], 'Expected a stable release');
+const notesSchema = z.object({ schema_version: z.literal(1), version: z.string(),
+  title: z.string().max(1024), notes: z.string().max(64000) }).strict();
 const downloadSchema = z.object({
   architecture: z.enum(['x64', 'arm64']), url: z.string().url(), sha256: z.string().regex(/^[a-f0-9]{64}$/)
 }).strict();
@@ -97,6 +100,7 @@ export async function checkForUpdate(currentVersion: string, directory: string,
   if (!options.force) {
     try {
       const value = cacheSchema.parse(JSON.parse(await readFile(cachePath, 'utf8')));
+      if (location && value.source !== 'cos') throw new Error('Refresh legacy fallback cache');
       if (value.source === 'cos') {
         if (!value.release) throw new Error('Missing mirror version');
         validateDownloads(value.downloads, location, value.release.tag_name.replace(/^v/, ''));
@@ -128,7 +132,10 @@ export async function checkForUpdate(currentVersion: string, directory: string,
         downloads = manifest.downloads;
         source = 'cos';
         mirrorSucceeded = true;
-      } catch { options.signal?.throwIfAborted(); /* A missing/broken mirror falls back to GitHub. */ }
+      } catch {
+        options.signal?.throwIfAborted();
+        throw new AppError('UPDATE_CHECK_FAILED', 'COS 更新清单不可用或格式无效，请稍后重试；未自动切换到 GitHub。');
+      }
     }
     if (!mirrorSucceeded) {
       options.signal?.throwIfAborted();
@@ -144,6 +151,18 @@ export async function checkForUpdate(currentVersion: string, directory: string,
       downloads = [];
       source = 'github';
     }
+    if (source === 'cos' && location && release && isNewerVersion(release.tag_name, currentVersion)) {
+      // Separate metadata preserves the strict installer manifest used by older clients.
+      // Fetch only the matching version from COS; notes failure must not block installation.
+      try {
+        const version = release.tag_name.replace(/^v/, '');
+        const response = await request(new URL(`v${version}/release-notes.json`, new URL('.', location)).href);
+        if (response.ok) {
+          const notes = notesSchema.parse(await readMetadata(response));
+          if (notes.version === version) release = { ...release, name: notes.title, body: notes.notes };
+        } else await response.body?.cancel().catch(() => {});
+      } catch { options.signal?.throwIfAborted(); }
+    }
     // Update metadata is separate from connection configuration and needs no service lock.
     try {
       await mkdir(directory, { recursive: true });
@@ -156,6 +175,8 @@ export async function checkForUpdate(currentVersion: string, directory: string,
     current_version: currentVersion,
     latest_version: release?.tag_name.replace(/^v/, '') ?? null,
     source, downloads,
+    ...(release?.name != null ? { release_title: release.name } : {}),
+    ...(release?.body != null ? { release_notes: release.body } : {}),
     update_available: release ? isNewerVersion(release.tag_name, currentVersion) : false,
     release_url: source === 'cos' ? releasesUrl : release?.html_url ?? releasesUrl,
     published_at: release?.published_at ?? null,

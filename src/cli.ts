@@ -110,6 +110,8 @@ updates.command('check').option('--force', 'Bypass the 24-hour release metadata 
       console.log(result.message);
       console.log(`Release / download page: ${result.release_url}`);
       console.log(`Update source: ${result.source}`);
+      if (result.release_title) console.log(`Release title: ${result.release_title}`);
+      if (result.release_notes) console.log(`Release notes:\n${result.release_notes}`);
       for (const item of result.downloads) console.log(`Windows ${item.architecture}: ${item.url}\nSHA-256: ${item.sha256}`);
       if (result.cached) console.log('Using cached metadata; use --force to refresh update sources.');
     }

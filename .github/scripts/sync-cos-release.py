@@ -250,6 +250,16 @@ def sync_release(path, store, latest_release, api, verify=verify_public, read_pu
     if not may_publish(existing, candidate):
         print('Skipping latest.json: COS already advertises a newer version.')
         return False
+    # Keep release prose separate: published clients reject extra latest.json keys.
+    title, notes = latest.get('name') or '', latest.get('body') or ''
+    if not isinstance(title, str) or not isinstance(notes, str) or len(title) > 1024 or len(notes) > 64000:
+        raise SyncError('Release title or notes exceed metadata limits')
+    release_notes = {'schema_version': 1, 'version': candidate['version'], 'title': title, 'notes': notes}
+    notes_key = f'saplink/v{candidate["version"]}/release-notes.json'
+    if not store.exists(notes_key) or json.loads(read_public(notes_key, 256 * 1024)) != release_notes:
+        store.put_bytes(notes_key, (json.dumps(release_notes, ensure_ascii=False) + '\n').encode(), immutable=False)
+    if json.loads(read_public(notes_key, 256 * 1024)) != release_notes:
+        raise SyncError('Public COS release notes verification failed')
     # Publish the small skill pointer first. Old clients must see exactly the original
     # four installer keys, including when repairing an already polluted same-version pointer.
     if existing and existing['version'] == candidate['version'] and existing.get('skill', skill) != skill:

@@ -31,7 +31,7 @@ node dist/cli.js update check --json
 
 ## 测试与接口维护
 
-版本检查模块为 `src/updates.ts`，当前版本取自 `package.json`，默认优先读取 COS 的 `saplink/latest.json`，不可用时回退 `OneOFF-ive/saplink` 的 GitHub `releases/latest` 接口。正式标签须为语义版本（可带 `v` 前缀）；仅提示版本更高的正式发布，同号正式版高于本地预发布版。不是按字符串或发布时间比较版本；GitHub latest 指定的版本也不一定是所有标签中的最大版本。
+版本检查模块为 `src/updates.ts`，当前版本取自 `package.json`，默认仅读取 COS 的 `saplink/latest.json`，失败时不自动回退 GitHub；显式配置 `SAPLINK_UPDATE_URL=github` 才查询 GitHub。正式标签须为语义版本（可带 `v` 前缀）；仅提示版本更高的正式发布，同号正式版高于本地预发布版。不是按字符串或发布时间比较版本；GitHub latest 指定的版本也不一定是所有标签中的最大版本。
 
 版本检查使用独立的 `update-check.json` 缓存，不获取 runtime/config 锁。HTTP 请求不携带 SAP 或 MCP 凭据、不跟随重定向，每个源请求设置 8 秒超时；检查本身不执行安装文件。显式确认安装由独立的 self-update 模块处理，见本文末尾实现说明。检查模块允许注入 fetch 和时间供离线测试，覆盖比较、缓存与强制刷新、错误响应及 CLI 文本/JSON 输出。
 
@@ -185,3 +185,9 @@ powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File packagin
 ```
 
 此命令使用 package.json 版本，只输出 Skill ZIP 和校验文件，不构建安装包、不更新版本号。完整 `package:windows` 和 `release:windows` 均自动调用。Markdown/YAML 的 CRLF 转为 Git 标准 LF，避免 Windows checkout 与 Release 标签内容不同；拒绝源目录中的链接及超出大小限制的文件。构建后应将安装包、技能 ZIP 与全部 `.sha256` 附件一起上传到相同代码提交的 Release。
+
+### COS 更新说明
+
+Sync COS downloads 在发布 latest.json 之前，将同一正式 Release 的 name、body 同步为 `saplink/v<version>/release-notes.json`（schema_version=1、version、title、notes），通过匿名 HTTPS 回读确认后继续发布。重复同步可刷新说明，不替换安装包；说明使用 no-cache。旧版严格安装清单保持原来的四个字段。
+
+新版客户端发现更新时仅从清单同源的对应版本目录获取说明，校验版本一致并缓存；标题最多 1024 字符、说明最多 64000 字符、响应最多 256 KiB。说明缺失或不可用不影响已验证安装包的更新，也不额外请求 GitHub。界面以纯文本保留换行展示，避免执行 Release 中的 HTML。

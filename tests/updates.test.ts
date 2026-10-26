@@ -168,6 +168,7 @@ test('COS is preferred, exposes verified download metadata and caches it', async
   let calls = 0;
   try {
     const mock = (async (url, init) => {
+      if (String(url).endsWith('/release-notes.json')) return new Response('{}', { status: 404 });
       calls++; assert.equal(url, defaultManifestUrl); assert.equal(init?.redirect, 'error');
       assert.equal(new Headers(init?.headers).has('Authorization'), false);
       return new Response(JSON.stringify(manifest));
@@ -190,6 +191,7 @@ test('unified COS manifest accepts skill metadata without treating it as an inst
   let calls = 0;
   try {
     const mock = (async (url) => {
+      if (String(url).endsWith('/release-notes.json')) return new Response('{}', { status: 404 });
       calls++; assert.equal(url, defaultManifestUrl);
       return new Response(JSON.stringify({ ...manifest, skill }));
     }) as typeof fetch;
@@ -201,7 +203,7 @@ test('unified COS manifest accepts skill metadata without treating it as an inst
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('missing, offline, oversized or unsafe COS metadata falls back to GitHub', async () => {
+test('missing, offline, oversized or unsafe COS metadata fails without contacting GitHub', async () => {
   const directory = await temporaryDirectory();
   const invalid = [
     () => new Response('{}', { status: 404 }),
@@ -215,12 +217,11 @@ test('missing, offline, oversized or unsafe COS metadata falls back to GitHub', 
   try {
     for (const response of invalid) {
       const urls: string[] = [];
-      const result = await checkDualSource('0.1.0', directory, { force: true, fetcher: (async url => {
+      await assert.rejects(checkDualSource('0.1.0', directory, { force: true, fetcher: (async url => {
         urls.push(String(url));
-        return String(url) === defaultManifestUrl ? response() : new Response(JSON.stringify(release));
-      }) as typeof fetch });
-      assert.equal(result.source, 'github'); assert.deepEqual(result.downloads, []);
-      assert.equal(result.latest_version, '0.2.0'); assert.equal(urls.length, 2);
+        return response();
+      }) as typeof fetch }), /COS/);
+      assert.deepEqual(urls, [defaultManifestUrl]);
     }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
@@ -233,6 +234,7 @@ test('changing configured manifest invalidates cache and download origin is scop
     await checkDualSource('0.1.0', directory, { now: 1000, fetcher: fetcher(manifest) });
     let calls = 0;
     const changed = await checkDualSource('0.1.0', directory, { now: 2000, manifestUrl: customUrl, fetcher: (async url => {
+      if (String(url).endsWith('/release-notes.json')) return new Response('{}', { status: 404 });
       calls++; assert.equal(url, customUrl); return new Response(JSON.stringify(customManifest));
     }) as typeof fetch });
     assert.equal(calls, 1); assert.equal(changed.cached, false); assert.equal(changed.source, 'cos');
@@ -258,7 +260,8 @@ test('startup bypasses a fresh old COS cache and subsequent checks discover newl
   await checkDualSource('0.1.0', directory, { fetcher: fetcher(manifest) });
   let version = '0.3.0';
   let calls = 0;
-  const automatic = startDualAutomatic('0.1.0', directory, { fetcher: (async () => {
+  const automatic = startDualAutomatic('0.1.0', directory, { fetcher: (async url => {
+    if (String(url).endsWith('/release-notes.json')) return new Response('{}', { status: 404 });
     calls++;
     return new Response(JSON.stringify({ ...manifest, version, downloads: [{ ...manifest.downloads[0],
       url: new URL(`v${version}/SapLink-${version}-win-x64-setup.exe`, defaultManifestUrl).href }] }));
@@ -289,5 +292,77 @@ test('the published 1.0.4 strict schema accepts the installer manifest without s
     const result = await checkDualSource('0.1.0', directory, { force: true, fetcher: fetcher(manifest) });
     assert.equal(result.source, 'cos');
     assert.equal(result.update_available, true);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('COS release title and notes match the detected version, survive cache and never require GitHub', async () => {
+  const directory = await temporaryDirectory();
+  const urls: string[] = [];
+  const notesUrl = new URL('v0.2.0/release-notes.json', defaultManifestUrl).href;
+  const mock = (async url => {
+    urls.push(String(url));
+    assert.ok([defaultManifestUrl, notesUrl].includes(String(url)));
+    return new Response(JSON.stringify(String(url) === defaultManifestUrl ? manifest : {
+      schema_version: 1, version: '0.2.0', title: 'SapLink 更新', notes: '## 修复\n- 问题一'
+    }));
+  }) as typeof fetch;
+  try {
+    const result = await checkDualSource('0.1.0', directory, { fetcher: mock });
+    assert.equal(result.release_title, 'SapLink 更新');
+    assert.equal(result.release_notes, '## 修复\n- 问题一');
+    const cached = await checkDualSource('0.1.0', directory, { fetcher: mock });
+    assert.equal(cached.release_notes, result.release_notes);
+    assert.equal(cached.cached, true);
+    assert.deepEqual(urls, [defaultManifestUrl, notesUrl]);
+    for (const notes of [{schema_version: 1, version: '0.3.0', title: 'wrong', notes: 'wrong'}, {},
+      {schema_version: 1, version: '0.2.0', title: 'large', notes: 'x'.repeat(64001)}]) {
+      const missing = await checkDualSource('0.1.0', directory, { force: true,
+        fetcher: (async url => new Response(JSON.stringify(String(url) === defaultManifestUrl ? manifest : notes))) as typeof fetch });
+      assert.equal(missing.update_available, true);
+      assert.equal(missing.release_notes, undefined);
+    }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('old GitHub fallback cache cannot bypass COS-only checks', async () => {
+  const directory = await temporaryDirectory();
+  try {
+    await writeFile(join(directory, 'update-check.json'), JSON.stringify({ checked_at: 1000,
+      manifest_url: defaultManifestUrl, source: 'github', release, downloads: [] }));
+    const urls: string[] = [];
+    const result = await checkDualSource('0.2.0', directory, { now: 2000,
+      fetcher: (async url => { urls.push(String(url)); return new Response(JSON.stringify(manifest)); }) as typeof fetch });
+    assert.equal(result.source, 'cos');
+    assert.equal(result.cached, false);
+    assert.deepEqual(urls, [defaultManifestUrl]);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('CLI text and JSON both expose COS release title and multiline notes', async () => {
+  const directory = await temporaryDirectory();
+  const title = 'SapLink 9.0.0 更新';
+  const notes = '## 更新内容\n- 优化查询\n- 修复问题';
+  const newer = { ...manifest, version: '9.0.0', downloads: [{ ...manifest.downloads[0],
+    url: new URL('v9.0.0/SapLink-9.0.0-win-x64-setup.exe', defaultManifestUrl).href }] };
+  try {
+    await checkDualSource('1.0.0', directory, { fetcher: (async url => {
+      assert.ok(String(url).startsWith(new URL('.', defaultManifestUrl).href));
+      return new Response(JSON.stringify(String(url) === defaultManifestUrl ? newer : {
+        schema_version: 1, version: '9.0.0', title, notes
+      }));
+    }) as typeof fetch });
+    const execute = promisify(execFile);
+    const env = { ...process.env, SAPLINK_CONFIG_DIR: directory, SAPLINK_UPDATE_URL: defaultManifestUrl };
+    const json = await execute(process.execPath, [resolve('dist/cli.js'), 'update', 'check', '--json'], { env, timeout: 20000 });
+    const result = JSON.parse(json.stdout);
+    assert.equal(result.status, 'success');
+    assert.equal(result.data.source, 'cos');
+    assert.equal(result.data.update_available, true);
+    assert.equal(result.data.release_title, title);
+    assert.equal(result.data.release_notes, notes);
+    const text = await execute(process.execPath, [resolve('dist/cli.js'), 'update', 'check'], { env, timeout: 20000 });
+    assert.ok(text.stdout.includes('Release title: ' + title));
+    assert.ok(text.stdout.includes('Release notes:\n' + notes));
+    assert.equal(text.stderr, '');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

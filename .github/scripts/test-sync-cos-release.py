@@ -78,11 +78,25 @@ class SyncTests(unittest.TestCase):
         manifest = self.store.read_manifest()
         self.assertEqual(manifest['published_at'], self.release['published_at'])
         self.assertEqual({item['architecture'] for item in manifest['downloads']}, {'x64', 'arm64'})
-        self.assertEqual(len(self.store.writes), 8)
+        self.assertEqual(len(self.store.writes), 9)
         self.assertEqual(set(manifest), {'schema_version', 'version', 'published_at', 'downloads'})
         skill = self.store.read_manifest(sync.SKILL_LATEST_KEY)['skill']
         self.store.verify(skill['url'].removeprefix(sync.ORIGIN + '/'), skill['size'], skill['sha256'])
         self.assertEqual(skill['commit'], 'a' * 40)
+
+    def test_release_prose_is_published_separately_and_can_be_refreshed(self):
+        self.release.update(name='SapLink 新版本', body='## 更新内容\n- 修复问题')
+        self.run_sync()
+        key = 'saplink/v1.0.1/release-notes.json'
+        notes = json.loads(self.store.objects[key])
+        self.assertEqual(notes['title'], self.release['name'])
+        self.assertEqual(notes['notes'], self.release['body'])
+        self.assertEqual(notes['version'], '1.0.1')
+        original = self.store.objects[sync.LATEST_KEY]
+        self.release['body'] = '补充说明'
+        self.run_sync()
+        self.assertEqual(json.loads(self.store.objects[key])['notes'], '补充说明')
+        self.assertEqual(self.store.objects[sync.LATEST_KEY], original)
 
     def test_skill_failure_keeps_unified_pointer_and_retry_recovers(self):
         previous = {'schema_version': 1, 'version': '1.0.0', 'downloads': []}

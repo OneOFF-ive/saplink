@@ -59,7 +59,7 @@ saplink service restart --json
 ## 检查新版本
 
 检查新版本使用 `saplink update check`，机器可读结果使用 `saplink update check --json`。
-命令优先读取 COS 的 `saplink/latest.json`，网络、404 或元数据无效时回退到 GitHub 仓库 `OneOFF-ive/saplink` 的最新正式 Release，显示当前版本、来源及发布下载地址；不下载、不安装，也不停止 SAP 服务。
+命令默认仅读取 COS 的 `saplink/latest.json`，网络、404 或元数据无效时报告失败，不自动回退 GitHub，显示当前版本、来源及发布下载地址；不下载、不安装，也不停止 SAP 服务。
 检查结果在配置目录的 `update-check.json` 中缓存 24 小时，使用 `saplink update check --force` 立即重新查询。
 网络失败或 GitHub 限流会报告检查失败，不影响正在运行的服务。没有公开正式 Release（包括仓库为私有的情况）时会明确提示，不能据此判断已是最新版。
 `ui`、`serve` 和托管后台服务在启动成功后异步重新查询更新源，之后每小时重新查询一次，不复用 CLI 的 24 小时缓存。程序未运行时不会检查，不创建系统计划任务。管理页可见时每 3 秒刷新检测结果；有新版本时，侧栏“软件更新”显示红色 `New`，点击后直接显示新版本及“立即自动更新”按钮，无需重复检查。没有新版本时保留正常的“检查版本更新”页面。后台检测不弹窗、不再写入 `update-notice.json`，也不会因检测到新版本自动安装。安装仍需用户点击并确认，随后校验安装包、正常关闭并更新。失败时保持运行，下一个周期重试。
@@ -152,7 +152,7 @@ saplink connection test dev --json
 
 随后由客户端验证搜索和源码读取。需要验证写入时，使用明确指定的测试对象和包，按 [客户端手册](mcp-client-guide.md) 完成保存、语法检查、激活和读回，不使用生产变更测试连通性。
 
-双源配置与上传顺序见 [COS 发布流程](development.md#cos-双更新源发布)。默认 COS 地址为 `https://saplink-1302377695.cos.ap-shanghai.myqcloud.com/saplink/latest.json`；`SAPLINK_UPDATE_URL` 可设为自有 HTTPS 清单，或 `github` 仅用 GitHub。缓存按配置的清单 URL 隔离，COS 正常时不额外查询 GitHub。结果新增 `source`（cos/github）与 `downloads`（architecture、url、sha256），管理页面及 CLI 提供按架构的直达链接；未知最新版本仍不可解释为已是最新版。
+双源配置与上传顺序见 [COS 发布流程](development.md#cos-双更新源发布)。默认 COS 地址为 `https://saplink-1302377695.cos.ap-shanghai.myqcloud.com/saplink/latest.json`；`SAPLINK_UPDATE_URL` 可设为自有 HTTPS 清单，或 `github` 仅用 GitHub。缓存按配置的清单 URL 隔离，COS 正常时不额外查询 GitHub。发现新版本时从同一 COS 版本目录读取 `release-notes.json`，CLI 和管理页展示 `release_title`、`release_notes`；说明缺失不阻止更新，不转向 GitHub 补抓。结果包含 `source`（cos/github）与 `downloads`（architecture、url、sha256），管理页面及 CLI 提供按架构的直达链接；未知最新版本仍不可解释为已是最新版。
 
 ## 用户确认的自动安装
 
@@ -168,6 +168,6 @@ CLI 提供相同的显式确认入口：
 saplink update install --yes --json
 ```
 
-CLI 在外部 UI/前台服务持有锁时拒绝接管，应在管理页面更新或先正常退出。命令返回“移交更新程序”不是安装成功；最终结果位于配置目录 `update-install-result.json`。下载目录为配置目录下的 `updates/job-*`，默认 `%APPDATA%\saplink\updates\job-随机字符\`；下载时为 `installer.part`，下载及 SHA-256 校验通过后改为 `installer.exe`。`updates/pending.json` 防止重复任务。安装器超时仍可能运行时保留 pending，必须核实后处理，不能删标记盲目重试。成功后尝试删除已执行的 installer.exe；下载失败或校验失败会清除本次 installer.part，其他失败阶段可能保留已下载文件供排查，不应在更新仍进行时删除任务目录。
+CLI 在外部 UI/前台服务持有锁时拒绝接管，应在管理页面更新或先正常退出。命令返回“移交更新程序”不是安装成功；最终结果位于配置目录 `update-install-result.json`。下载目录为配置目录下的 `updates/job-*`，默认 `%APPDATA%\saplink\updates\job-随机字符\`；下载时为 `installer.part`，下载及 SHA-256 校验通过后改为 `installer.exe`。`updates/pending.json` 防止重复任务。安装器超时仍可能运行时保留 pending，必须核实后处理，不能删标记盲目重试。确认目标版本安装成功后、恢复服务或界面前自动删除本次 installer.exe，并短暂重试文件占用；结果文件的 installer_cleanup.status 为 deleted 或 failed，清理失败时保留路径并提醒手动删除，不影响已安装版本。下载失败或校验失败会清除本次 installer.part，其他失败阶段可能保留已下载文件供排查，不应在更新仍进行时删除任务目录。
 
 旧版本不会因为 COS 上传了安装包便自动拥有该功能。首次需要安装包含本次改动的新版本，之后才可从 Web 或 CLI 自动更新。

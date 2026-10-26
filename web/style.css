@@ -730,3 +730,6 @@ dialog {
   font-weight:700;
   line-height:1.6;
 }
+
+#release-details { margin-top:24px; }
+#release-notes { white-space:pre-wrap; overflow-wrap:anywhere; font:inherit; line-height:1.7; max-height:480px; overflow-y:auto; }

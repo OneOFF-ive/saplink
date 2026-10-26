@@ -64,6 +64,7 @@ try {
   if ($result.status -ne 'installed' -or (Get-Content (Join-Path $installed 'install-manifest.json') -Raw | ConvertFrom-Json).version -ne '9.0.0') { throw 'Installed version not confirmed.' }
   if (!(Test-Path (Join-Path $installed 'new-payload.txt')) -or (Test-Path (Join-Path $installed 'old-payload.txt'))) { throw 'Owned payload replacement failed.' }
   if ((Get-Content (Join-Path $config 'keep-config.txt') -Raw) -ne 'retained' -or (Test-Path (Join-Path $config 'updates\pending.json'))) { throw 'Configuration preservation or pending cleanup failed.' }
+  if ((Test-Path -LiteralPath $installer) -or $result.installer_cleanup.status -ne 'deleted') { throw 'Verified update did not remove its installer or report cleanup.' }
   Write-Host "Native updater checks passed: launcher compilation, detached helper, hash rejection, silent upgrade with spaces, version verification and configuration preservation. Fixture: $root"
 } finally {
   if (Test-Path -LiteralPath (Join-Path $installed 'Uninstall.exe')) {
