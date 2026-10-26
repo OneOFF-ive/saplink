@@ -50,6 +50,12 @@ test('unit results distinguish passed, failed, no tests, skipped, warnings and u
   assert.equal(unitResults('<runResult/>', 100).test_status, 'no_tests');
   assert.equal(unitResults(unit('<testMethod name="SKIP" executionTime="0" executed="false"/>'), 100).test_status, 'unknown');
   assert.equal(unitResults(unit('<testMethod name="UNKNOWN"/>'), 100).test_status, 'unknown');
+  for (const executionTime of ['', ' ', 'NaN', '-1']) {
+    const result = unitResults(unit('<testMethod name="UNKNOWN" executionTime="' + executionTime + '"/>'), 100);
+    assert.equal(result.test_status, 'unknown');
+    assert.equal(result.executed_methods, 0);
+    assert.equal(result.items[0].execution_time, null);
+  }
   assert.equal(unitResults(unit('<testMethod name="BAD" executionTime="0"><alerts><alert kind="failedAssertion" severity="tolerable"><title>Mismatch</title></alert></alerts></testMethod>'), 100).test_status, 'failed');
   assert.equal(unitResults(unit(undefined, '<alerts><alert kind="exception" severity="fatal"><title>Setup failed</title></alert></alerts>'), 100).test_status, 'failed');
   assert.equal(unitResults(unit(undefined, '', 'executionStatus="aborted"'), 100).test_status, 'unknown');

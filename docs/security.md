@@ -1,5 +1,14 @@
 # Security Notes
 
+## Review and fixes (2026-10-26)
+
+The dependency scan found body-parser 2.3.0 affected by [GHSA-27r3-jxmh-p828](https://github.com/advisories/GHSA-27r3-jxmh-p828), where trailing data after a compressed request can trigger an uncaught decoder error and terminate the process. Although MCP parsing requires a token, the admin server also parses bodies on non-API routes before returning 404, making those paths reachable without the management token. The lockfile now uses body-parser 2.4.0. HTTP regression coverage sends malformed gzip data to unauthenticated and authenticated admin paths and to MCP, then verifies that both listeners still serve valid requests.
+
+The lockfile also updates fast-uri 3.1.8 to 3.1.9, fixing its reported scheme, host and path-normalization advisories. Only these compatible indirect dependencies and the required qs patch were updated. The full npm audit reported zero known vulnerabilities after the update on 2026-10-26; this does not establish that every application path is free of flaws.
+
+ABAP Unit result parsing previously treated an empty or whitespace-only executionTime attribute as zero because Number('') is zero. Such a method could be counted as executed and contribute to a false passed result. Empty execution times now produce unknown status with no execution time; valid zero-duration values remain accepted. Regression tests cover missing, empty, whitespace, invalid and negative values. This review and its simulated tests do not execute tests against a live SAP system.
+
+
 ## Release checks
 
 `saplink update check` prefers the public COS manifest and automatically falls back to the official GitHub release when COS fails. Running UI and service processes also check asynchronously after startup and every hour, bypassing the CLI metadata cache. Set `SAPLINK_AUTO_UPDATE_CHECK=0` before restarting to disable automatic checks; no OS scheduled task is installed. Requests send no SAP credentials, MCP tokens, connection configuration or query data. The selected update hosts receive ordinary network request metadata. Each source request uses an 8-second timeout, bounds metadata to 256 KiB and rejects redirects. Release metadata is cached separately for 24 hours and cache write failure does not invalidate a successful network check. Automatic failures remain quiet and do not interrupt SAP operations; results in the management API require its existing authentication.

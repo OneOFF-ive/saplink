@@ -65,7 +65,9 @@ export function unitResults(xml: string, limit: number) {
     const messages = alerts(m);
     const skipped = incomplete(m);
     const knownState = ['', 'executed', 'completed', 'finished', 'passed', 'success'].includes(state(m));
-    const executed = !skipped && knownState && m['@_executionTime'] !== undefined && Number.isFinite(Number(m['@_executionTime'])) && Number(m['@_executionTime']) >= 0;
+    const executionTime = m['@_executionTime'];
+    const executed = !skipped && knownState && typeof executionTime === 'string' && executionTime.trim() !== '' &&
+      Number.isFinite(Number(executionTime)) && Number(executionTime) >= 0;
     return { class_name: boundedText(c['@_name']), name: boundedText(m['@_name']), uri: String(m['@_uri'] ?? '').slice(0, 2048),
       risk_level: boundedText(c['@_riskLevel']), duration_category: boundedText(c['@_durationCategory']),
       execution_time: executed ? Number(m['@_executionTime']) : null, executed, skipped, alerts: messages };
