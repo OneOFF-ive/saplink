@@ -34,7 +34,23 @@ export async function installedApplication(): Promise<InstalledApplication | nul
 
 export async function downloadInstaller(download: UpdateResult['downloads'][number], directory: string,
   progress: (bytes: number, total: number | null) => void, fetcher = fetch) {
-  const response = await fetcher(download.url, { redirect: 'error', signal: AbortSignal.timeout(10 * 60 * 1000) });
+  const signal = AbortSignal.timeout(10 * 60 * 1000);
+  const github = /^https:\/\/github\.com\/OneOFF-ive\/saplink\/releases\/download\/v?\d+\.\d+\.\d+\/SapLink-\d+\.\d+\.\d+-win-(?:x64|arm64)-setup\.exe$/.test(download.url);
+  let url = download.url;
+  let response: Response;
+  for (let hop = 0; ; hop++) {
+    response = await fetcher(url, { redirect: github ? 'manual' : 'error', signal });
+    if (!github || ![301, 302, 303, 307, 308].includes(response.status)) break;
+    const location = response.headers.get('location');
+    await response.body?.cancel().catch(() => {});
+    if (!location || hop >= 3) throw new AppError('UPDATE_DOWNLOAD_FAILED', 'GitHub 安装包重定向无效。');
+    const next = new URL(location, url);
+    if (next.protocol !== 'https:' || next.username || next.password || next.hash ||
+        !['release-assets.githubusercontent.com', 'objects.githubusercontent.com'].includes(next.hostname) || next.port) {
+      throw new AppError('UPDATE_DOWNLOAD_FAILED', 'GitHub 安装包重定向不属于官方附件域名。');
+    }
+    url = next.href;
+  }
   const maximum = 256 * 1024 * 1024;
   const length = response.headers.get('content-length');
   const total = length === null ? null : Number(length);
@@ -77,6 +93,7 @@ export async function downloadInstaller(download: UpdateResult['downloads'][numb
 export type UpdateDependencies = {
   installation: () => Promise<InstalledApplication | null>;
   check: () => Promise<UpdateResult>;
+  github: () => Promise<UpdateResult>;
   download: typeof downloadInstaller;
   launch: (installation: InstalledApplication, script: string, plan: string) => Promise<void>;
 };
@@ -102,6 +119,7 @@ export class SelfUpdater {
   private dependencies: UpdateDependencies;
   constructor(private directory: string, dependencies: Partial<UpdateDependencies> = {}) {
     this.dependencies = { installation: installedApplication, check: () => checkForUpdate(appVersion, directory, { force: true }),
+      github: () => checkForUpdate(appVersion, directory, { force: true, manifestUrl: null }),
       download: downloadInstaller, launch: launchRunner, ...dependencies };
   }
 
@@ -158,15 +176,31 @@ export class SelfUpdater {
     // Never execute an arbitrary browser-supplied URL or a stale cached installer.
     const release = await this.dependencies.check();
     this.result = release;
-    if (release.source !== 'cos' || release.latest_version !== version || !release.update_available) {
-      throw new AppError('UPDATE_VERSION_CHANGED', '国内更新源的版本已变化或暂不可用，请重新检查更新后再确认。');
+    if (release.latest_version !== version || !release.update_available) {
+      throw new AppError('UPDATE_VERSION_CHANGED', '更新源的版本已变化或暂不可用，请重新检查更新后再确认。');
     }
-    const download = release.downloads.find(item => item.architecture === installation.architecture);
-    if (!download) throw new AppError('UPDATE_ARCHITECTURE_MISSING', '该版本尚未提供当前安装架构的安装包。');
+    let download = release.downloads.find(item => item.architecture === installation.architecture);
     const job = await mkdtemp(join(root, 'job-'));
-    const installer = await this.dependencies.download(download, job, (bytes, total) => {
+    const progress = (bytes: number, total: number | null) => {
       this.progress = { ...this.progress, downloaded_bytes: bytes, total_bytes: total };
-    });
+    };
+    let installer: string;
+    try {
+      if (!download) throw new AppError('UPDATE_ARCHITECTURE_MISSING', '更新源尚未提供当前安装架构的有效安装包。');
+      installer = await this.dependencies.download(download, job, progress);
+    } catch (error) {
+      if (release.source !== 'cos') throw error;
+      this.progress = { ...this.progress, message: 'COS 安装包不可用，正在尝试 GitHub 官方发布…', downloaded_bytes: 0, total_bytes: null };
+      const fallback = await this.dependencies.github();
+      if (fallback.latest_version !== version || !fallback.update_available) {
+        throw new AppError('UPDATE_VERSION_CHANGED', 'GitHub 后备源与已确认的目标版本不一致，请重新检查更新。');
+      }
+      const alternate = fallback.downloads.find(item => item.architecture === installation.architecture);
+      if (!alternate) throw new AppError('UPDATE_ARCHITECTURE_MISSING', 'GitHub 未提供当前架构的安装包或有效 SHA-256，请手动处理。');
+      if (download && alternate.sha256 !== download.sha256) throw new AppError('UPDATE_HASH_MISMATCH', 'COS 与 GitHub 安装包校验值不一致，已停止更新。');
+      download = alternate;
+      installer = await this.dependencies.download(download, job, progress);
+    }
     this.progress = { ...this.progress, phase: 'preparing', message: '校验完成，正在准备正常退出并安装…' };
     const script = join(job, 'update-runner.ps1');
     await copyFile(join(installation.root, 'update-runner.ps1'), script);

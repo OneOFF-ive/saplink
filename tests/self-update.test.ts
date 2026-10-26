@@ -29,7 +29,7 @@ async function setup(directory: string, overrides: Partial<UpdateDependencies> =
   await mkdir(installation.root, { recursive: true });
   await writeFile(join(installation.root, 'update-runner.ps1'), '# synthetic runner, never executed');
   const dependencies: UpdateDependencies = {
-    installation: async () => installation, check: async () => release,
+    installation: async () => installation, check: async () => release, github: async () => { throw new Error('GitHub offline in fixture'); },
     download: (item, folder, progress) => downloadInstaller(item, folder, progress, fetcher(executable, { 'Content-Length': String(executable.length) })),
     launch: async (_installation, _script, path) => {
       const plan = JSON.parse(await readFile(path, 'utf8'));
@@ -88,7 +88,7 @@ test('unsupported environments and downgrades are rejected without starting a jo
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('changed versions, GitHub fallback or unavailable architecture cannot stop the existing application', async () => {
+test('changed versions, unverified GitHub fallback or unavailable architecture cannot stop the existing application', async () => {
   for (const change of [{ latest_version: '9.0.1' }, { source: 'github' as const, downloads: [] }, { downloads: [{ ...release.downloads[0], architecture: 'arm64' as const }] }]) {
     const directory = await temporary(); let stopped = false; let launched = false;
     try {
@@ -175,4 +175,44 @@ test('a graceful-shutdown failure after handoff keeps the native job reservation
     assert.ok(JSON.parse(await readFile(join(directory, 'updates', 'pending.json'), 'utf8')).id);
     await assert.rejects(updater.install('9.0.0', { mode: 'stopped' }, async () => {}), /已有更新/);
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('COS download failure falls back to the same verified GitHub installer before shutdown', async () => {
+  const directory = await temporary(); const sources:string[]=[]; let stopped=false;
+  const alternate={...release,source:'github' as const,downloads:[{...release.downloads[0],url:'https://github.com/OneOFF-ive/saplink/releases/download/v9.0.0/SapLink-9.0.0-win-x64-setup.exe'}]};
+  try {
+    const updater=await setup(directory,{github:async()=>alternate,download:async(item,folder,progress)=>{
+      sources.push(item.url);
+      if(sources.length===1)throw new Error('COS offline');
+      return downloadInstaller(item,folder,progress,(async()=>new Response(executable)) as typeof fetch);
+    }});
+    await updater.install('9.0.0',{mode:'stopped'},async()=>{stopped=true;}); await updater.wait();
+    assert.equal(stopped,true);assert.equal(sources.length,2);assert.equal(sources[1],alternate.downloads[0].url);
+  } finally {await rm(directory,{recursive:true,force:true});}
+});
+
+test('fallback version or hash mismatch never executes an installer', async () => {
+  for(const change of [{latest_version:'9.0.1'},{downloads:[{...release.downloads[0],sha256:'0'.repeat(64)}]}]) {
+    const directory=await temporary();let stopped=false;let attempts=0;
+    try {
+      const updater=await setup(directory,{github:async()=>({...release,source:'github',...change}),download:async()=>{attempts++;throw new Error('COS offline');}});
+      await updater.install('9.0.0',{mode:'stopped'},async()=>{stopped=true;});await updater.wait();
+      assert.equal(stopped,false);assert.equal(attempts,1);assert.equal((await updater.status()).phase,'failed');
+    } finally {await rm(directory,{recursive:true,force:true});}
+  }
+});
+
+test('GitHub attachment redirects allow official HTTPS CDN only and retain SHA-256 validation', async () => {
+  const item={...release.downloads[0],url:'https://github.com/OneOFF-ive/saplink/releases/download/v9.0.0/SapLink-9.0.0-win-x64-setup.exe'};
+  for(const target of ['https://release-assets.githubusercontent.com/file?signature=example','https://evil.test/file','http://release-assets.githubusercontent.com/file']) {
+    const directory=await temporary();let calls=0;
+    try {
+      const download=downloadInstaller(item,directory,()=>{},(async (_url,init)=>{
+        calls++;assert.equal(init?.redirect,'manual');assert.equal(new Headers(init?.headers).has('Authorization'),false);
+        return calls===1?new Response(null,{status:302,headers:{location:target}}):new Response(executable);
+      }) as typeof fetch);
+      if(target.startsWith('https://release-assets.')){assert.deepEqual(await readFile(await download),executable);assert.equal(calls,2);}
+      else{await assert.rejects(download,/官方附件域名/);assert.equal(calls,1);}
+    } finally {await rm(directory,{recursive:true,force:true});}
+  }
 });

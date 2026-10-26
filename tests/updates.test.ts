@@ -168,7 +168,7 @@ test('COS is preferred, exposes verified download metadata and caches it', async
   let calls = 0;
   try {
     const mock = (async (url, init) => {
-      if (String(url).endsWith('/release-notes.json')) return new Response('{}', { status: 404 });
+      if (String(url).endsWith('/release-notes.json')) return new Response(JSON.stringify({schema_version:1, version:'0.2.0', title:'', notes:''}));
       calls++; assert.equal(url, defaultManifestUrl); assert.equal(init?.redirect, 'error');
       assert.equal(new Headers(init?.headers).has('Authorization'), false);
       return new Response(JSON.stringify(manifest));
@@ -191,7 +191,7 @@ test('unified COS manifest accepts skill metadata without treating it as an inst
   let calls = 0;
   try {
     const mock = (async (url) => {
-      if (String(url).endsWith('/release-notes.json')) return new Response('{}', { status: 404 });
+      if (String(url).endsWith('/release-notes.json')) return new Response(JSON.stringify({schema_version:1, version:'0.2.0', title:'', notes:''}));
       calls++; assert.equal(url, defaultManifestUrl);
       return new Response(JSON.stringify({ ...manifest, skill }));
     }) as typeof fetch;
@@ -203,7 +203,7 @@ test('unified COS manifest accepts skill metadata without treating it as an inst
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('missing, offline, oversized or unsafe COS metadata fails without contacting GitHub', async () => {
+test('missing, offline, oversized or unsafe COS metadata falls back to official GitHub', async () => {
   const directory = await temporaryDirectory();
   const invalid = [
     () => new Response('{}', { status: 404 }),
@@ -217,11 +217,12 @@ test('missing, offline, oversized or unsafe COS metadata fails without contactin
   try {
     for (const response of invalid) {
       const urls: string[] = [];
-      await assert.rejects(checkDualSource('0.1.0', directory, { force: true, fetcher: (async url => {
+      const result = await checkDualSource('0.1.0', directory, { force: true, fetcher: (async url => {
         urls.push(String(url));
-        return response();
-      }) as typeof fetch }), /COS/);
-      assert.deepEqual(urls, [defaultManifestUrl]);
+        return String(url) === defaultManifestUrl ? response() : new Response(JSON.stringify(release));
+      }) as typeof fetch });
+      assert.equal(result.source, 'github');
+      assert.deepEqual(urls, [defaultManifestUrl, 'https://api.github.com/repos/OneOFF-ive/saplink/releases/latest']);
     }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
@@ -234,7 +235,7 @@ test('changing configured manifest invalidates cache and download origin is scop
     await checkDualSource('0.1.0', directory, { now: 1000, fetcher: fetcher(manifest) });
     let calls = 0;
     const changed = await checkDualSource('0.1.0', directory, { now: 2000, manifestUrl: customUrl, fetcher: (async url => {
-      if (String(url).endsWith('/release-notes.json')) return new Response('{}', { status: 404 });
+      if (String(url).endsWith('/release-notes.json')) return new Response(JSON.stringify({schema_version:1, version:'0.2.0', title:'', notes:''}));
       calls++; assert.equal(url, customUrl); return new Response(JSON.stringify(customManifest));
     }) as typeof fetch });
     assert.equal(calls, 1); assert.equal(changed.cached, false); assert.equal(changed.source, 'cos');
@@ -261,7 +262,7 @@ test('startup bypasses a fresh old COS cache and subsequent checks discover newl
   let version = '0.3.0';
   let calls = 0;
   const automatic = startDualAutomatic('0.1.0', directory, { fetcher: (async url => {
-    if (String(url).endsWith('/release-notes.json')) return new Response('{}', { status: 404 });
+    if (String(url).endsWith('/release-notes.json')) return new Response(JSON.stringify({schema_version:1, version, title:'', notes:''}));
     calls++;
     return new Response(JSON.stringify({ ...manifest, version, downloads: [{ ...manifest.downloads[0],
       url: new URL(`v${version}/SapLink-${version}-win-x64-setup.exe`, defaultManifestUrl).href }] }));
@@ -324,13 +325,13 @@ test('COS release title and notes match the detected version, survive cache and 
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('old GitHub fallback cache cannot bypass COS-only checks', async () => {
+test('cached fallback remains usable and forced checks retry COS first', async () => {
   const directory = await temporaryDirectory();
   try {
     await writeFile(join(directory, 'update-check.json'), JSON.stringify({ checked_at: 1000,
       manifest_url: defaultManifestUrl, source: 'github', release, downloads: [] }));
     const urls: string[] = [];
-    const result = await checkDualSource('0.2.0', directory, { now: 2000,
+    const result = await checkDualSource('0.2.0', directory, { now: 2000, force: true,
       fetcher: (async url => { urls.push(String(url)); return new Response(JSON.stringify(manifest)); }) as typeof fetch });
     assert.equal(result.source, 'cos');
     assert.equal(result.cached, false);
@@ -365,4 +366,39 @@ test('CLI text and JSON both expose COS release title and multiline notes', asyn
     assert.ok(text.stdout.includes('Release notes:\n' + notes));
     assert.equal(text.stderr, '');
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('GitHub fallback exposes verified official installer digests and matching release prose', async () => {
+  const directory = await temporaryDirectory();
+  const url = 'https://github.com/OneOFF-ive/saplink/releases/download/v0.2.0/SapLink-0.2.0-win-x64-setup.exe';
+  const metadata = {...release, name:'更新标题', body:'修复说明', assets:[
+    {name:'SapLink-0.2.0-win-x64-setup.exe',browser_download_url:url,digest:'sha256:'+'a'.repeat(64)},
+    {name:'SapLink-0.2.0-win-arm64-setup.exe',browser_download_url:url,digest:null}
+  ]};
+  try {
+    const result = await checkDualSource('0.1.0', directory, {fetcher:(async target =>
+      String(target) === defaultManifestUrl ? new Response('{}',{status:503}) : new Response(JSON.stringify(metadata))) as typeof fetch});
+    assert.equal(result.source,'github');
+    assert.equal(result.release_title,'更新标题');
+    assert.equal(result.release_notes,'修复说明');
+    assert.deepEqual(result.downloads,[{architecture:'x64',url,sha256:'a'.repeat(64)}]);
+    const cached = await checkDualSource('0.1.0',directory,{fetcher:(async()=>{throw new Error('must use cache')}) as typeof fetch});
+    assert.equal(cached.cached,true);
+    assert.deepEqual(cached.downloads,result.downloads);
+  } finally {await rm(directory,{recursive:true,force:true});}
+});
+
+test('missing COS prose falls back to the same GitHub tag without replacing COS installer metadata', async () => {
+  const directory = await temporaryDirectory(); const urls:string[]=[];
+  try {
+    const result=await checkDualSource('0.1.0',directory,{fetcher:(async url=>{
+      urls.push(String(url));
+      if(String(url)===defaultManifestUrl)return new Response(JSON.stringify(manifest));
+      if(String(url).endsWith('/release-notes.json'))return new Response('{}',{status:404});
+      return new Response(JSON.stringify({...release,name:'后备标题',body:'后备说明'}));
+    }) as typeof fetch});
+    assert.equal(result.source,'cos'); assert.equal(result.release_notes,'后备说明');
+    assert.deepEqual(result.downloads,manifest.downloads);
+    assert.equal(urls[2],'https://api.github.com/repos/OneOFF-ive/saplink/releases/tags/v0.2.0');
+  } finally {await rm(directory,{recursive:true,force:true});}
 });

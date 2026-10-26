@@ -59,7 +59,7 @@ saplink service restart --json
 ## 检查新版本
 
 检查新版本使用 `saplink update check`，机器可读结果使用 `saplink update check --json`。
-命令默认仅读取 COS 的 `saplink/latest.json`，网络、404 或元数据无效时报告失败，不自动回退 GitHub，显示当前版本、来源及发布下载地址；不下载、不安装，也不停止 SAP 服务。
+命令默认优先读取 COS 的 `saplink/latest.json`，网络、404 或元数据无效时自动回退 GitHub 官方正式 Release，显示当前版本、来源及发布下载地址；不下载、不安装，也不停止 SAP 服务。
 检查结果在配置目录的 `update-check.json` 中缓存 24 小时，使用 `saplink update check --force` 立即重新查询。
 网络失败或 GitHub 限流会报告检查失败，不影响正在运行的服务。没有公开正式 Release（包括仓库为私有的情况）时会明确提示，不能据此判断已是最新版。
 `ui`、`serve` 和托管后台服务在启动成功后异步重新查询更新源，之后每小时重新查询一次，不复用 CLI 的 24 小时缓存。程序未运行时不会检查，不创建系统计划任务。管理页可见时每 3 秒刷新检测结果；有新版本时，侧栏“软件更新”显示红色 `New`，点击后直接显示新版本及“立即自动更新”按钮，无需重复检查。没有新版本时保留正常的“检查版本更新”页面。后台检测不弹窗、不再写入 `update-notice.json`，也不会因检测到新版本自动安装。安装仍需用户点击并确认，随后校验安装包、正常关闭并更新。失败时保持运行，下一个周期重试。
@@ -152,11 +152,11 @@ saplink connection test dev --json
 
 随后由客户端验证搜索和源码读取。需要验证写入时，使用明确指定的测试对象和包，按 [客户端手册](mcp-client-guide.md) 完成保存、语法检查、激活和读回，不使用生产变更测试连通性。
 
-双源配置与上传顺序见 [COS 发布流程](development.md#cos-双更新源发布)。默认 COS 地址为 `https://saplink-1302377695.cos.ap-shanghai.myqcloud.com/saplink/latest.json`；`SAPLINK_UPDATE_URL` 可设为自有 HTTPS 清单，或 `github` 仅用 GitHub。缓存按配置的清单 URL 隔离，COS 正常时不额外查询 GitHub。发现新版本时从同一 COS 版本目录读取 `release-notes.json`，CLI 和管理页展示 `release_title`、`release_notes`；说明缺失不阻止更新，不转向 GitHub 补抓。结果包含 `source`（cos/github）与 `downloads`（architecture、url、sha256），管理页面及 CLI 提供按架构的直达链接；未知最新版本仍不可解释为已是最新版。
+双源配置与上传顺序见 [COS 发布流程](development.md#cos-双更新源发布)。默认 COS 地址为 `https://saplink-1302377695.cos.ap-shanghai.myqcloud.com/saplink/latest.json`；`SAPLINK_UPDATE_URL` 可设为自有 HTTPS 清单，或 `github` 仅用 GitHub。缓存按配置的清单 URL 隔离，COS 清单和说明正常时不额外查询 GitHub。发现新版本时从同一 COS 版本目录读取 `release-notes.json`，CLI 和管理页展示 `release_title`、`release_notes`；说明缺失时尝试 GitHub 同一版本标签的标题和说明，不替换 COS 安装包元数据；两处说明均不可用也不阻止更新。结果包含 `source`（cos/github）与 `downloads`（architecture、url、sha256），管理页面及 CLI 提供按架构的直达链接；未知最新版本仍不可解释为已是最新版。
 
 ## 用户确认的自动安装
 
-管理页面左侧的“软件更新”进入独立更新页。未发现新版时提供“检查版本更新”按钮，强制刷新版本信息；后台或手动检测发现更高正式版本后，侧栏显示红色 New，进入后直接显示版本信息与“立即自动更新”，无需再次手动检查。用户确认后才下载 COS 中当前安装架构的安装包。界面显示下载进度，下载失败、SHA-256 不符或更新器预检失败时保持当前应用运行。GitHub 回退只提供发布页，不猜安装包 URL；国内源缺少当前架构时提示手动下载或稍后重试。
+管理页面左侧的“软件更新”进入独立更新页。未发现新版时提供“检查版本更新”按钮，强制刷新版本信息；后台或手动检测发现更高正式版本后，侧栏显示红色 New，进入后直接显示版本信息与“立即自动更新”，无需再次手动检查。用户确认后才优先下载 COS 中当前安装架构的安装包，失败时自动尝试 GitHub 同版本官方附件。界面显示下载进度，下载失败、SHA-256 不符或更新器预检失败时保持当前应用运行。GitHub 回退仅使用官方 Release 中当前架构的标准附件与 API SHA-256 digest，不猜安装包 URL；两处均不可用或缺少校验值时提示手动处理。
 
 自动安装仅支持包含更新助手的 Windows 安装版。源码运行仍可检查版本，但安装按钮不可用。升级前不会直接覆盖正在运行的程序：独立助手先就绪，应用再正常关闭并等待 SAP 操作收尾；助手等待该安装目录下的进程退出，重新核对哈希和安装包产品/版本，然后在原目录静默安装。无强杀进程或删除运行锁。超过等待时间会失败或保留未知状态，不自动再试。
 

@@ -47,7 +47,7 @@ function renderUpdate() {
   check.disabled = updateChecking || running;
   check.textContent = updateChecking ? '正在检查…' : '检查版本更新';
   const installButton = $('#install-update');
-  const hasPackage = update?.source === 'cos' && update.downloads?.some(item => item.architecture === install?.architecture);
+  const hasPackage = update?.source === 'cos' || update?.downloads?.some(item => item.architecture === install?.architecture);
   installButton.hidden = !update?.update_available;
   installButton.disabled = updateChecking || running || !install?.supported || !hasPackage || Boolean(updateCheckError);
   $('#update-summary').textContent = updateCheckError || (updateChecking ? '正在检查最新正式版本…' : running || install?.phase === 'failed' ? install.message :
@@ -66,18 +66,18 @@ function renderUpdate() {
     const link = element('a', '查看发布说明与手动下载');
     link.href = update.release_url; link.target = '_blank'; link.rel = 'noopener noreferrer'; notice.append(link);
     for (const download of update.downloads ?? []) {
-      const link = element('a', 'Windows ' + download.architecture + ' 国内下载');
+      const link = element('a', 'Windows ' + download.architecture + (update.source === 'cos' ? ' 国内下载' : ' GitHub 下载'));
       link.href = download.url; link.target = '_blank'; link.rel = 'noopener noreferrer';
       notice.append(document.createTextNode(' · '), link);
     }
   }
   $('#release-details').hidden = !update?.update_available;
   $('#release-title').textContent = update?.release_title || '版本 ' + (update?.latest_version ?? '') + ' 更新内容';
-  $('#release-notes').textContent = update?.release_notes || 'COS 暂未提供该版本的更新说明。';
+  $('#release-notes').textContent = update?.release_notes || '暂未获取到该版本的更新说明。';
   const help = $('#update-help');
   const last = install?.last_result;
   help.textContent = update?.update_available && !install?.supported ? install?.unavailable_reason ?? '当前环境不支持自动安装。' :
-    update?.update_available && !hasPackage ? '国内源尚无当前安装架构的安装包，请稍后重试或手动下载。' :
+    update?.update_available && !hasPackage ? '更新源尚无当前安装架构的有效安装包，请稍后重试或手动下载。' :
     last?.status === 'installed' ? '上次自动更新已安装版本 ' + last.version + '。' :
     last?.status === 'failed' || last?.status === 'unknown' ? '上次更新未确认完成，请检查配置目录中的 update-install-result.json。' : '';
   if (last?.installer_cleanup?.status === 'failed') help.textContent += ' 安装包自动清理失败，请在安装程序退出后手动删除：' + last.installer_cleanup.path;

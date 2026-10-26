@@ -13,6 +13,8 @@ const versionPattern = /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-
 const releaseSchema = z.object({
   tag_name: z.string().max(256).regex(versionPattern),
   name: z.string().max(1024).nullable().optional(), body: z.string().max(64000).nullable().optional(),
+  assets: z.array(z.object({ name: z.string().max(256), browser_download_url: z.string().max(2048),
+    digest: z.string().max(128).nullable().optional() })).max(1000).optional(),
   draft: z.literal(false), prerelease: z.literal(false),
   published_at: z.string().nullable(),
   html_url: z.string().refine(value => {
@@ -61,6 +63,29 @@ function validateDownloads(downloads: z.infer<typeof downloadSchema>[], location
   }
 }
 
+
+function validateGithubDownloads(downloads: z.infer<typeof downloadSchema>[], tag: string) {
+  const version = tag.replace(/^v/, '');
+  if (new Set(downloads.map(item => item.architecture)).size !== downloads.length) throw new Error('Duplicate architectures');
+  for (const item of downloads) {
+    if (item.url !== `https://github.com/${repository}/releases/download/${tag}/SapLink-${version}-win-${item.architecture}-setup.exe`) {
+      throw new Error('Unexpected GitHub installer URL');
+    }
+  }
+}
+
+function githubDownloads(release: z.infer<typeof releaseSchema>) {
+  const downloads: z.infer<typeof downloadSchema>[] = [];
+  for (const architecture of ['x64', 'arm64'] as const) {
+    const name = `SapLink-${release.tag_name.replace(/^v/, '')}-win-${architecture}-setup.exe`;
+    const matches = release.assets?.filter(asset => asset.name === name) ?? [];
+    if (matches.length !== 1 || !/^sha256:[a-f0-9]{64}$/.test(matches[0].digest ?? '')) continue;
+    const download = { architecture, url: matches[0].browser_download_url, sha256: matches[0].digest!.slice(7) };
+    try { validateGithubDownloads([download], release.tag_name); downloads.push(download); } catch { /* No executable without verified metadata. */ }
+  }
+  return downloads;
+}
+
 async function readMetadata(response: Response): Promise<unknown> {
   // Bound both valid and malformed responses before parsing JSON.
   const reader = response.body?.getReader();
@@ -100,11 +125,13 @@ export async function checkForUpdate(currentVersion: string, directory: string,
   if (!options.force) {
     try {
       const value = cacheSchema.parse(JSON.parse(await readFile(cachePath, 'utf8')));
-      if (location && value.source !== 'cos') throw new Error('Refresh legacy fallback cache');
       if (value.source === 'cos') {
         if (!value.release) throw new Error('Missing mirror version');
         validateDownloads(value.downloads, location, value.release.tag_name.replace(/^v/, ''));
-      } else if (value.downloads.length) throw new Error('Unexpected mirror downloads');
+      } else {
+        if (!value.release && value.downloads.length) throw new Error('Missing GitHub release');
+        if (value.release) validateGithubDownloads(value.downloads, value.release.tag_name);
+      }
       if (value.manifest_url === manifestUrl && now >= value.checked_at && now - value.checked_at < cacheLifetime) cached = value;
     } catch { /* Missing, old-format or invalid caches are refreshed. */ }
   }
@@ -134,7 +161,7 @@ export async function checkForUpdate(currentVersion: string, directory: string,
         mirrorSucceeded = true;
       } catch {
         options.signal?.throwIfAborted();
-        throw new AppError('UPDATE_CHECK_FAILED', 'COS 更新清单不可用或格式无效，请稍后重试；未自动切换到 GitHub。');
+        // COS failed: use the official GitHub release without weakening validation.
       }
     }
     if (!mirrorSucceeded) {
@@ -148,20 +175,31 @@ export async function checkForUpdate(currentVersion: string, directory: string,
         try { release = releaseSchema.parse(await readMetadata(response)); }
         catch { throw new AppError('UPDATE_RESPONSE_INVALID', `GitHub returned invalid release metadata. Visit ${releasesUrl}`); }
       }
-      downloads = [];
+      downloads = release ? githubDownloads(release) : [];
       source = 'github';
     }
     if (source === 'cos' && location && release && isNewerVersion(release.tag_name, currentVersion)) {
       // Separate metadata preserves the strict installer manifest used by older clients.
       // Fetch only the matching version from COS; notes failure must not block installation.
+      let notesLoaded = false;
       try {
         const version = release.tag_name.replace(/^v/, '');
         const response = await request(new URL(`v${version}/release-notes.json`, new URL('.', location)).href);
         if (response.ok) {
           const notes = notesSchema.parse(await readMetadata(response));
-          if (notes.version === version) release = { ...release, name: notes.title, body: notes.notes };
+          if (notes.version === version) { release = { ...release, name: notes.title, body: notes.notes }; notesLoaded = true; }
         } else await response.body?.cancel().catch(() => {});
       } catch { options.signal?.throwIfAborted(); }
+      if (!notesLoaded) {
+        try {
+          // Never show notes from a different release when COS and GitHub publish at different times.
+          const response = await request(`https://api.github.com/repos/${repository}/releases/tags/${encodeURIComponent(release.tag_name)}`, true);
+          if (response.ok) {
+            const fallback = releaseSchema.parse(await readMetadata(response));
+            if (fallback.tag_name === release.tag_name) release = { ...release, name: fallback.name, body: fallback.body };
+          } else await response.body?.cancel().catch(() => {});
+        } catch { options.signal?.throwIfAborted(); }
+      }
     }
     // Update metadata is separate from connection configuration and needs no service lock.
     try {

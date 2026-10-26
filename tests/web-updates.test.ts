@@ -67,8 +67,18 @@ test('release prose is displayed as text and missing notes have an explicit plac
   assert.equal(nodes.get('#release-notes').textContent, '<script>example</script>\n- fix');
   vm.runInContext('state.update = {update_available:true,latest_version:"1.1.0"}', context);
   render();
-  assert.match(nodes.get('#release-notes').textContent, /暂未提供/);
+  assert.match(nodes.get('#release-notes').textContent, /暂未获取/);
   vm.runInContext('state.update = {update_available:false}', context);
   render();
   assert.equal(nodes.get('#release-details').hidden, true);
+});
+
+test('GitHub fallback with a verified installer enables the automatic update action', () => {
+  const {nodes}=screen({...available,source:'github'});
+  assert.equal(nodes.get('#install-update').disabled,false);
+});
+
+test('missing COS architecture still allows trying the verified GitHub fallback', () => {
+  const {nodes}=screen({...available,downloads:[{architecture:'arm64',url:'https://example.test/arm64.exe'}]});
+  assert.equal(nodes.get('#install-update').disabled,false);
 });

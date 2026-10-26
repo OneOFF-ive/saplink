@@ -6,7 +6,7 @@
 
 ## 1. 目标与范围
 
-版本检查由 `src/updates.ts` 提供：默认仅使用 COS 清单，不可用时报告失败，不自动请求 GitHub。CLI 普通检查缓存 24 小时；长期运行的 CLI/UI 启动后异步重新查询更新源，此后每小时重新查询，不复用旧缓存，不创建系统任务。新版本经受保护的状态接口提供给 Web，侧栏“软件更新”显示红色 New，进入页面直接显示版本及自动更新操作；无新版本时保留手动检查。后台检测不弹窗、不写历史通知文件，也不会自行安装。`SAPLINK_AUTO_UPDATE_CHECK=0` 可关闭自动检查。命令与缓存规则见 [版本检查](operations.md#检查新版本)。
+版本检查由 `src/updates.ts` 提供：默认优先使用 COS 清单，不可用时自动回退 GitHub 官方正式 Release。CLI 普通检查缓存 24 小时；长期运行的 CLI/UI 启动后异步重新查询更新源，此后每小时重新查询，不复用旧缓存，不创建系统任务。新版本经受保护的状态接口提供给 Web，侧栏“软件更新”显示红色 New，进入页面直接显示版本及自动更新操作；无新版本时保留手动检查。后台检测不弹窗、不写历史通知文件，也不会自行安装。`SAPLINK_AUTO_UPDATE_CHECK=0` 可关闭自动检查。命令与缓存规则见 [版本检查](operations.md#检查新版本)。
 
 发布端使用两个独立 COS 清单：安装包 `saplink/latest.json` 仅含 schema_version、version、published_at、downloads，兼容已发布的严格校验客户端；技能 `saplink/skill-latest.json` 单独存放版本、源码提交、ZIP 地址、大小和哈希。官网代理这两个小型清单，浏览器直接从 COS 下载二进制。打包和 Actions 的来源选择见 [发布手册](releases-and-actions.md)。
 
