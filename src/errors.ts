@@ -1,5 +1,24 @@
 import { isAdtError } from 'abap-adt-api';
 
+export type BackendDiagnostic = { request_path?: string; request_method?: string; http_status?: number;
+  network_code?: string; cause_code?: string; elapsed_ms?: number; response_content_type?: string; error_kind?: string; request_body_bytes?: number; request_content_type?: string;
+  request_finished?: boolean; socket_reused?: boolean; response_started?: boolean };
+const backendDiagnostics = new WeakMap<object, BackendDiagnostic>();
+export function attachBackendDiagnostic(error: unknown, diagnostic: BackendDiagnostic) {
+  if (error && typeof error === 'object') backendDiagnostics.set(error, { ...diagnostic });
+}
+function diagnosticFor(error: unknown): BackendDiagnostic {
+  const seen = new Set<object>();
+  let current = error;
+  for (let i = 0; i < 6 && current && typeof current === 'object' && !seen.has(current); i++) {
+    seen.add(current);
+    const found = backendDiagnostics.get(current);
+    if (found) return found;
+    current = (current as { parent?: unknown; cause?: unknown }).parent ?? (current as { cause?: unknown }).cause;
+  }
+  return {};
+}
+
 export class AppError extends Error {
   constructor(public code: string, message: string, public details?: unknown) { super(message); }
 }
@@ -54,11 +73,15 @@ export function safeError(error: unknown) {
   };
   const isSapError = isAdtError(error);
   // The library's XML exception parser keeps HTTP status in err, not response/status.
-  const rawStatus = backendError.response?.status ?? backendError.status ?? (isSapError ? backendError.err : undefined);
+  const diagnostic = diagnosticFor(error);
+  const rawStatus = diagnostic.http_status ?? backendError.response?.status ?? backendError.status ?? (isSapError ? backendError.err : undefined);
   const status = typeof rawStatus === 'number' && rawStatus >= 100 && rawStatus <= 599 ? rawStatus : undefined;
   const rawMessage = backendError.localizedMessage || backendError.message || '';
-  const code = classifyBackendError(status, rawMessage, backendError.code);
+  const code = diagnostic.error_kind === 'response_size_limit' ? 'BACKEND_RESPONSE_TOO_LARGE'
+    : diagnostic.error_kind === 'request_size_limit' ? 'REQUEST_TOO_LARGE'
+    : classifyBackendError(status, rawMessage, diagnostic.network_code ?? backendError.code);
   const details = {
+    ...diagnostic,
     ...(status ? { http_status: status } : {}),
     ...(isSapError && status !== 401 && rawMessage ? { sap_message: redact(rawMessage) } : {}),
     ...(isSapError && backendError.type ? { sap_error_type: redact(backendError.type).slice(0, 256) } : {}),

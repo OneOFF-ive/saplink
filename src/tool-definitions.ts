@@ -127,7 +127,10 @@ export const toolSchemas = {
     }).strict()).min(1).max(20),
     request_id: requestIdSchema
   }).strict(),
-  list_transport_requests: z.object(connection).strict(),
+  list_transport_requests: z.object({ ...connection,
+    transport_number: z.string().regex(/^[A-Z0-9]{3}K[0-9]{6}$/).optional()
+      .describe('Known request or task number. Reads its headers and parent/tasks directly, omitting object inventories. Omit to list all user transports.')
+  }).strict(),
   create_transport_request: z.object({
     ...connection,
     object_uri: adtUriSchema.describe('Existing or intended Program, Include, function group or function module object URI, not source/main.'),
@@ -189,7 +192,7 @@ const toolDescriptions: Record<ToolName, string> = {
   syntax_check: 'Check the requested version and return backend diagnostics.',
   activate_objects: ("Activate selected source objects with inactive revisions, or a function group with the revision from " +
     "get_function_group. Group activation affects its members. May partially succeed."),
-  list_transport_requests: ("List the configured SAP user transport requests and tasks. Use this to find an existing modifiable task " +
+  list_transport_requests: ("List the configured SAP user transport requests and tasks. Supply transport_number for a direct header-only query of a known request/task, avoiding the full list. Use this to find an existing modifiable task " +
     "when SAP requires change recording; package names alone do not establish that requirement. Confirm the " +
     "intended task with the user if ambiguous. Does not create or release requests or select a default task."),
   create_transport_request: ("Create a new workbench development transport request for an existing or intended supported ABAP object " +

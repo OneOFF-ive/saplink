@@ -51,3 +51,28 @@ export function parseTransportList(xml: string): TransportsOfUser {
 export function parseTransportDetails(xml: string): TransportRequest | undefined {
   return array(root(xml).request).map(request)[0];
 }
+
+
+// Detail responses can put the selected task beside its parent request, rather than inside it.
+// Ignore object inventories and action links: validation needs headers only.
+export function parseTransportSummary(xml: string): (TransportRequest & { 'tm:type': string }) | undefined {
+  if (XMLValidator.validate(xml) !== true) throw new AppError('TRANSPORT_RESPONSE_INVALID', 'SAP returned invalid transport XML');
+  const parsed = new XMLParser({ ignoreAttributes: false, removeNSPrefix: true, parseAttributeValue: false,
+    updateTag: tag => !['abap_object', 'link'].includes(tag) }).parse(xml);
+  const data = parsed.root;
+  if (!data || typeof data !== 'object') throw new AppError('TRANSPORT_RESPONSE_INVALID', 'SAP returned no transport root');
+  const parents = array(data.request);
+  if (parents.length === 0) return undefined;
+  if (parents.length !== 1) throw new AppError('TRANSPORT_RESPONSE_INVALID', 'SAP returned ambiguous parent requests');
+  const parent = request(parents[0]);
+  const siblings = array(data.task).map(task);
+  if (siblings.some(t => t['tm:parent'] !== parent['tm:number']))
+    throw new AppError('TRANSPORT_RESPONSE_INVALID', 'SAP task parent does not match the returned request');
+  parent.tasks = [...parent.tasks, ...siblings];
+  if (parent.tasks.some(t => (t as any)['tm:parent'] && (t as any)['tm:parent'] !== parent['tm:number']))
+    throw new AppError('TRANSPORT_RESPONSE_INVALID', 'SAP task parent does not match the returned request');
+  const numbers = parent.tasks.map(t => t['tm:number']);
+  if (new Set(numbers).size !== numbers.length)
+    throw new AppError('TRANSPORT_RESPONSE_INVALID', 'SAP returned duplicate transport tasks');
+  return parent as TransportRequest & { 'tm:type': string };
+}

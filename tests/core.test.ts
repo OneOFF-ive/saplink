@@ -945,3 +945,38 @@ test('quality tools advertise actual execution policy and reject missing confirm
     assert.equal((result.structuredContent as any).data.test_status, 'no_tests');
   } finally { await client.close(); await server.close(); await f.cleanup(); }
 });
+
+
+test('transport preflight failure leaves source save undispatched and records diagnostics', async () => {
+  const f = await fixture();
+  Object.assign(f.backend, { saveDispatchTracking: true,
+    save: async () => { throw new AppError('BACKEND_RESPONSE_TOO_LARGE', 'bounded', {
+      request_path: '/sap/bc/adt/cts/transportrequests', error_kind: 'response_size_limit', elapsed_ms: 42,
+      network_code: 'ERR_BAD_RESPONSE', raw: 'PRIVATE_SOURCE', sap_message: 'PRIVATE_MESSAGE'
+    }); }
+  });
+  try {
+    const current = await f.backend.read(object, 'active');
+    const result = await f.operations.run('update_source', { connection_id: f.connection.connection_id,
+      object_uri: object, expected_revision: current.revision, source: 'REPORT ztest.\nWRITE 1.', request_id: randomUUID() });
+    assert.equal(result.status, 'error'); assert.equal(result.write_dispatched, false);
+    assert.equal(result.outcome, 'confirmed'); assert.equal(result.source_save?.saved, false);
+    assert.equal(f.backend.unlocks, 1);
+    const log = (await Promise.all((await readdir(f.logDirectory)).map(file => readFile(join(f.logDirectory, file), 'utf8')))).join('');
+    const event = log.trim().split('\n').map(line => JSON.parse(line)).find(e => e.event === 'failed');
+    assert.equal(event.tool, 'update_source'); assert.equal(event.network_code, 'ERR_BAD_RESPONSE');
+    assert.equal(event.elapsed_ms, 42); assert.equal(event.write_dispatched, false);
+    assert.equal(log.includes('PRIVATE_'), false);
+  } finally { await f.cleanup(); }
+});
+
+test('read failures are audited with the operation ID', async () => {
+  const f = await fixture();
+  try {
+    const result = await f.operations.run('read_source', { connection_id: f.connection.connection_id, object_uri: object, version: 'inactive' });
+    const log = await readFile(join(f.logDirectory, (await readdir(f.logDirectory))[0]), 'utf8');
+    const event = JSON.parse(log.trim());
+    assert.equal(event.operation_id, result.operation_id); assert.equal(event.tool, 'read_source');
+    assert.equal(event.error_code, 'VERSION_UNAVAILABLE');
+  } finally { await f.cleanup(); }
+});

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { AdtErrorException } from 'abap-adt-api';
-import { safeError } from '../src/errors.js';
+import { safeError, attachBackendDiagnostic } from '../src/errors.js';
 
 test('SAP XML exceptions expose status stored in err and redact lock handles', () => {
   const error = AdtErrorException.create(400, { 'T100KEY-ID': 'FUNC_ADT', 'T100KEY-NO': '012' },
@@ -32,4 +32,18 @@ test('authentication failures never expose SAP message text', () => {
   const result = safeError(AdtErrorException.create(401, {}, '', 'password SECRET'));
   assert.equal(result.code, 'AUTH_FAILED'); assert.equal(result.details?.http_status, 401);
   assert.equal(result.details?.sap_message, undefined);
+});
+
+
+test('transport diagnostics survive exception wrapping and later cleanup requests', () => {
+  const original = new Error('PRIVATE_TRANSPORT');
+  const diagnostic = { request_path: '/sap/bc/adt/programs/programs/ztest/source/main', request_method: 'PUT',
+    network_code: 'ETIMEDOUT', elapsed_ms: 15000, error_kind: 'http_transport' };
+  attachBackendDiagnostic(original, diagnostic);
+  diagnostic.request_method = 'DELETE';
+  const result = safeError({ parent: original });
+  assert.equal(result.code, 'OUTCOME_UNKNOWN');
+  assert.equal(result.details?.request_method, 'PUT');
+  assert.equal(result.details?.elapsed_ms, 15000);
+  assert.equal(JSON.stringify(result).includes('PRIVATE_'), false);
 });

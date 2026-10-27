@@ -6,9 +6,10 @@ import { QualityTools, qualitySchemas, type QualityTool, type QualityInput } fro
 import { XMLBuilder } from 'fast-xml-parser';
 import type { Connection } from './config.js';
 import { digest } from './config.js';
-import { AppError, safeError } from './errors.js';
+import { AppError, safeError, attachBackendDiagnostic, type BackendDiagnostic } from './errors.js';
 import { functionDefinition } from './function-signature.js';
-import { parseTransportList, parseTransportDetails } from './transports.js';
+import { parseTransportList, parseTransportSummary } from './transports.js';
+import { checkSavedVersion } from './syntax-check.js';
 import { groupActivationBody, activationResponse } from './activation.js';
 import { probeEnhancementActivation, type EnhancementActivation } from './enhancements.js';
 import { tableQuery, readOnlySql, queryResult, queryCapabilities, type TableQuery, type SqlQuery } from './data-query.js';
@@ -115,7 +116,8 @@ export interface Backend {
   transportRequirement?(object: string, pkg: string, operation: 'I' | 'U'): Promise<'required' | 'not_required'>;
   lock(object: string): Promise<string>;
   unlock(object: string, handle: string): Promise<void>;
-  save(source: string, code: string, handle: string, transport?: string): Promise<void>;
+  readonly saveDispatchTracking?: boolean;
+  save(source: string, code: string, handle: string, transport?: string, onDispatch?: () => void): Promise<void>;
   create(name: string, description: string, pkg: string, transport?: string, kind?: ProgramKind): Promise<string>;
   createFunctionGroup?(name: string, description: string, pkg: string, transport?: string): Promise<string>;
   createFunctionModule?(name: string, description: string, group: string, transport?: string): Promise<string>;
@@ -123,7 +125,7 @@ export interface Backend {
   functionGroupSnapshot?(group: string): Promise<GroupSnapshot>;
   check(object: string, version: Version): Promise<unknown>;
   activate(object: string, snapshot?: GroupSnapshot): Promise<{ success: boolean; messages: unknown[] }>;
-  transports(): Promise<unknown>;
+  transports(number?: string): Promise<unknown>;
   createTransportRequest?(object: string, pkg: string, description: string): Promise<string>;
   verifyTransportRequest?(number: string): Promise<CreatedTransport | undefined>;
   close(): Promise<void>;
@@ -131,17 +133,28 @@ export interface Backend {
 
 // Use a bounded client that never redirects authentication to another server.
 class BoundedHttp implements HttpClient {
+  lastDiagnostic: BackendDiagnostic = {};
   lastFailure?: { http_status: number; request_path: string; request_method: string };
   constructor(private base: string, private onActivity?: () => void) {}
   async request(o: HttpClientOptions) {
     this.lastFailure = undefined;
     const url = new URL(o.url, this.base);
     if (url.origin !== this.base) throw new AppError('INVALID_URI', 'Cross-origin backend request rejected');
+    const started = performance.now();
+    this.lastDiagnostic = { request_path: url.pathname, request_method: (o.method ?? 'GET').toUpperCase(),
+      request_body_bytes: typeof o.body === 'string' ? Buffer.byteLength(o.body, 'utf8') : 0 };
+    const requestContentType = Object.entries(o.headers ?? {}).find(([key]) => key.toLowerCase() === 'content-type')?.[1];
+    if (typeof requestContentType === 'string' && /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/i.test(requestContentType.split(';')[0]))
+      this.lastDiagnostic.request_content_type = requestContentType.split(';')[0].slice(0, 100);
     try {
     const r = await axios.request<string>({ url: url.href, method: o.method ?? 'GET', headers: o.headers,
       params: o.qs, auth: o.auth, data: o.body, timeout: 15000, maxRedirects: 0,
-      maxContentLength: 4 * 1024 * 1024, maxBodyLength: 2 * 1024 * 1024, responseType: 'text', proxy: false,
+      maxContentLength: /^\/sap\/bc\/adt\/cts\/transportrequests(?:\/[A-Z0-9]{3}K[0-9]{6})?$/.test(url.pathname) ? 16 * 1024 * 1024 : 4 * 1024 * 1024, maxBodyLength: 2 * 1024 * 1024, responseType: 'text', proxy: false,
       validateStatus: () => true });
+    this.lastDiagnostic.http_status = r.status;
+    const contentType = r.headers['content-type'];
+    if (typeof contentType === 'string' && /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/i.test(contentType.split(';')[0]))
+      this.lastDiagnostic.response_content_type = contentType.split(';')[0].slice(0, 100);
     if (r.status >= 400) this.lastFailure = {
       http_status: r.status, request_path: url.pathname, request_method: o.method ?? 'GET'
     };
@@ -150,11 +163,39 @@ class BoundedHttp implements HttpClient {
       { body: r.data, status: r.status, statusText: r.statusText, headers: {} });
     return { body: r.data, status: r.status, statusText: r.statusText, headers: r.headers as Record<string, string> };
     } catch (error) {
+      if (axios.isAxiosError(error)) {
+        const request = error.request as { writableFinished?: unknown; reusedSocket?: unknown; res?: unknown } | undefined;
+        if (typeof request?.writableFinished === 'boolean') this.lastDiagnostic.request_finished = request.writableFinished;
+        if (typeof request?.reusedSocket === 'boolean') this.lastDiagnostic.socket_reused = request.reusedSocket;
+        this.lastDiagnostic.response_started = Boolean(error.response || request?.res);
+      }
+      const code = axios.isAxiosError(error) ? error.code : undefined;
+      const cause = axios.isAxiosError(error) ? (error.cause as { code?: unknown } | undefined)?.code : undefined;
+      if (code && /^[A-Z0-9_]{1,64}$/.test(code)) this.lastDiagnostic.network_code = code;
+      if (typeof cause === 'string' && /^[A-Z0-9_]{1,64}$/.test(cause)) this.lastDiagnostic.cause_code = cause;
+      this.lastDiagnostic.error_kind = axios.isAxiosError(error) && /maxContentLength.*exceeded/i.test(error.message)
+        ? 'response_size_limit' : axios.isAxiosError(error) && /maxBodyLength|Request body larger/i.test(error.message)
+        ? 'request_size_limit' : axios.isAxiosError(error) && /stream has been aborted/i.test(error.message)
+        ? 'response_aborted' : 'http_transport';
       if (error instanceof HttpClientException) throw error;
       throw new HttpClientException('Backend network request failed', axios.isAxiosError(error) ? error.code : undefined,
         undefined, undefined, o);
-    } finally { this.onActivity?.(); }
+    } finally { this.lastDiagnostic.elapsed_ms = Math.round(performance.now() - started); this.onActivity?.(); }
   }
+}
+
+
+function bindDiagnostics(http: AdtHTTP, transport: BoundedHttp) {
+  const request = http.request.bind(http);
+  http.request = async (url, options) => {
+    try { return await request(url, options); }
+    catch (error) { attachBackendDiagnostic(error, transport.lastDiagnostic); throw error; }
+  };
+}
+function diagnosticClient(connection: Connection, password: string, transport: BoundedHttp) {
+  const client = new ADTClient(transport, connection.username, password, connection.client, connection.language);
+  bindDiagnostics(client.httpClient, transport);
+  return client;
 }
 
 export type AdtBackendOptions = { queryIdleTimeoutMs?: number; now?: () => number };
@@ -167,6 +208,7 @@ function queryIdleTimeoutMs() {
 }
 
 export class AdtBackend implements Backend {
+  readonly saveDispatchTracking = true;
   private client: ADTClient;
   private qualityHttp: AdtHTTP;
   private reader: ADTClient;
@@ -180,13 +222,15 @@ export class AdtBackend implements Backend {
     if (!Number.isSafeInteger(this.queryIdleTimeoutMs) || this.queryIdleTimeoutMs < 1 || this.queryIdleTimeoutMs > 86400000)
       throw new AppError('INVALID_CONFIG', 'Query reader idle timeout must be between 1 and 86400000 milliseconds');
     this.now = options.now ?? (() => performance.now());
-    this.client = new ADTClient(new BoundedHttp(connection.base_url), connection.username, password, connection.client, connection.language);
+    this.client = diagnosticClient(connection, password, new BoundedHttp(connection.base_url));
     this.client.stateful = session_types.stateful;
     // Version probes must not alter the stateful editor context that owns SAP locks.
     this.readerHttp = new BoundedHttp(connection.base_url, () => { this.readerLastActivity = this.now(); });
-    this.createReader = () => new ADTClient(this.readerHttp, connection.username, password, connection.client, connection.language);
+    this.createReader = () => diagnosticClient(connection, password, this.readerHttp);
     this.reader = this.createReader();
-    this.qualityHttp = new AdtHTTP(new BoundedHttp(connection.base_url), connection.username, password, connection.client, connection.language);
+    const qualityTransport = new BoundedHttp(connection.base_url);
+    this.qualityHttp = new AdtHTTP(qualityTransport, connection.username, password, connection.client, connection.language);
+    bindDiagnostics(this.qualityHttp, qualityTransport);
     // Disable the ADT library's implicit login-error replay for backend executions.
     this.qualityHttp.stateful = session_types.stateful;
   }
@@ -321,6 +365,20 @@ export class AdtBackend implements Backend {
   async unlock(object: string, handle: string) { await this.client.unLock(this.lockUri(object), handle); }
   private async correctionRequest(transport?: string): Promise<string | undefined> {
     if (transport) {
+      if (!/^[A-Z0-9]{3}K[0-9]{6}$/.test(transport))
+        throw new AppError('TRANSPORT_TASK_INVALID', 'Invalid transport task number. No create or save request was sent.');
+      const detail = await this.transportSummary(transport);
+      if (detail && detail['tm:type'] && detail['tm:status']) {
+        const selected = detail.tasks.filter(task => task['tm:number'] === transport);
+        if (detail['tm:type'] !== 'K' || !['D', 'modifiable'].includes(detail['tm:status']) ||
+            !/^[A-Z0-9]{3}K[0-9]{6}$/.test(detail['tm:number']) || selected.length !== 1 ||
+            selected[0]['tm:owner']?.toUpperCase() !== this.connection.username.toUpperCase() ||
+            !['D', 'modifiable'].includes(selected[0]['tm:status'])) {
+          throw new AppError('TRANSPORT_TASK_INVALID', 'The supplied task is not a modifiable task for the configured user under a modifiable workbench request. No create or save request was sent.');
+        }
+        return detail['tm:number'];
+      }
+      // Older SAP systems may not expose usable task details. Only then use the legacy list.
       const listed = await this.transports();
       const matches = listed.workbench.flatMap(target => target.modifiable)
         .filter(request => request.tasks.some(task => task['tm:number'] === transport &&
@@ -334,9 +392,10 @@ export class AdtBackend implements Backend {
     }
     return undefined;
   }
-  async save(source: string, code: string, handle: string, transport?: string) {
+  async save(source: string, code: string, handle: string, transport?: string, onDispatch?: () => void) {
     programUri(source);
     const correction = await this.correctionRequest(transport);
+    onDispatch?.();
     await this.client.setObjectSource(source, code, handle, correction);
   }
   async create(name: string, description: string, pkg: string, transport?: string, kind: ProgramKind = 'report') {
@@ -440,8 +499,13 @@ export class AdtBackend implements Backend {
   }
   async check(object: string, version: Version) {
     const source = await this.read(object, version);
-    const diagnostics = await this.client.syntaxCheck(object, source.source_uri, source.source, undefined, version);
+    // This tool checks a saved SAP version; resending inline source is unnecessary and can fail on some backends.
+    const diagnostics = await checkSavedVersion(this.client.httpClient, source.source_uri, version);
+    const after = await this.read(object, version, source.source_uri);
+    if (after.revision !== source.revision)
+      throw new AppError('VERSION_CONFLICT', 'Source changed during syntax check; read and review it before checking again.');
     return { passed: !diagnostics.some(d => ['E', 'A', 'X', 'error'].includes(d.severity)), diagnostics,
+      checked_version: version, source_revision: source.revision, request_mode: 'saved_version',
       position_format: 'backend-native; line and offset require real-system verification' };
   }
   async activate(object: string, snapshot?: GroupSnapshot) {
@@ -487,7 +551,35 @@ export class AdtBackend implements Backend {
     const metadata = await this.client.objectStructure(programUri(object), 'inactive');
     return this.client.activate(metadata.metaData['adtcore:name'], object);
   }
-  async transports() {
+  private async transportSummary(number: string) {
+    if (!/^[A-Z0-9]{3}K[0-9]{6}$/.test(number)) throw new AppError('INVALID_INPUT', 'Invalid transport number');
+    try {
+      const response = await this.reader.httpClient.request('/sap/bc/adt/cts/transportrequests/' + number, {
+        headers: { Accept: 'application/vnd.sap.adt.transportorganizer.v1+xml' }
+      });
+      if (!response.body.trim()) return undefined;
+      return parseTransportSummary(response.body);
+    } catch (error) {
+      const status = (safeError(error).details as { http_status?: number } | undefined)?.http_status;
+      if ([404, 405, 501].includes(status ?? 0)) return undefined;
+      throw error;
+    }
+  }
+  async transports(number?: string) {
+    if (number) {
+      const detail = await this.transportSummary(number);
+      if (!detail) throw new AppError('TRANSPORT_DETAIL_UNAVAILABLE', 'SAP returned no usable transport detail; explicitly query the full list if needed.');
+      if (detail['tm:number'] !== number && !detail.tasks.some(task => task['tm:number'] === number))
+        throw new AppError('TRANSPORT_RESPONSE_INVALID', 'SAP returned a different transport');
+      if (!['K', 'W'].includes(detail['tm:type']))
+        throw new AppError('TRANSPORT_RESPONSE_INVALID', 'SAP returned an unrecognized transport category');
+      const modifiable = ['D', 'modifiable'].includes(detail['tm:status']);
+      if (!modifiable && !['R', 'released'].includes(detail['tm:status']))
+        throw new AppError('TRANSPORT_RESPONSE_INVALID', 'SAP returned an unrecognized transport status');
+      const target = { 'tm:name': '', 'tm:desc': '', modifiable: modifiable ? [detail] : [], released: modifiable ? [] : [detail] };
+      return { workbench: detail['tm:type'] === 'K' ? [target] : [], customizing: detail['tm:type'] === 'W' ? [target] : [],
+        objects_included: false, links_included: false };
+    }
     const response = await this.reader.httpClient.request('/sap/bc/adt/cts/transportrequests', {
       qs: { user: this.connection.username, targets: true },
       headers: { Accept: 'application/vnd.sap.adt.transportorganizertree.v1+xml' }
@@ -525,21 +617,13 @@ export class AdtBackend implements Backend {
     return number;
   }
   async verifyTransportRequest(number: string): Promise<CreatedTransport | undefined> {
-    const listed = await this.transports();
-    if (!listed.workbench.some(target => target.modifiable.some(request => request['tm:number'] === number || request.tasks.some(task => task['tm:number'] === number)))) {
-      const response = await this.reader.httpClient.request(`/sap/bc/adt/cts/transportrequests/${number}`, {
-        headers: { Accept: 'application/vnd.sap.adt.transportorganizer.v1+xml' }
-      });
-      if (response.body.trim()) {
-        const detail = parseTransportDetails(response.body);
-        // Only classify independently read details when SAP explicitly identifies a modifiable workbench request.
-        if (detail && detail['tm:number'] === number && ['D', 'modifiable'].includes(detail['tm:status']) &&
-            (detail as unknown as Record<string, string>)['tm:type'] === 'K' &&
-            detail['tm:owner']?.toUpperCase() === this.connection.username.toUpperCase()) {
-          listed.workbench.push({ 'tm:name': '', 'tm:desc': '', modifiable: [detail], released: [] });
-        }
-      }
-    }
+    const direct = await this.transportSummary(number);
+    if (direct && direct['tm:type'] && direct['tm:status'] &&
+        (direct['tm:number'] !== number && !direct.tasks.some(task => task['tm:number'] === number))) return undefined;
+    const listed = direct && direct['tm:type'] && direct['tm:status']
+      ? { workbench: direct['tm:type'] === 'K' && ['D', 'modifiable'].includes(direct['tm:status'])
+          ? [{ 'tm:name': '', 'tm:desc': '', modifiable: [direct], released: [] }] : [], customizing: [] }
+      : await this.transports();
     for (const target of listed.workbench) {
       for (const request of target.modifiable) {
         if (request['tm:number'] !== number && !request.tasks.some(task => task['tm:number'] === number)) continue;

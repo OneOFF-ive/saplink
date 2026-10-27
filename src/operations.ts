@@ -24,6 +24,7 @@ export type Input = RepositoryInput & QualityInput & {
   name?: string;
   description?: string;
   transport_task?: string;
+  transport_number?: string;
   request_id?: string;
   program_kind?: ProgramKind;
   function_group_uri?: string;
@@ -71,6 +72,26 @@ type Context = {
 
 export type BackendFactory = (c: Connection, password: string) => Backend;
 export type CacheClearResult = { cleared_sessions: number; retained_write_requests: number };
+
+function auditFailureDetails(details: unknown): Record<string, unknown> {
+  const diagnostic = details as Record<string, unknown> | undefined;
+  const safeDetails: Record<string, unknown> = {};
+  for (const key of ['http_status', 'elapsed_ms', 'attempts', 'reader_recreated', 'request_body_bytes', 'request_finished', 'socket_reused', 'response_started']) {
+    const value = diagnostic?.[key];
+    if (typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) safeDetails[key] = value;
+  }
+  for (const key of ['request_method', 'network_code', 'cause_code', 'error_kind', 'session_recovery', 'sap_error_type', 'sap_message_id', 'sap_message_number']) {
+    const value = diagnostic?.[key];
+    if (typeof value === 'string' && /^[a-z0-9_]{1,80}$/i.test(value)) safeDetails[key] = value;
+  }
+  for (const key of ['request_content_type', 'response_content_type']) {
+    const value = diagnostic?.[key];
+    if (typeof value === 'string' && /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/i.test(value)) safeDetails[key] = value.slice(0, 100);
+  }
+  const path = diagnostic?.request_path;
+  if (typeof path === 'string' && /^\/sap\/bc\/adt\/[a-z0-9_./%-]+$/i.test(path)) safeDetails.request_path = path.slice(0, 512);
+  return safeDetails;
+}
 
 const recoverableSessionErrors = new Set(['AUTH_FAILED', 'CSRF_FAILED', 'HTTP_FORBIDDEN', 'ADT_ERROR', 'OUTCOME_UNKNOWN']);
 
@@ -233,6 +254,12 @@ export class Operations {
         if (writeTools.has(tool) || !cachedSession || this.poisoned.has(backend) ||
           !recoverableSessionErrors.has(safeError(error).code))
           throw error;
+        const retryFailure = safeError(error);
+        try {
+          await this.audit.append({ operation_id: id, connection_id: input.connection_id, tool,
+            event: 'session_recovery_started', error_code: retryFailure.code,
+            ...auditFailureDetails(retryFailure.details) });
+        } catch { context.warnings.push('LOG_WRITE_FAILED'); }
         await backend.close().catch(() => { });
         this.sessions.delete(connection.connection_id);
         backend = this.factory(connection, await this.credentials.get(connection.connection_id));
@@ -300,34 +327,16 @@ export class Operations {
           ]
         };
       }
-      if (tool === 'query_table' || tool === 'query_sql') {
-        const queryDetails = failure.details as Record<string, unknown> | undefined;
-        try {
-          // Never persist query text, filters, returned rows, or raw HTTP data.
-          await this.audit.append({
-            operation_id: id, connection_id: input.connection_id, tool,
-            event: 'data_query_failed', completed_steps: [...context.steps],
-            error_code: failure.code, http_status: queryDetails?.http_status,
-            request_path: queryDetails?.request_path, attempts: queryDetails?.attempts,
-            reader_recreated: queryDetails?.reader_recreated, session_recovery: queryDetails?.session_recovery
-          });
-        } catch { context.warnings.push('LOG_WRITE_FAILED'); }
-      }
-      if (writeTools.has(tool)) {
-        try {
-          await this.audit.append({
-            operation_id: id,
-            request_id: input.request_id,
-            connection_id: input.connection_id,
-            event: 'failed',
-            completed_steps: context.steps,
-            error_code: failure.code
-          });
-        }
-        catch {
-          context.warnings.push('LOG_WRITE_FAILED');
-        }
-      }
+      try {
+        // Persist no source, SQL, filter values, returned data, headers or raw backend messages.
+        await this.audit.append({
+          operation_id: id, request_id: input.request_id, connection_id: input.connection_id, tool,
+          event: tool === 'query_table' || tool === 'query_sql' ? 'data_query_failed' : 'failed',
+          completed_steps: [...context.steps], error_code: failure.code, ...auditFailureDetails(failure.details),
+          ...(writeTools.has(tool) ? { write_dispatched: context.dispatched,
+            outcome: context.confirmed ? 'partial' : context.dispatched ? 'unknown' : 'confirmed' } : {})
+        });
+      } catch { context.warnings.push('LOG_WRITE_FAILED'); }
       return {
         operation_id: id,
         status: 'error',
@@ -465,7 +474,7 @@ export class Operations {
       case 'syntax_check':
         return backend.check(adtUri(input.object_uri!), input.version ?? 'inactive');
       case 'list_transport_requests':
-        return backend.transports();
+        return backend.transports(input.transport_number);
       case 'create_transport_request': {
         if (!backend.createTransportRequest || !backend.verifyTransportRequest || !backend.transportRequirement) {
           throw new AppError('CAPABILITY_UNSUPPORTED', 'Transport request creation or verification is unavailable');
@@ -663,10 +672,13 @@ export class Operations {
               throw conflict('An inactive draft exists; read inactive before editing', draft);
           }
           await context.event('version_checked');
-          context.dispatched = true;
-          saveState.saved = 'unknown';
-          saveState.next_action = 'Read inactive and active source to establish backend state before any new write; do not blindly retry.';
-          await backend.save(current.source_uri, input.source!, handle, input.transport_task);
+          const markSaveDispatched = () => {
+            context.dispatched = true;
+            saveState.saved = 'unknown';
+            saveState.next_action = 'Read inactive and active source to establish backend state before any new write; do not blindly retry.';
+          };
+          if (!backend.saveDispatchTracking) markSaveDispatched();
+          await backend.save(current.source_uri, input.source!, handle, input.transport_task, markSaveDispatched);
           context.confirmed = true;
           saveState.saved = true;
           saveState.verification = 'pending';

@@ -319,3 +319,26 @@ Web 管理接口测试覆盖独立认证、跨站请求拒绝、密码与配置�
 锁回收竞态保护、异常门锁恢复步骤和依赖告警说明见 [安全说明](security.md)。升级后首次启动前，请先关闭所有旧版本 SapLink 进程。
 
 详细设计见 [架构文档](architecture.md)。
+
+
+### SAP 调用失败诊断
+
+所有工具失败均记录 operation_id、tool、错误码和操作阶段（数据查询沿用 data_query_failed）。HTTP 错误附请求方法、去掉查询参数的路径、耗时、状态码；网络失败附安全的 network_code、cause_code、error_kind。日志采用字段白名单，不保存源码、SQL、筛选值、返回数据、请求头或原始后端消息。历史日志不会追补。
+
+传输请求列表及合法请求/任务编号详情使用 16 MiB 响应上限，其他接口仍为 4 MiB；超过上限返回 BACKEND_RESPONSE_TOO_LARGE，请求体过大返回 REQUEST_TOO_LARGE，这些确定性错误不会触发会话重建重试。保存前解析传输任务失败时 write_dispatched=false、source_save.saved=false；只有开始提交源码时才标记保存结果未知，仍不自动重放保存或激活。
+
+
+### 传输任务定向读取
+
+`list_transport_requests` 新增可选 `transport_number`（请求号或任务号），定向读取 `/sap/bc/adt/cts/transportrequests/{number}`，返回父请求和任务头；不返回对象清单或操作链接，并明确标记 `objects_included=false`、`links_included=false`。省略编号仍保留完整列表范围，不隐式过滤已释放或较旧请求。
+
+保存/创建前的任务校验和创建传输请求后的读回确认优先使用编号详情。任务校验核对当前用户、任务及父请求的可修改状态、Workbench 类型和父子关系，每次实时校验，不缓存校验结论。仅在详情接口不支持（404/405/501）、空响应、无父请求头或父请求类型/状态元数据缺失时使用原列表兼容路径；权限、网络、大小限制、XML 损坏或父子关系冲突不触发全量回退。
+
+定向读取缩小查询范围，精简解析减少客户端结果大小，但 SAP 仍可能在详情响应中附带对象清单；客户端精简不等于服务器不传输这些数据。不会创建或更改 SAP 搜索配置。
+
+
+### 已保存版本语法检查
+
+`syntax_check` 先读取并确认请求的 active/inactive 版本，再按源码 URI 和版本调用 ADT checkruns，不使用依赖库的 inline Base64 源码请求。检查后重新读取同一版本，revision 变化则返回 VERSION_CONFLICT，不能据旧结果报告通过。返回 checked_version、source_revision、request_mode=saved_version。XML 结构不符、HTML 或不完整诊断返回 INVALID_BACKEND_RESPONSE；保留原始诊断中的错误及警告，不自动保存或激活。
+
+网络失败另附 request_body_bytes、request_content_type、request_finished、socket_reused、response_started。request_finished 仅表示本机请求流完成，不证明 SAP 已收到或保存；write_dispatched=true 后的连接重置仍按未知结果处理。上述字段以白名单落日志，不记录请求内容或凭据。

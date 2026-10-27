@@ -66,7 +66,7 @@
 | 保存主源码 | `update_source` | object_uri 或 source_uri、source、expected_revision、可选 transport_task、request_id |
 | 检查源码 | `syntax_check` | object_uri、version |
 | 激活源码或函数组 | `activate_objects` | objects 中各 object_uri/expected_revision、request_id |
-| 查看请求和任务 | `list_transport_requests` | 连接，无状态过滤参数 |
+| 查看请求和任务 | `list_transport_requests` | 连接，可选 transport_number 定向查询；无状态过滤参数 |
 | 显式创建 Workbench 请求 | `create_transport_request` | object_uri、package_name、description、request_id |
 
 创建名称要求 Z/Y 开头、大写字母/数字/下划线；程序和函数模块最多 30 字符，函数组最多 26 字符。description 为 1–60 字符。没有独立模板工具、任意文件工具、执行程序工具、删除工具或释放传输请求工具。读取仅限后端发现的主源码，不承诺任意对象类型都可编辑。
@@ -140,7 +140,7 @@ flowchart TD
 
 源码例子只适合相应测试 REPORT，不能拿来覆盖业务程序。同时提供两个 URI 时必须匹配。需要任务时加 `transport_task`；若错误提示缺任务，取得有效任务后使用新 request_id 再提交。
 
-保存通过后调用 `syntax_check`：
+保存通过后调用 `syntax_check`。工具检查 SAP 已保存的指定版本，并在检查前后核对 revision；若返回 VERSION_CONFLICT，应重新读取并审阅源码。不会自动提交本地未保存文本或激活：
 
 ```json
 {"connection_id":"CONNECTION_ID","object_uri":"OBJECT_URI","version":"inactive"}
@@ -211,7 +211,7 @@ SAP 可能重建定义区格式。已支持语法允许 token 等价的格式变
 
 ## 9. 传输任务与请求
 
-先调用 `list_transport_requests`，在返回结构中区分父请求和当前用户可修改任务。结果由后端提供，按实时字段核实。是否需记录变更由 CTS 决定：`$TMP` 可省略；其他包不一定需要任务。
+先调用 `list_transport_requests`，在返回结构中区分父请求和当前用户可修改任务。已知请求号或任务号时传入 `transport_number`，只读取该编号详情，避免拉取整个列表；返回 `objects_included=false`、`links_included=false`，空对象/链接数组不表示 SAP 中没有对象或操作。省略编号保留原列表范围。结果由后端提供，按实时字段核实。是否需记录变更由 CTS 决定：`$TMP` 可省略；其他包不一定需要任务。
 
 每次创建或 update_source 需要记录时均显式提供 `transport_task`。省略时服务对非 `$TMP` 包只读检查：明确无需记录则继续；需要任务返回 `TRANSPORT_REQUIRED`；不明确或失败返回 `TRANSPORT_CHECK_UNAVAILABLE`，不试写探测。
 
