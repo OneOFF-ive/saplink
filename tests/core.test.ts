@@ -980,3 +980,31 @@ test('read failures are audited with the operation ID', async () => {
     assert.equal(event.error_code, 'VERSION_UNAVAILABLE');
   } finally { await f.cleanup(); }
 });
+
+
+test('save HTTP diagnostics are correlated and sanitized on success and unknown outcome', async () => {
+  for (const uncertain of [false, true]) {
+    const f = await fixture();
+    try {
+      f.backend.uncertain = uncertain;
+      (f.backend as Backend).takeSaveDiagnostics = () => [{ request_path: source, request_method: 'PUT',
+        request_body_bytes: 123, request_content_length: 123, request_charset: 'utf-8', http_version: '1.1',
+        request_chunked: false, request_finished: true, response_started: !uncertain, elapsed_ms: 12,
+        transport: 'axios_node_http', ...(uncertain ? { network_code: 'ECONNRESET' } : { http_status: 204 }),
+        authorization: 'PRIVATE_TOKEN', body: 'PRIVATE_SOURCE' } as any];
+      const active = await f.backend.read(object, 'active');
+      const result = await f.operations.run('update_source', { connection_id: f.connection.connection_id,
+        object_uri: object, expected_revision: active.revision, source: 'REPORT ztest.\n* test', request_id: randomUUID() });
+      assert.equal(result.status, uncertain ? 'error' : 'success');
+      const text = await readFile(join(f.logDirectory, (await readdir(f.logDirectory))[0]), 'utf8');
+      const rows = text.trim().split('\n').map(line => JSON.parse(line));
+      const diagnostic = rows.find(row => row.event === 'source_save_http_completed');
+      assert.equal(diagnostic.operation_id, result.operation_id);
+      assert.equal(diagnostic.connection_id, f.connection.connection_id);
+      assert.equal(diagnostic.request_content_length, 123); assert.equal(diagnostic.request_charset, 'utf-8');
+      assert.equal(diagnostic.http_version, '1.1'); assert.equal(diagnostic.request_chunked, false);
+      assert.equal(text.includes('PRIVATE_'), false);
+      assert.equal(f.backend.unlocks, 1);
+    } finally { await f.cleanup(); }
+  }
+});

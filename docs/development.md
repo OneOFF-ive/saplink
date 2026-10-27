@@ -48,7 +48,7 @@ npm test
 
 工具 schema 和描述位于 `src/tool-definitions.ts`，注册位于 `src/server.ts`，业务行为位于 `src/operations.ts`。写操作分类集中在 `src/tool-policy.ts`，MCP annotations 与业务层写保护共用该集合；初始化客户端指引位于 `src/client-guidance.ts`。修改接口时同步核对客户端手册示例。
 
-架构与模块职责见 [架构文档](architecture.md)，源码接口与历史实现细节见 [技术参考](technical-reference.md)。
+架构与模块职责见 [架构文档](architecture.md)，源码接口与实现细节见 [技术参考](technical-reference.md)。
 
 ## Windows 安装包构建与验证
 

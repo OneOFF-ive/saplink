@@ -1,6 +1,6 @@
 # SapLink 技术参考
 
-本文保留原项目 README 的接口和历史实现细节，面向开发者，不是用户安装或运维入口。文中的 npm 命令用于源码目录；安装包用户统一使用 [运维手册](operations.md) 的 saplink 命令。源码运行与打包见 [开发与构建指南](development.md)，产品介绍见 [SapLink](../README.md)。产品与 CLI 统一为 SapLink / saplink；配置、凭据及安装标识见[命名与本地数据](local-data.md)。
+本文说明项目接口和实现细节，面向开发者，不是用户安装或运维入口。文中的 npm 命令用于源码目录；安装包用户统一使用 [运维手册](operations.md) 的 saplink 命令。源码运行与打包见 [开发与构建指南](development.md)，产品介绍见 [SapLink](../README.md)。产品与 CLI 统一为 SapLink / saplink；配置、凭据及安装标识见[命名与本地数据](local-data.md)。
 
 Windows 本地 Web 管理界面 + Streamable HTTP MCP 服务，通过 HTTP ADT 访问 SAP ABAP，不依赖 VS Code、SAP GUI 或数据库；同时保留 CLI。
 

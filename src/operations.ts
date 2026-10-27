@@ -67,6 +67,7 @@ type Context = {
   confirmed: boolean;
   warnings: string[];
   source_save?: SourceSaveState;
+  diagnostic: (details: unknown) => Promise<void>;
   event: (phase: string) => Promise<void>;
 };
 
@@ -76,18 +77,19 @@ export type CacheClearResult = { cleared_sessions: number; retained_write_reques
 function auditFailureDetails(details: unknown): Record<string, unknown> {
   const diagnostic = details as Record<string, unknown> | undefined;
   const safeDetails: Record<string, unknown> = {};
-  for (const key of ['http_status', 'elapsed_ms', 'attempts', 'reader_recreated', 'request_body_bytes', 'request_finished', 'socket_reused', 'response_started']) {
+  for (const key of ['http_status', 'elapsed_ms', 'attempts', 'reader_recreated', 'request_body_bytes', 'request_finished', 'socket_reused', 'response_started', 'request_content_length', 'request_chunked', 'request_connection_close']) {
     const value = diagnostic?.[key];
     if (typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) safeDetails[key] = value;
   }
-  for (const key of ['request_method', 'network_code', 'cause_code', 'error_kind', 'session_recovery', 'sap_error_type', 'sap_message_id', 'sap_message_number']) {
+  for (const key of ['request_method', 'network_code', 'cause_code', 'error_kind', 'session_recovery', 'sap_error_type', 'sap_message_id', 'sap_message_number', 'request_charset', 'request_content_encoding', 'transport']) {
     const value = diagnostic?.[key];
-    if (typeof value === 'string' && /^[a-z0-9_]{1,80}$/i.test(value)) safeDetails[key] = value;
+    if (typeof value === 'string' && /^[a-z0-9_-]{1,80}$/i.test(value)) safeDetails[key] = value;
   }
   for (const key of ['request_content_type', 'response_content_type']) {
     const value = diagnostic?.[key];
     if (typeof value === 'string' && /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/i.test(value)) safeDetails[key] = value.slice(0, 100);
   }
+  if (['1.0', '1.1', '2.0'].includes(String(diagnostic?.http_version))) safeDetails.http_version = diagnostic?.http_version;
   const path = diagnostic?.request_path;
   if (typeof path === 'string' && /^\/sap\/bc\/adt\/[a-z0-9_./%-]+$/i.test(path)) safeDetails.request_path = path.slice(0, 512);
   return safeDetails;
@@ -176,6 +178,12 @@ export class Operations {
       dispatched: false,
       confirmed: false,
       warnings: [],
+      diagnostic: async details => {
+        try {
+          await this.audit.append({ operation_id: id, request_id: input.request_id, connection_id: input.connection_id,
+            tool, event: 'source_save_http_completed', ...auditFailureDetails(details) });
+        } catch { context.warnings.push('LOG_WRITE_FAILED'); }
+      },
       event: async (phase) => {
         context.steps.push(phase);
         try {
@@ -678,7 +686,10 @@ export class Operations {
             saveState.next_action = 'Read inactive and active source to establish backend state before any new write; do not blindly retry.';
           };
           if (!backend.saveDispatchTracking) markSaveDispatched();
-          await backend.save(current.source_uri, input.source!, handle, input.transport_task, markSaveDispatched);
+          try { await backend.save(current.source_uri, input.source!, handle, input.transport_task, markSaveDispatched); }
+          finally {
+            for (const diagnostic of backend.takeSaveDiagnostics?.() ?? []) await context.diagnostic(diagnostic);
+          }
           context.confirmed = true;
           saveState.saved = true;
           saveState.verification = 'pending';

@@ -116,6 +116,7 @@ export interface Backend {
   transportRequirement?(object: string, pkg: string, operation: 'I' | 'U'): Promise<'required' | 'not_required'>;
   lock(object: string): Promise<string>;
   unlock(object: string, handle: string): Promise<void>;
+  takeSaveDiagnostics?(): BackendDiagnostic[];
   readonly saveDispatchTracking?: boolean;
   save(source: string, code: string, handle: string, transport?: string, onDispatch?: () => void): Promise<void>;
   create(name: string, description: string, pkg: string, transport?: string, kind?: ProgramKind): Promise<string>;
@@ -135,22 +136,43 @@ export interface Backend {
 class BoundedHttp implements HttpClient {
   lastDiagnostic: BackendDiagnostic = {};
   lastFailure?: { http_status: number; request_path: string; request_method: string };
-  constructor(private base: string, private onActivity?: () => void) {}
+  constructor(private base: string, private onActivity?: () => void, private onDiagnostic?: (value: BackendDiagnostic) => void) {}
   async request(o: HttpClientOptions) {
     this.lastFailure = undefined;
     const url = new URL(o.url, this.base);
     if (url.origin !== this.base) throw new AppError('INVALID_URI', 'Cross-origin backend request rejected');
     const started = performance.now();
     this.lastDiagnostic = { request_path: url.pathname, request_method: (o.method ?? 'GET').toUpperCase(),
-      request_body_bytes: typeof o.body === 'string' ? Buffer.byteLength(o.body, 'utf8') : 0 };
+      request_body_bytes: typeof o.body === 'string' ? Buffer.byteLength(o.body, 'utf8') : 0,
+      transport: 'axios_node_http' };
     const requestContentType = Object.entries(o.headers ?? {}).find(([key]) => key.toLowerCase() === 'content-type')?.[1];
     if (typeof requestContentType === 'string' && /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/i.test(requestContentType.split(';')[0]))
       this.lastDiagnostic.request_content_type = requestContentType.split(';')[0].slice(0, 100);
+    const charset = typeof requestContentType === 'string' ? requestContentType.match(/;\s*charset\s*=\s*["']?([a-z0-9_-]{1,40})["']?(?:;|$)/i)?.[1] : undefined;
+    if (charset) this.lastDiagnostic.request_charset = charset.toLowerCase();
+    const inspectRequest = (request: any, response?: any) => {
+      if (!request) return;
+      if (typeof request.writableFinished === 'boolean') this.lastDiagnostic.request_finished = request.writableFinished;
+      if (typeof request.reusedSocket === 'boolean') this.lastDiagnostic.socket_reused = request.reusedSocket;
+      this.lastDiagnostic.response_started = Boolean(response || request.res);
+      // Inspect only allowlisted outgoing headers, never raw headers or query parameters.
+      const header = (name: string) => request.getHeader?.(name);
+      const length = header('content-length');
+      if ((typeof length === 'string' && /^\d{1,10}$/.test(length)) || (typeof length === 'number' && Number.isSafeInteger(length) && length >= 0))
+        this.lastDiagnostic.request_content_length = Number(length);
+      this.lastDiagnostic.request_chunked = /\bchunked\b/i.test(String(header('transfer-encoding') ?? ''));
+      this.lastDiagnostic.request_connection_close = /\bclose\b/i.test(String(header('connection') ?? ''));
+      const encoding = header('content-encoding');
+      if (typeof encoding === 'string' && /^(?:identity|gzip|deflate|br)$/i.test(encoding)) this.lastDiagnostic.request_content_encoding = encoding.toLowerCase();
+      // ClientRequest uses HTTP/1.1; record the server version when a response exists.
+      this.lastDiagnostic.http_version = /^(?:1\.0|1\.1|2\.0)$/.test(response?.httpVersion ?? '') ? response.httpVersion : '1.1';
+    };
     try {
     const r = await axios.request<string>({ url: url.href, method: o.method ?? 'GET', headers: o.headers,
       params: o.qs, auth: o.auth, data: o.body, timeout: 15000, maxRedirects: 0,
       maxContentLength: /^\/sap\/bc\/adt\/cts\/transportrequests(?:\/[A-Z0-9]{3}K[0-9]{6})?$/.test(url.pathname) ? 16 * 1024 * 1024 : 4 * 1024 * 1024, maxBodyLength: 2 * 1024 * 1024, responseType: 'text', proxy: false,
       validateStatus: () => true });
+    inspectRequest(r.request, r.request?.res);
     this.lastDiagnostic.http_status = r.status;
     const contentType = r.headers['content-type'];
     if (typeof contentType === 'string' && /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/i.test(contentType.split(';')[0]))
@@ -164,10 +186,7 @@ class BoundedHttp implements HttpClient {
     return { body: r.data, status: r.status, statusText: r.statusText, headers: r.headers as Record<string, string> };
     } catch (error) {
       if (axios.isAxiosError(error)) {
-        const request = error.request as { writableFinished?: unknown; reusedSocket?: unknown; res?: unknown } | undefined;
-        if (typeof request?.writableFinished === 'boolean') this.lastDiagnostic.request_finished = request.writableFinished;
-        if (typeof request?.reusedSocket === 'boolean') this.lastDiagnostic.socket_reused = request.reusedSocket;
-        this.lastDiagnostic.response_started = Boolean(error.response || request?.res);
+        inspectRequest(error.request, error.response?.request?.res);
       }
       const code = axios.isAxiosError(error) ? error.code : undefined;
       const cause = axios.isAxiosError(error) ? (error.cause as { code?: unknown } | undefined)?.code : undefined;
@@ -180,7 +199,7 @@ class BoundedHttp implements HttpClient {
       if (error instanceof HttpClientException) throw error;
       throw new HttpClientException('Backend network request failed', axios.isAxiosError(error) ? error.code : undefined,
         undefined, undefined, o);
-    } finally { this.lastDiagnostic.elapsed_ms = Math.round(performance.now() - started); this.onActivity?.(); }
+    } finally { this.lastDiagnostic.elapsed_ms = Math.round(performance.now() - started); this.onActivity?.(); this.onDiagnostic?.({ ...this.lastDiagnostic }); }
   }
 }
 
@@ -210,6 +229,9 @@ function queryIdleTimeoutMs() {
 export class AdtBackend implements Backend {
   readonly saveDispatchTracking = true;
   private client: ADTClient;
+  private saveDiagnostics: BackendDiagnostic[] = [];
+  private capturingSave = false;
+  takeSaveDiagnostics() { const result = this.saveDiagnostics; this.saveDiagnostics = []; return result; }
   private qualityHttp: AdtHTTP;
   private reader: ADTClient;
   private readerHttp: BoundedHttp;
@@ -222,7 +244,10 @@ export class AdtBackend implements Backend {
     if (!Number.isSafeInteger(this.queryIdleTimeoutMs) || this.queryIdleTimeoutMs < 1 || this.queryIdleTimeoutMs > 86400000)
       throw new AppError('INVALID_CONFIG', 'Query reader idle timeout must be between 1 and 86400000 milliseconds');
     this.now = options.now ?? (() => performance.now());
-    this.client = diagnosticClient(connection, password, new BoundedHttp(connection.base_url));
+    this.client = diagnosticClient(connection, password, new BoundedHttp(connection.base_url, undefined, diagnostic => {
+      if (this.capturingSave && diagnostic.request_method === 'PUT' && /\/source\/main$/.test(diagnostic.request_path ?? '') && this.saveDiagnostics.length < 8)
+        this.saveDiagnostics.push(diagnostic);
+    }));
     this.client.stateful = session_types.stateful;
     // Version probes must not alter the stateful editor context that owns SAP locks.
     this.readerHttp = new BoundedHttp(connection.base_url, () => { this.readerLastActivity = this.now(); });
@@ -393,10 +418,13 @@ export class AdtBackend implements Backend {
     return undefined;
   }
   async save(source: string, code: string, handle: string, transport?: string, onDispatch?: () => void) {
+    this.saveDiagnostics = [];
     programUri(source);
     const correction = await this.correctionRequest(transport);
     onDispatch?.();
-    await this.client.setObjectSource(source, code, handle, correction);
+    this.capturingSave = true;
+    try { await this.client.setObjectSource(source, code, handle, correction); }
+    finally { this.capturingSave = false; }
   }
   async create(name: string, description: string, pkg: string, transport?: string, kind: ProgramKind = 'report') {
     const include = kind === 'include';

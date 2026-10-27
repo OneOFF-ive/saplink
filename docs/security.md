@@ -1,13 +1,10 @@
 # Security Notes
 
-## Review and fixes (2026-10-26)
+## Request parsing and test-result boundaries
 
-The dependency scan found body-parser 2.3.0 affected by [GHSA-27r3-jxmh-p828](https://github.com/advisories/GHSA-27r3-jxmh-p828), where trailing data after a compressed request can trigger an uncaught decoder error and terminate the process. Although MCP parsing requires a token, the admin server also parses bodies on non-API routes before returning 404, making those paths reachable without the management token. The lockfile now uses body-parser 2.4.0. HTTP regression coverage sends malformed gzip data to unauthenticated and authenticated admin paths and to MCP, then verifies that both listeners still serve valid requests.
+HTTP request parsers must handle malformed compressed bodies without terminating either the management or MCP listener. Dependency updates must preserve regression coverage for unauthenticated and authenticated management paths and for MCP requests. Run the dependency audit against the current lockfile; an audit result is a point-in-time dependency check, not proof that every application path is free of flaws.
 
-The lockfile also updates fast-uri 3.1.8 to 3.1.9, fixing its reported scheme, host and path-normalization advisories. Only these compatible indirect dependencies and the required qs patch were updated. The full npm audit reported zero known vulnerabilities after the update on 2026-10-26; this does not establish that every application path is free of flaws.
-
-ABAP Unit result parsing previously treated an empty or whitespace-only executionTime attribute as zero because Number('') is zero. Such a method could be counted as executed and contribute to a false passed result. Empty execution times now produce unknown status with no execution time; valid zero-duration values remain accepted. Regression tests cover missing, empty, whitespace, invalid and negative values. This review and its simulated tests do not execute tests against a live SAP system.
-
+ABAP Unit methods with missing, empty, whitespace-only, invalid or negative execution times must not be counted as confirmed successful execution. Valid zero-duration values remain accepted. Simulated regression tests do not establish that a test was executed against a live SAP system.
 
 ## Release checks
 
@@ -15,7 +12,7 @@ ABAP Unit result parsing previously treated an empty or whitespace-only executio
 
 The command reports a validated HTTPS GitHub release-page URL, version metadata and optional mirror downloads with SHA-256 values. Mirror downloads must match the configured HTTPS manifest origin, version directory, architecture and standard installer filename. `SAPLINK_UPDATE_URL` selects a custom HTTPS manifest, or `github` disables the mirror; only an operator should change this trust source. Cache entries are scoped to that manifest URL, and old-format entries are refreshed. Checks are priority failover, not a comparison of all sources; the publisher must keep the mirror current. A hash served by the same host as a binary does not independently authenticate the publisher. It does not download, execute, install or verify release binaries, and does not establish publisher authenticity or installer integrity. Installation and signature/hash checks remain separate. A missing public release, network failure or rate limit must not be reported as proof that the installation is up to date.
 
-## AI lifecycle CLI (2026-10-16)
+## AI lifecycle CLI
 
 The lifecycle manager serializes its commands with a separate lease and uses the existing runtime/config leases. Read-only lease inspection never reclaims locks. A managed instance is identified by PID, process start time via its runtime lease, a lease nonce and an authenticated control response. Stop uses a dedicated loopback control listener, requires a separate random token, rejects Origin and unexpected Host, and never kills a PID. This listener is not exposed as an MCP tool. Its metadata file contains a control secret and must remain private to the current OS user; mode 0600 is requested, and Windows access control still depends on directory ACLs. Treat custom configuration directories as sensitive.
 
@@ -23,17 +20,17 @@ JSON CLI output excludes credentials and control tokens. `token create --out` an
 
 Background startup includes a TCP listener preflight and still handles actual bind failures; this is not an atomic port reservation. Shutdown waits for normal request/session cleanup. Timeout means uncertainty, not permission to force-kill or retry writes. Background mode does not install an OS service or guarantee crash/reboot recovery. Existing foreground service/UI instances remain outside managed stop/restart.
 
-## Review and fixes (2026-10-15)
+## Management API and query validation
 
-The local management API authentication guard now matches paths case-insensitively, consistent with Express routing. Previously uppercase paths such as `/API/state` bypassed the lowercase `/api/` middleware check; management mutations including token creation could also bypass that guard. Regression tests enforce authentication and same-origin checks across mixed-case paths. Restart all old processes to apply the fix; it is not a change to already running services.
+Management API authentication matches paths case-insensitively, consistent with Express routing. Mixed-case paths require the same authentication and same-origin checks as lowercase paths.
 
-The SELECT guard now rejects both `CLIENT` and `CLIENTS` outside quoted values, including `USING ALL CLIENTS`, `USING CLIENTS IN` and nested queries. Previously the plural form could bypass the configured-Client policy, subject to SAP backend support and authorization.
+The SELECT guard rejects both CLIENT and CLIENTS outside quoted values, including USING ALL CLIENTS, USING CLIENTS IN and nested queries. SAP backend support and authorization checks still apply.
 
 MCP initialization provides client instructions for data handling and safe write recovery. Parameter descriptions explain identifiers, filters and revision/request IDs. Tool arguments are limited to 2000 combined object members/array elements before schema validation. Client instructions are guidance, not an enforcement boundary; server validation and SAP authorizations remain required.
 
 ## Backend transport and access scope
 
-Backend connections accept HTTP and HTTPS. Prefer HTTPS with a trusted server certificate; the bounded Axios client uses default TLS verification, forbids cross-origin requests and never follows redirects, including HTTPS-to-HTTP redirects. No insecure-certificate switch or automatic downgrade is provided. Existing HTTP connections remain compatible and still send authentication and data without transport encryption. HTTPS has not been validated against a live SAP system in this review.
+Backend connections accept HTTP and HTTPS. Prefer HTTPS with a trusted server certificate; the bounded Axios client uses default TLS verification, forbids cross-origin requests and never follows redirects, including HTTPS-to-HTTP redirects. No insecure-certificate switch or automatic downgrade is provided. Existing HTTP connections remain compatible and still send authentication and data without transport encryption. Validate connectivity and supported workflows against each target SAP system.
 
 All valid MCP tokens share configured connections and SAP-user privileges; there is no per-token system, table or row-level policy. Keep SAP users appropriately scoped. Query row limits do not bound database scan cost, and read operations may recreate a cached session and retry once. Enhancement version probes cannot establish BAdI/CMOD runtime enablement.
 
@@ -51,11 +48,11 @@ All concurrent processes must run this guarded implementation. Stop older versio
 
 ## Dependency Advisory
 
-The upstream `abap-adt-api` dependency requests `sprintf-js@^1.1.3`, affected by [GHSA-hp3w-g68c-fv3c](https://github.com/advisories/GHSA-hp3w-g68c-fv3c). The advisory concerns attacker-controlled numeric precision in format strings. No patched upstream release is listed as of 2026-10-18. SapLink's reviewed ADT paths use only fixed formats with at most one `%s`; no externally controlled format string was found in those calls.
+The upstream `abap-adt-api` dependency requests `sprintf-js@^1.1.3`, affected by [GHSA-hp3w-g68c-fv3c](https://github.com/advisories/GHSA-hp3w-g68c-fv3c). The advisory concerns attacker-controlled numeric precision in format strings. SapLink restricts ADT path formatting to fixed string templates; externally controlled format strings must not be passed to this interface.
 
-SapLink now overrides that transitive dependency with the project-owned `vendor/adt-path-format` module. It implements only bounded `%s` string substitution and `%%`, rejecting numeric precision, padding and named directives before processing arguments. It does not contain the upstream numeric formatter. Regression tests exercise the actual ADT dependency resolution, all registered creation formats and malicious precision inputs. Review this restricted API contract whenever upgrading `abap-adt-api`.
+SapLink overrides that transitive dependency with the project-owned `vendor/adt-path-format` module. It implements only bounded `%s` string substitution and `%%`, rejecting numeric precision, padding and named directives before processing arguments. It does not contain the upstream numeric formatter. Regression tests exercise the actual ADT dependency resolution, all registered creation formats and malicious precision inputs. Review this restricted API contract whenever upgrading `abap-adt-api`.
 
-The lockfile installs the local module under the expected `sprintf-js` import name. Project npm configuration enables `install-links`; Windows staging copies `vendor/` before `npm ci --install-links`, so installations contain ordinary files rather than runtime links to a developer checkout. Do not remove the override or vendor directory without an equivalent fix. The full npm dependency audit reported zero known vulnerabilities on 2026-10-18; this is a point-in-time dependency result, not proof that the application has no security flaws. No dependency downgrade or broad dependency upgrade was used.
+The lockfile installs the local module under the expected `sprintf-js` import name. Project npm configuration enables `install-links`; Windows staging copies `vendor/` before `npm ci --install-links`, so installations contain ordinary files rather than runtime links to a developer checkout. Do not remove the override or vendor directory without an equivalent fix. Recheck dependency advisories whenever updating the lockfile.
 
 ## Confirmed automatic installation
 

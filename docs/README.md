@@ -15,10 +15,14 @@
 | 运行源码、测试与构建安装包 | [开发与构建指南](development.md) |
 | 发布正式版、配置 secrets 与排查 Actions 同步 | [发布与 GitHub Actions](releases-and-actions.md) |
 | 了解安全边界与异常锁文件恢复 | [安全说明](security.md) |
-| 开发者查阅接口与历史实现细节 | [技术参考](technical-reference.md) |
+| 开发者查阅接口与实现细节 | [技术参考](technical-reference.md) |
 | 下载安装包与查看版本变更 | [GitHub Releases](https://github.com/OneOFF-ive/saplink/releases) |
 
 产品名称统一为 SapLink，CLI 使用 saplink。配置目录和安装标识详见 [命名与本地数据说明](local-data.md)。
+
+## 文档维护范围
+
+仓库文档保留产品说明、操作指南、接口契约、架构、安全边界和开发构建说明，不收录按日期或操作 ID 编写的运行、联调、排障与开发过程记录。通用排障方法可整理到运维或技术参考；正式版本变更集中在 GitHub Releases。
 
 ## 建议阅读顺序
 
