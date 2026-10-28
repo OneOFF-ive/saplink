@@ -45,7 +45,7 @@ saplink connection add dev --transport rfc --rfc-ashost sap-host --rfc-sysnr 00 
 
 需要路由时添加 `--rfc-saprouter /H/router.example/S/3299`，仅填写中转节点，目标服务器仍填 `--rfc-ashost`。支持不带秘密的多跳路由；不支持路由密码、SNC 或 SSO，不把密码写进路由。改回直连用 `connection edit <name> --clear-rfc-saprouter --password-prompt --json`。RFC 不需要 `--url`，不会回退 HTTP；本地 MCP 仍使用 Streamable HTTP。
 
-用户指定 HTTP 时使用 `--transport http --url https://sap-host:443`。URL 可带 `/sap/bc/adt`，不含其他路径、查询参数、片段或内嵌凭据。名称只允许英文字母、数字、`_`、`-`，最长 80 字符；系统号为两位数字，Client 恰好三位半角数字并保留前导零。
+用户指定 HTTP 时使用 `--transport http --url https://sap-host:443`。URL 可带 `/sap/bc/adt`，不含其他路径、查询参数、片段或内嵌凭据。当前版本的连接名称支持中文、英文字母、数字、`_`、`-`，例如 `开发系统_DEV` 或 `生产系统-01`；不允许空格、点号、斜杠及其他特殊字符，管理界面最多输入 80 个字符。CLI 中建议给中文名称加引号，例如 `saplink connection test "开发系统_DEV" --json`，后续编辑、测试和删除始终使用实际保存的完整名称，不自动翻译或改成英文。旧安装版可能尚未支持中文，以其校验结果为准；不为绕过校验擅自修改用户指定的名称。系统号为两位数字，Client 恰好三位半角数字并保留前导零。
 
 界面新建 RFC 时可通过“导入本地连接”选择 SAP Logon 条目，填充服务器、系统号、路由，以及条目已有的 Client/语言；连接名称、用户名和密码不会导入。使用产品提供的导入入口，不读取配置中的 Memo 或密码来补齐凭据。消息服务器/负载均衡、自定义端口及 SNC 等不支持条目会给出原因，不静默改成直连。
 
