@@ -10,6 +10,8 @@
 
 发现残留注册、版本矛盾、无法访问或安装损坏时先诊断；不把它当作未安装，不删除安装目录、注册表或运行锁。已有正常安装时按原位置维护，不能为换路径自动卸载。
 
+当前完整安装包携带 Node.js、Java 和 JCo，固定使用随包组件，不要求用户配置 `JAVA_HOME`、CLASSPATH 或 JCo 路径。安装后以实际版本和 `doctor` 结果验证；旧版不能仅依据本技能假定已具备随包 RFC 环境。
+
 ## 安装授权与目录
 
 1. 确认缺失后询问用户是否需要下载安装，并告知默认目录 `~\AppData\Local\Programs\SapLink`。这是 Windows 用户目录，不能按 Bash/WSL 的 HOME 展开。
@@ -19,7 +21,7 @@
 
 ## 下载顺序与校验
 
-先检查原生 Windows 架构，而非仅看终端进程架构：优先使用 `[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture` 等原生系统信息，再结合 `$env:PROCESSOR_ARCHITEW6432`、`$env:PROCESSOR_ARCHITECTURE` 交叉检查；模拟终端信息有歧义或无法确定时询问。普通 x64 电脑选 x64，Windows ARM64 选 arm64，不擅自改用模拟架构。
+先检查原生 Windows 架构，而非仅看终端进程架构：优先使用 `[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture` 等原生系统信息，再结合 `$env:PROCESSOR_ARCHITEW6432`、`$env:PROCESSOR_ARCHITECTURE` 交叉检查；模拟终端信息有歧义或无法确定时询问。普通 x64 电脑选 x64，Windows ARM64 选 arm64，不擅自改用模拟架构。包含 RFC 运行环境的 ARM64 完整包需要 Windows 11；其主程序为原生 ARM64，内部独立的 x64 Java/JCo 子进程由产品管理，不要求用户另外选择 x64 安装包或安装 ARM64 Java。
 
 依次尝试以下发布源；前一来源不可访问、没有对应架构或元数据/下载不可用时，再尝试下一来源。每个来源一次正常尝试，网络瞬态错误至多再试一次，不无限重试。
 

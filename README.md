@@ -55,16 +55,16 @@ AI 客户端 → SapLink 本地 MCP 服务 → SAP ADT → SAP ABAP 系统
 ```
 
 1. **下载并安装**：通过 [官网下载入口](https://saplink.cloud/download.html)从 COS 获取适合本机架构的 Windows 安装包，或使用 [GitHub Releases](https://github.com/OneOFF-ive/saplink/releases)，安装后通过快捷方式打开管理页面。安装包内置运行环境，无需另装 Node.js。
-2. **添加 SAP 连接**：输入 ADT 地址、Client、用户名和语言，在本机填写密码并测试连接。
+2. **添加 SAP 连接**：默认选择 RFC，填写应用服务器、系统号、Client、用户名和语言，可从本机 SAP Logon 导入服务器信息；选择 HTTP 时填写 ADT 地址。密码在本机输入，再测试连接。
 3. **接入 AI 客户端**：创建访问令牌、启动 MCP，将服务地址与令牌配置到客户端。
 4. **开始操作**：让 agent 先确认目标系统，再按任务读取、查询或执行已授权的开发变更。
 
-当前支持 64 位 Windows 10 1809+ / Windows 11，提供 x64 与 ARM64 安装方式。SAP 侧需要启用并可访问 ADT；AI 客户端需要支持 Streamable HTTP 和 Bearer 认证头。
+x64 安装包支持 Windows 10 1809+ / Windows 11；包含 RFC 运行环境的 ARM64 安装包需要 Windows 11。HTTP 连接要求 SAP ADT HTTP 服务可达；RFC 连接要求系统支持并允许调用 ADT over RFC 接口，无需提供 HTTP 端口。AI 客户端仍使用 Streamable HTTP 和 Bearer 认证头接入本地 SapLink。
 
 | 你的电脑 | 选择安装包 |
 | --- | --- |
 | Intel / AMD 64 位 Windows 电脑 | 文件名包含 `win-x64` 的 `.exe` |
-| Windows ARM64 电脑 | 文件名包含 `win-arm64` 的 `.exe` |
+| Windows 11 ARM64 电脑 | 文件名包含 `win-arm64` 的 `.exe` |
 
 完整步骤见 [Windows 安装指南](docs/windows-installer.md) 与 [部署与运维手册](docs/operations.md)。从源码运行与制作安装包见 [开发与构建指南](docs/development.md)。
 

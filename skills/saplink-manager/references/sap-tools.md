@@ -6,7 +6,7 @@
 
 ## 选择系统与理解结果
 
-先调用 `list_connections`，核对 `connection_id`、URL、三位 Client、用户名及 `write_enabled`。不凭 dev/prod 名称推断用途；系统或 Client 不明确时确认。除 list_connections 外，其他工具都需要真实 connection_id。
+先调用 `list_connections`，核对 `connection_id`、传输方式、目标服务器、三位 Client、用户名及 `write_enabled`；RFC 还需核对系统号和路由，不用兼容 URL 判断真实 HTTP 主机或端口。不凭 dev/prod 名称推断用途；系统或 Client 不明确时确认。除 list_connections 外，其他工具都需要真实 connection_id。
 
 选定目标后可用 `get_capabilities` 探测 ADT discovery；它不授予权限，未声明也不证明绝对不支持。配置接入不需要随意查询业务表。
 
@@ -49,7 +49,7 @@ search_enhancements 用 `*` 名称模式，type 为 all 或实时 schema 的 SMO
 2. object_uri 从搜索、包浏览或真实先前结果获取；source_uri 和 revision 从 read_source 获取，不拼接 /source/main，不猜任务号或 revision。先读取并审阅确切版本。
 3. update_source 携带审阅过的 expected_revision。每个明确意图的写操作用独立 request_id，创建、保存、激活分别用不同 ID。同 ID 和参数只返回当前进程缓存，不是重新执行或实时查询。
 4. 保存与激活分开，检查 source_save，读取/检查 inactive，处理诊断。VERSION_UNAVAILABLE 时按 next_action 显式读 active，不静默假定两个版本相同。
-5. 用户要求激活时，以当前 inactive revision 调用 activate_objects，再读 active 验证。函数组整体激活用 get_function_group 的快照 revision，并核实全部成员属于用户变更范围；组没有可直接保存的主源码。
+5. 用户要求激活时，以当前 inactive revision 调用 activate_objects，再读 active 验证。同一授权变更涉及互相依赖的对象时，将它们及各自 revision 放在一次 objects 请求中联合激活，避免逐个激活造成依赖错误。函数组整体激活用 get_function_group 的快照 revision，并核实全部成员属于用户变更范围；组没有可直接保存的主源码。后端返回额外依赖时先核实变更范围，不自动扩展激活对象或反复重试。
 
 创建工具只生成壳，不生成完整接口或自动激活。按返回 next_action 获取真实源码/组快照，继续完成已授权工作。program_kind 为 report/include/module_pool/subroutine_pool；屏幕与 GUI 状态不由本服务生成。函数模块使用 ADT 支持的源码式接口声明，先看运行时工具帮助，不将调用语法或 Local Interface 注释当接口定义。
 

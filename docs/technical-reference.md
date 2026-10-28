@@ -29,7 +29,7 @@ Windows 本地 Web 管理界面 + Streamable HTTP MCP 服务，通过 HTTP ADT �
 ## 环境与安装
 
 - Windows 10（1809 或更新）/ Windows 11，64 位。
-- SAP 系统启用 ADT，可访问 HTTP/HTTPS 地址，具备相应开发权限；推荐使用证书可信的 HTTPS。
+- SAP 系统支持对应 ADT 能力并具备所需权限。HTTP 模式需要可访问的 HTTP/HTTPS ADT 地址；RFC 模式需要可调用 `SADT_REST_RFC_ENDPOINT`，支持范围见 [RFC 说明](rfc-transport.md)。
 - 密码保存在当前 Windows 用户的凭据管理器；不用聊天或命令行参数传递密码。
 
 普通用户运行 `SapLink-版本-win-x64-setup.exe`；ARM 电脑选择 `arm64` 安装包。安装包内置 Node.js、原生模块和运行库，无需另外安装 Node.js、npm 或下载源码。默认安装到当前用户目录，并添加 `saplink` 命令、桌面和开始菜单快捷方式。
@@ -80,7 +80,9 @@ npm start -- token create
 npm start -- serve --port 8765
 ```
 
-`connection add` 交互询问 HTTP/HTTPS URL、三位 Client、用户名、语言和密码。推荐 `https://sap-host:443`；兼容已有 `http://sap-host:8000`，也接受以 `/sap/bc/adt` 结尾的地址。HTTPS 沿用 Node.js 默认的证书与主机名校验，不提供忽略证书开关，也不自动降级到 HTTP。HTTP 会明文传输凭据及数据，应在受保护网络中使用。当前不支持自定义代理路径、RFC 或 SSO。
+`connection add` 交互式流程默认 RFC，询问应用服务器、两位系统号、可选 SAProuter、三位 Client、用户名、语言和密码；非交互式 RFC 调用显式指定 `--transport rfc --rfc-ashost <主机> --rfc-sysnr <系统号>`，不需要 `--url`。完整包固定使用随包 Java/JCo。
+
+选择 HTTP 时填写 HTTP/HTTPS URL，支持以 `/sap/bc/adt` 结尾的地址；HTTPS 沿用 Node.js 默认的证书与主机名校验，不提供忽略证书开关，也不自动降级。HTTP 会明文传输凭据及数据，应在受保护网络中使用。RFC 不回退 HTTP，也不使用 HTTP 端口连接或校验返回链接。当前不支持自定义 HTTP 代理路径、SNC 或 SSO。
 
 `<连接名称>` 是占位符，执行前替换为自定义名称，不要输入尖括号。实际名称仅允许英文字母、数字、下划线和连字符，例如 `sap_system_01`；添加与测试时使用同一个名称。支持多个连接，各名称必须唯一。
 

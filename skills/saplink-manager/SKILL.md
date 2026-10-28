@@ -16,6 +16,8 @@ description: "Manage SapLink on Windows: offer installation when missing, downlo
 - **客户端配置、认证或工具不可见**：读取 [Agent 自身 MCP 接入](references/client-setup.md)。不能止于生成通用连接参数文件。
 - **SAP 查询或 ABAP 开发**：先执行下述“访问 SAP 前先检查 MCP 服务”，服务未启动时先启动并验证，再读取 [SAP 工具使用](references/sap-tools.md) 完成业务任务；只读查询同样遵守此前置要求。
 
+新建连接优先使用当前版本默认的 RFC，复用已有连接时保持原传输方式。RFC 与 HTTP 的配置、SAP Logon 导入及运行环境检查见 [运行与配置管理](references/local-management.md#sap-连接与密码)。
+
 引用文件随技能一起分发，不依赖源码仓库或另一项技能。运行时 MCP `instructions` 和 `tools/list` 优先于静态工具说明。
 
 ## 访问 SAP 前先检查 MCP 服务
@@ -40,7 +42,7 @@ description: "Manage SapLink on Windows: offer installation when missing, downlo
 ## 配置到可用的完成标准
 
 1. 读取已安装版本、`status --json`、`doctor --json` 和连接列表；同时检查退出码、`data.healthy` 和各项诊断。受限终端不能访问凭据或进程时，先核实执行权限，不能据此宣布凭据丢失或服务故障。
-2. 复用现有配置。缺少业务信息时，只询问 ADT 地址、三位 Client、用户名、语言及有歧义的目标。密码只由用户在本机窗口输入。明确的配置请求授权完成相应必要步骤，无需每条命令重复询问。
+2. 复用现有配置。缺少业务信息时，按传输方式询问信息：RFC 需应用服务器、两位系统号及可选路由，HTTP 需 ADT 地址；另需三位 Client、用户名、语言及有歧义的目标。密码只由用户在本机窗口输入。明确的配置请求授权完成相应必要步骤，无需每条命令重复询问。
 3. 用户要求完成接入或使用尚未接入的 SapLink 时，由 Agent 完成当前客户端的 `saplink-mcp` 配置。复用同一服务的已有条目；保留其他服务器、设置和审批策略。
 4. 分别验证本地运行状态、MCP 初始化与工具发现、`list_connections`，以及任务需要的目标 SAP 登录/只读操作。配置写入不等于连接成功；TCP 监听不等于 MCP 就绪；MCP 连接成功不等于 SAP 登录成功。
 5. 简洁报告已完成事项、目标系统及 Client、实际 MCP URL，以及尚需用户处理的具体步骤。客户端需重载时，由 Agent 使用其支持的方式重载；不能热加载时说明剩余动作，不宣称当前会话已获得工具。

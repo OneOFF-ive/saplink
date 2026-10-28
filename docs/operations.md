@@ -14,7 +14,9 @@
 
 ## 2. CLI 操作
 
-安装后重新打开终端；若由编辑器或 AI 客户端提供终端，重新启动该应用以加载 PATH。\n\n下面 `dev` 是示例连接名称，可替换为英文字母、数字、下划线和连字符组成的唯一名称。
+安装后重新打开终端；若由编辑器或 AI 客户端提供终端，重新启动该应用以加载 PATH。
+
+下面 `dev` 是示例连接名称，可替换为英文字母、数字、下划线和连字符组成的唯一名称。
 
 ```powershell
 saplink connection add dev
@@ -24,7 +26,9 @@ saplink token create
 saplink serve --port 8765
 ```
 
-添加时填写 SAP HTTP/HTTPS 地址、三位 Client、用户名、语言和密码。HTTPS 使用默认 TLS 校验，不接受忽略证书开关，不自动降级。HTTP 明文传输凭据和数据，只在合适的受保护网络使用。SAP 密码由交互提示输入并保存到当前 Windows 用户的凭据管理器。
+新建连接的界面和交互式 CLI 默认选择 RFC：填写应用服务器、两位系统号、三位 Client、用户名、语言及可选 SAProuter。RFC 不要求 HTTP 地址或端口，也不会改走 HTTP。界面的“导入本地连接”可选择本机 SAP Logon 配置，填充服务器信息；连接名称、用户名和密码保持手动填写。完整安装包使用自带 Java/JCo，“MCP 服务 → RFC 运行环境”可进行本地加载检查，无需配置系统环境变量。
+
+选择 HTTP 时填写 HTTP/HTTPS ADT 地址；HTTPS 使用默认 TLS 校验，不接受忽略证书开关，不自动降级。HTTP 明文传输凭据和数据，只在合适的受保护网络使用。已有 HTTP 连接保持原方式。SAP 密码由交互提示输入并保存到当前 Windows 用户的凭据管理器。详细参数和路由限制见 [RFC 传输说明](rfc-transport.md)。
 
 `serve` 前台运行，Ctrl+C 正常退出。UI 与 CLI 服务不能同时占用同一配置目录的运行锁。CLI 变更连接前停止占用配置目录的 UI/服务；在 UI 内变更时只需先停止其 MCP 子服务。
 

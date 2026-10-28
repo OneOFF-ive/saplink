@@ -8,6 +8,7 @@
   [string]$RfcJcoDirectory
 )
 $ErrorActionPreference = 'Stop'
+$vcRuntimeDlls = @('vcruntime140.dll','vcruntime140_1.dll','vcruntime140_threads.dll','msvcp140.dll')
 $repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $localRuntime = Join-Path $repository 'local-runtime\windows-x64'
 if (!$RfcJavaDirectory) { $RfcJavaDirectory = Join-Path $localRuntime 'java' }
@@ -23,6 +24,10 @@ New-Item -ItemType Directory -Force -Path $buildRoot,$cache,$output | Out-Null
 $npmCli = Join-Path (Split-Path -Parent (Get-Command npm.cmd).Source) 'node_modules\npm\bin\npm-cli.js'
 
 function Assert-Exit([string]$Step) { if ($LASTEXITCODE -ne 0) { throw "$Step failed with exit code $LASTEXITCODE" } }
+function Get-FileSha256([string]$Path) {
+  return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
 function Download-Verified([string[]]$Urls, [string]$Path, [string]$Sha256) {
   if ((Test-Path -LiteralPath $Path) -and (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash -eq $Sha256) { return }
   foreach ($url in $Urls) {
@@ -56,7 +61,15 @@ function Get-RfcJavaInfo {
     throw 'Local RFC Java must be a Windows x64 runtime with its original release metadata.'
   }
   $version = if ($properties.JAVA_RUNTIME_VERSION) { $properties.JAVA_RUNTIME_VERSION } else { $properties.JAVA_VERSION }
-  return @{ distribution=$properties.IMPLEMENTOR; version=$version; architecture='x64'; source='local-runtime'; java_exe_sha256=(Get-FileHash -LiteralPath (Join-Path $RfcJavaDirectory 'bin\java.exe')).Hash.ToLowerInvariant(); jvm_sha256=(Get-FileHash -LiteralPath (Join-Path $RfcJavaDirectory 'bin\server\jvm.dll')).Hash.ToLowerInvariant(); release_sha256=(Get-FileHash -LiteralPath (Join-Path $RfcJavaDirectory 'release')).Hash.ToLowerInvariant() }
+  return @{
+    distribution = $properties.IMPLEMENTOR
+    version = $version
+    architecture = 'x64'
+    source = 'local-runtime'
+    java_exe_sha256 = (Get-FileSha256 (Join-Path $RfcJavaDirectory 'bin\java.exe'))
+    jvm_sha256 = (Get-FileSha256 (Join-Path $RfcJavaDirectory 'bin\server\jvm.dll'))
+    release_sha256 = (Get-FileSha256 (Join-Path $RfcJavaDirectory 'release'))
+  }
 }
 
 function Copy-RfcJava([string]$Arch, [string]$Runtime) {
@@ -110,7 +123,7 @@ function Copy-VcRuntime([string]$Arch, [string]$Stage, [string]$NativeDirectory)
     & expand.exe $payload.FullName '-F:*' (Join-Path $extract 'dlls') | Out-Null
     Assert-Exit 'Runtime DLL extraction'
   }
-  foreach ($name in @('vcruntime140.dll','vcruntime140_1.dll','vcruntime140_threads.dll','msvcp140.dll')) {
+  foreach ($name in $vcRuntimeDlls) {
     $suffix = if ($Arch -eq 'x64') { 'amd64' } else { 'arm64' }
     $file = Join-Path $extract "dlls\$($name)_$suffix"
     $dllSignature = Get-AuthenticodeSignature -LiteralPath $file
@@ -124,31 +137,91 @@ function Copy-VcRuntime([string]$Arch, [string]$Stage, [string]$NativeDirectory)
   Remove-Item -LiteralPath $extract -Recurse -Force
 }
 
-function Copy-RfcJco([string]$Runtime) {
-  if (!$RfcJcoDirectory -or !(Test-Path -LiteralPath (Join-Path $RfcJcoDirectory $rfcJarFile)) -or !(Test-Path -LiteralPath (Join-Path $RfcJcoDirectory 'sapjco3.dll'))) {
-    throw 'A complete internal installer requires -RfcJcoDirectory containing an original JCo JAR and x64 sapjco3.dll.'
+function Get-RfcJcoArchive([string]$Directory) {
+  if (!(Test-Path -LiteralPath $Directory -PathType Container)) {
+    throw "Local RFC JCo is missing: $Directory. Populate local-runtime\windows-x64\jco before building."
   }
-  $bytes = [IO.File]::ReadAllBytes((Join-Path $RfcJcoDirectory 'sapjco3.dll'))
-  if ($bytes.Length -lt 64 -or [BitConverter]::ToUInt16($bytes,0) -ne 0x5a4d) { throw 'JCo DLL is not a Windows PE file.' }
-  $offset = [BitConverter]::ToInt32($bytes,60)
-  if ($offset -lt 0 -or $offset -gt $bytes.Length - 6 -or [BitConverter]::ToUInt32($bytes,$offset) -ne 0x4550 -or [BitConverter]::ToUInt16($bytes,$offset+4) -ne 0x8664) { throw 'RFC runtime requires an x64 JCo DLL, including in the ARM64 installer.' }
+  $archivePattern = '^(sapjco3|com\.sap\.conn\.jco[-_]\d+\.\d+\.\d+)\.jar$'
+  $candidates = @(Get-ChildItem -LiteralPath $Directory -File | Where-Object { $_.Name -match $archivePattern })
+  if ($candidates.Count -ne 1) {
+    throw 'JCo directory must contain exactly one original JCo JAR. Preserve its original filename.'
+  }
+  return $candidates[0]
+}
+
+function Assert-X64JcoLibrary([string]$Path) {
+  $dosMagic = 0x5a4d
+  $peMagic = 0x4550
+  $amd64Machine = 0x8664
+  $bytes = [IO.File]::ReadAllBytes($Path)
+  if ($bytes.Length -lt 64 -or [BitConverter]::ToUInt16($bytes, 0) -ne $dosMagic) {
+    throw 'JCo DLL is not a Windows PE file.'
+  }
+
+  # The DOS header stores the PE header offset at byte 60.
+  $peHeaderOffset = [BitConverter]::ToInt32($bytes, 60)
+  if ($peHeaderOffset -lt 0 -or $peHeaderOffset -gt $bytes.Length - 6) {
+    throw 'RFC runtime requires an x64 JCo DLL, including in the ARM64 installer.'
+  }
+  $signature = [BitConverter]::ToUInt32($bytes, $peHeaderOffset)
+  $machine = [BitConverter]::ToUInt16($bytes, $peHeaderOffset + 4)
+  if ($signature -ne $peMagic -or $machine -ne $amd64Machine) {
+    throw 'RFC runtime requires an x64 JCo DLL, including in the ARM64 installer.'
+  }
+}
+
+function Copy-RfcJco([string]$Runtime) {
+  $missingRuntimeMessage = 'A complete internal installer requires -RfcJcoDirectory containing an original JCo JAR and x64 sapjco3.dll.'
+  if (!$RfcJcoDirectory) { throw $missingRuntimeMessage }
+
+  $jarPath = Join-Path $RfcJcoDirectory $rfcJarFile
+  $libraryPath = Join-Path $RfcJcoDirectory 'sapjco3.dll'
+  if (!(Test-Path -LiteralPath $jarPath) -or !(Test-Path -LiteralPath $libraryPath)) {
+    throw $missingRuntimeMessage
+  }
+  Assert-X64JcoLibrary $libraryPath
   $destination = Join-Path $Runtime 'jco'
   New-Item -ItemType Directory -Path $destination | Out-Null
   # Preserve the supplied SDK documentation and license files without repacking the JAR.
   Copy-Item -Path (Join-Path $RfcJcoDirectory '*') -Destination $destination -Recurse
-  $manifest = @{ schema_version=1; architecture='x64'; distribution='internal'; jar_file=$rfcJarFile; jar_sha256=(Get-FileHash (Join-Path $destination $rfcJarFile)).Hash.ToLowerInvariant(); native_sha256=(Get-FileHash (Join-Path $destination 'sapjco3.dll')).Hash.ToLowerInvariant() }
+  $manifest = @{
+    schema_version = 1
+    architecture = 'x64'
+    distribution = 'internal'
+    jar_file = $rfcJarFile
+    jar_sha256 = (Get-FileSha256 (Join-Path $destination $rfcJarFile))
+    native_sha256 = (Get-FileSha256 (Join-Path $destination 'sapjco3.dll'))
+  }
   $manifest | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Runtime 'rfc-runtime.json') -Encoding ASCII
   return $manifest
+}
+
+function Assert-BundledRfcRuntime([string]$App, [string]$Runtime, [string]$Arch, [string]$JarFile) {
+  $java = Join-Path $Runtime 'java\bin\java.exe'
+  $nativeDirectory = Join-Path $Runtime 'jco'
+  $classes = Join-Path $App 'bridge\classes'
+  $jar = Join-Path $nativeDirectory $JarFile
+  $javaArguments = @("-Djava.library.path=$nativeDirectory", '-cp', "$classes;$jar", 'SapLinkRfcBridge', '--check-runtime')
+  $savedJavaOptions = @($env:JAVA_TOOL_OPTIONS, $env:JDK_JAVA_OPTIONS, $env:_JAVA_OPTIONS)
+  try {
+    $env:JAVA_TOOL_OPTIONS = ''
+    $env:JDK_JAVA_OPTIONS = ''
+    $env:_JAVA_OPTIONS = ''
+    & $java @javaArguments
+    Assert-Exit "Bundled Java/JCo load check ($Arch, x64 JVM)"
+  } finally {
+    $env:JAVA_TOOL_OPTIONS = $savedJavaOptions[0]
+    $env:JDK_JAVA_OPTIONS = $savedJavaOptions[1]
+    $env:_JAVA_OPTIONS = $savedJavaOptions[2]
+  }
 }
 
 Push-Location $repository
 try {
   $javaReceipt = Get-RfcJavaInfo
-  if (!(Test-Path -LiteralPath $RfcJcoDirectory -PathType Container)) { throw "Local RFC JCo is missing: $RfcJcoDirectory. Populate local-runtime\windows-x64\jco before building." }
-  $jcoCandidates = @(Get-ChildItem -LiteralPath $RfcJcoDirectory -File | Where-Object { $_.Name -match '^(sapjco3|com\.sap\.conn\.jco[-_]\d+\.\d+\.\d+)\.jar$' })
-  if ($jcoCandidates.Count -ne 1) { throw 'JCo directory must contain exactly one original JCo JAR. Preserve its original filename.' }
-  $rfcJarFile = $jcoCandidates[0].Name
-  if (!$RfcBuildJcoJar) { $RfcBuildJcoJar = $jcoCandidates[0].FullName }
+  $jcoArchive = Get-RfcJcoArchive $RfcJcoDirectory
+  $rfcJarFile = $jcoArchive.Name
+  if (!$RfcBuildJcoJar) { $RfcBuildJcoJar = $jcoArchive.FullName }
   if (!$SkipTests) {
     & node $npmCli --prefix $repository test; Assert-Exit 'Tests'
     & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'payload-test.ps1')
@@ -210,7 +283,7 @@ try {
       Copy-VcRuntime 'x64' $stage $rfcVcDirectory
     }
     if (Test-Path -LiteralPath (Join-Path $runtime 'java\bin')) {
-      foreach ($dll in @('vcruntime140.dll','vcruntime140_1.dll','vcruntime140_threads.dll','msvcp140.dll')) {
+      foreach ($dll in $vcRuntimeDlls) {
         Copy-Item -LiteralPath (Join-Path $rfcVcDirectory $dll) -Destination (Join-Path $runtime 'java\bin') -Force
         Copy-Item -LiteralPath (Join-Path $rfcVcDirectory $dll) -Destination (Join-Path $runtime 'jco') -Force
       }
@@ -228,16 +301,18 @@ try {
     Assert-Exit "Native module smoke check ($arch)"
     & (Join-Path $bin 'saplink.exe') --version; Assert-Exit "Launcher smoke check ($arch)"
 
-    $savedJavaOptions = @($env:JAVA_TOOL_OPTIONS, $env:JDK_JAVA_OPTIONS, $env:_JAVA_OPTIONS)
-    try {
-      $env:JAVA_TOOL_OPTIONS=''; $env:JDK_JAVA_OPTIONS=''; $env:_JAVA_OPTIONS=''
-      & (Join-Path $runtime 'java\bin\java.exe') ("-Djava.library.path=" + (Join-Path $runtime 'jco')) '-cp' ((Join-Path $app 'bridge\classes') + ';' + (Join-Path (Join-Path $runtime 'jco') $rfcJarFile)) 'SapLinkRfcBridge' '--check-runtime'
-      Assert-Exit "Bundled Java/JCo load check ($arch, x64 JVM)"
-    } finally {
-      $env:JAVA_TOOL_OPTIONS=$savedJavaOptions[0]; $env:JDK_JAVA_OPTIONS=$savedJavaOptions[1]; $env:_JAVA_OPTIONS=$savedJavaOptions[2]
-    }
+    Assert-BundledRfcRuntime -App $app -Runtime $runtime -Arch $arch -JarFile $rfcJarFile
 
-    $receipt = @{ app_version=$package.version; node_version=$lock.nodeVersion; architecture=$arch; built_at=[DateTime]::UtcNow.ToString('o'); node_archive_sha256=$lock.node.$arch.sha256; nsis_archive_sha256=$lock.nsis.sha256; vc_runtime_version=$lock.vcRuntime.version; vc_runtime_archive_sha256=$lock.vcRuntime.$arch.sha256 }
+    $receipt = @{
+      app_version = $package.version
+      node_version = $lock.nodeVersion
+      architecture = $arch
+      built_at = [DateTime]::UtcNow.ToString('o')
+      node_archive_sha256 = $lock.node.$arch.sha256
+      nsis_archive_sha256 = $lock.nsis.sha256
+      vc_runtime_version = $lock.vcRuntime.version
+      vc_runtime_archive_sha256 = $lock.vcRuntime.$arch.sha256
+    }
     $receipt.distribution = 'internal'
     $receipt.rfc_java = $javaReceipt
     $receipt.rfc_jco = $jcoReceipt
@@ -245,7 +320,15 @@ try {
     # NSIS packages dotfiles and empty directories too; record the same complete payload.
     $files = @(Get-ChildItem -LiteralPath $stage -Recurse -File -Force | ForEach-Object { $_.FullName.Substring($stage.Length + 1) })
     $directories = @(Get-ChildItem -LiteralPath $stage -Recurse -Directory -Force | ForEach-Object { $_.FullName.Substring($stage.Length + 1) })
-    @{ schema_version=1; app_id='org.saplink.desktop'; version=$package.version; architecture=$arch; files=$files; directories=$directories } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $stage 'install-manifest.json') -Encoding UTF8
+    $installManifest = @{
+      schema_version = 1
+      app_id = 'org.saplink.desktop'
+      version = $package.version
+      architecture = $arch
+      files = $files
+      directories = $directories
+    }
+    $installManifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $stage 'install-manifest.json') -Encoding UTF8
     $suffix = if ($TestMode) { '-test' } else { '' }
     $target = Join-Path $output "SapLink-$($package.version)-win-$arch$suffix-setup.exe"
     $arguments = @('/V2', '/INPUTCHARSET', 'UTF8', "/DAPP_VERSION=$($package.version)", "/DTARGET_ARCH=$arch", "/DSTAGE_DIR=$stage", "/DOUTPUT_FILE=$target", "/DICON_FILENAME=$iconName")

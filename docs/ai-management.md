@@ -44,7 +44,7 @@ saplink update check --force --json
 ## 安全配置连接
 
 ```powershell
-saplink connection add dev --url https://sap-host:443 --client 001 --username SAPUSER --language EN --password-prompt --json
+saplink connection add dev --transport rfc --rfc-ashost sap-host --rfc-sysnr 00 --client 001 --username SAPUSER --language EN --password-prompt --json
 saplink connection edit dev --language ZH --disable-writes --json
 saplink connection test dev --json
 saplink connection remove dev --yes --json
@@ -55,6 +55,8 @@ saplink connection remove dev --yes --json
 新连接默认关闭写入，只有显式 `--enable-writes` 才开启；`--disable-writes` 可关闭。删除时 `--yes` 确认删除指定连接及凭据。登录身份不变的语言/写开关修改不需要读取或重新输入密码。旧的无选项交互式 add/edit 在真实终端中继续可用。
 
 连接修改需要 runtime 停止。AI 应记住原端口，停止自己管理的实例后修改，再恢复服务。前台 UI/serve 不会被后台管理器自动关闭。不要在聊天里传密码；无桌面交互环境下应由用户打开原管理 UI 完成凭据录入。
+
+RFC 不需要 `--url`；需要路由时添加 `--rfc-saprouter /H/router.example/S/3299`，仅填写中转节点。已有路由改直连用 `--clear-rfc-saprouter`。改变传输方式、应用服务器、系统号、路由、Client 或用户名时需重新输入密码。HTTP 新连接显式使用 `--transport http --url https://sap-host:443`，已有 HTTP 连接保持原方式。完整包在管理页检查随包 Java/JCo；不修改全局 `JAVA_HOME` 或 PATH 来修复它。
 
 ## 后台服务
 
@@ -88,7 +90,7 @@ stop 通过单独鉴权的 loopback 控制接口请求正常关闭，等待已�
 ## 令牌及客户端参数
 
 ```powershell
-saplink token create --out C:\Users\USER\AppData\Roaming\saplink\client-token.json --json
+saplink token create --name "开发助手" --out C:\Users\USER\AppData\Roaming\saplink\client-token.json --json
 saplink client-config --token-file C:\Users\USER\AppData\Roaming\saplink\client-token.json --out C:\Users\USER\AppData\Roaming\saplink\connection-parameters.json --json
 saplink token revoke TOKEN_ID --json
 ```

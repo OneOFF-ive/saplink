@@ -13,16 +13,18 @@
 
 ## 令牌及传输参数
 
-使用 Streamable HTTP，URL 为已核实的 `http://127.0.0.1:<MCP端口>/mcp`，头为 `Authorization: Bearer <token>`。不是 stdio 或旧式 SSE。不能用 `localhost`，管理页面 URL、会话 key 与 MCP 令牌不是同一回事。
+使用 Streamable HTTP，URL 为已核实的 `http://127.0.0.1:<MCP端口>/mcp`，头为 `Authorization: Bearer <token>`。不是 stdio 或旧式 SSE。不能用 `localhost`，管理页面 URL、会话 key 与 MCP 令牌不是同一回事。SAP 连接选择 RFC/JCo 不改变此 MCP 传输协议。
 
-优先复用当前客户端仍有效的凭据。`token list --json` 只返回 ID/创建时间，不能从哈希还原秘密。已有条目正常时不要求额外令牌文件。确需新客户端令牌且没有可用秘密时，创建一个并记录其 ID 和本地位置，不撤销其他令牌。
+优先复用当前客户端仍有效的凭据。`token list --json` 返回 ID、可选名称和创建时间，不返回令牌值或哈希，不能用 ID 代替 Bearer 令牌。名称只是显示信息，旧令牌可无名称；重命名不会改变认证。已有条目正常时不要求额外令牌文件。确需新客户端令牌且没有可用秘密时，创建一个并记录其 ID 和本地位置，不撤销其他令牌。
 
 ```powershell
-saplink token create --out <新的绝对路径-token.json> --json
+saplink token create --name "开发助手" --out <新的绝对路径-token.json> --json
 saplink client-config --token-file <token.json绝对路径> --out <新的绝对路径-parameters.json> --port <实际MCP端口> --json
 ```
 
 这是命令结构；执行前替换真实路径和端口，按当前 shell 正确引用。先在当前用户私有配置目录创建父目录，输出文件必须尚不存在。文件已存在时先核实其用途，不为此反复创建新令牌。
+
+修改已知令牌名称可用 `token rename <实际ID> --name "新名称" --json`，无需重新创建或更新客户端秘密。管理页面隐藏 ID，避免用户误用；CLI 的 ID 仅用于定位管理对象。
 
 token 文件含 `id`、`token`，parameters 文件含 `transport`、`url`、`headers.Authorization`。仅在本地脚本中读写秘密，写入客户端支持的字段，不输出秘密、整份配置、备份差异或含令牌的命令参数。`client-config` 是通用参数导出，不完成客户端注册。
 

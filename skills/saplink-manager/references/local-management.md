@@ -35,17 +35,25 @@ CLI 修改连接或转成后台托管时，先正常退出持锁 UI；可用已�
 
 ## SAP 连接与密码
 
-从 `connection list` 确认真实名称、URL、Client、用户名，不根据 dev/prod 名称推断系统用途。新连接使用：
+从 `connection list` 确认真实名称、传输方式、目标服务器、Client 和用户名。RFC 根据应用服务器、系统号及路由识别目标，不将兼容字段 `base_url` 当作真实 HTTP 服务，也不猜测 8000 等端口。已有 HTTP 连接保持原方式；操作前核实本机版本的 `connection add --help`。
+
+新建 RFC 连接使用：
 
 ```powershell
-saplink connection add dev --url https://sap-host:443 --client 001 --username SAPUSER --language ZH --password-prompt --json
+saplink connection add dev --transport rfc --rfc-ashost sap-host --rfc-sysnr 00 --client 001 --username SAPUSER --language ZH --password-prompt --json
 ```
 
-执行前替换为已确认的实际值。名称只允许英文字母、数字、`_`、`-`，最长 80 字符；Client 恰好三位半角数字，保留前导零。URL 为 HTTP/HTTPS 主机及端口，可带 `/sap/bc/adt`；不含其他路径、查询参数、片段或内嵌凭据。
+需要路由时添加 `--rfc-saprouter /H/router.example/S/3299`，仅填写中转节点，目标服务器仍填 `--rfc-ashost`。支持不带秘密的多跳路由；不支持路由密码、SNC 或 SSO，不把密码写进路由。改回直连用 `connection edit <name> --clear-rfc-saprouter --password-prompt --json`。RFC 不需要 `--url`，不会回退 HTTP；本地 MCP 仍使用 Streamable HTTP。
 
-提前告知会弹出本机密码窗口，由用户录入。密码保存在当前 Windows 用户的凭据管理器，按连接 UUID 索引；不得从聊天、环境变量或 CLI 参数获取密码。JSON 模式缺密码返回 `INTERACTION_REQUIRED`；取消输入后不自动重试。无桌面交互环境时说明阻碍，使用可用的本机管理窗口完成凭据录入。
+用户指定 HTTP 时使用 `--transport http --url https://sap-host:443`。URL 可带 `/sap/bc/adt`，不含其他路径、查询参数、片段或内嵌凭据。名称只允许英文字母、数字、`_`、`-`，最长 80 字符；系统号为两位数字，Client 恰好三位半角数字并保留前导零。
 
-编辑用 `connection edit <name>`，支持 `--url`、`--client`、`--username`、`--language`、`--password-prompt`、`--enable-writes`、`--disable-writes`。登录地址、Client 或用户名改变时必须重新录入密码，仅改语言或写开关不需要。
+界面新建 RFC 时可通过“导入本地连接”选择 SAP Logon 条目，填充服务器、系统号、路由，以及条目已有的 Client/语言；连接名称、用户名和密码不会导入。使用产品提供的导入入口，不读取配置中的 Memo 或密码来补齐凭据。消息服务器/负载均衡、自定义端口及 SNC 等不支持条目会给出原因，不静默改成直连。
+
+完整安装包固定使用自带 Java/JCo，用户不必安装 Java、查找 JCo 或设置环境变量。`doctor` 在存在 RFC 连接时检查组件；管理页“MCP 服务 → RFC 运行环境”可实际加载本地 Java/JCo，不连接 SAP。缺失或损坏时报告诊断并按修复流程处理，不修改全局环境变量、不借用其他软件的组件。旧安装版或源码模式以其实际支持的配置和诊断为准，不能仅凭文件存在宣布环境可用。
+
+提前告知会弹出本机密码窗口，由用户录入。密码保存在当前 Windows 用户的凭据管理器，按连接 UUID 索引；不得从聊天、环境变量或 CLI 参数获取密码。JSON 模式缺密码返回 `INTERACTION_REQUIRED`；取消输入后不自动重试。无桌面交互环境时使用可用的本机管理窗口完成凭据录入。
+
+编辑用 `connection edit <name>`。传输方式、RFC 主机/系统号/路由、HTTP 登录地址、Client 或用户名改变时必须重新录入密码；仅改语言或写开关不需要。使用 `--enable-writes` / `--disable-writes` 管理已授权的写开关。
 
 CLI 连接增删改要求整个 runtime 停止。记录托管服务原端口，正常停止 → 修改 → 测试目标连接 → 恢复原端口。修改未保存但原服务可恢复时也恢复它，报告错误。外部 UI 必须先正常退出，不把关闭其 MCP 子服务视为已释放锁。
 

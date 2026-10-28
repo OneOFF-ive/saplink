@@ -54,7 +54,9 @@ npm test
 
 程序图标原图保存在 `packaging/windows/assets/app-icon.png`。构建会从原图生成 16、24、32、48、64、128、256 像素的 Windows ICO，并写入启动器、安装程序及卸载程序。托盘直接读取安装目录的 `saplink.ico`；快捷方式和应用列表明确引用带内容哈希的 `saplink-<hash>.ico`，安装后通知 Windows 刷新图标。管理页面引用 `web/app-icon-<hash>.png` 作为侧栏标识及浏览器图标；更换原图时文件名随内容变化，避免继续命中旧缓存。`web/app-icon.png` 保留为兼容资源，构建时同步生成并自动更新页面引用。
 
-在 Windows 项目目录先执行 `npm ci --ignore-scripts`，然后执行 `npm run package:windows`。构建需要 Node.js/npm、Windows 自带的 .NET Framework C# 编译器和 PowerShell 5.1。首次构建需要联网；用户安装生成的包时无需联网。
+在 Windows 项目目录先执行 `npm ci --ignore-scripts`，准备 `local-runtime/windows-x64/java/` 和 `local-runtime/windows-x64/jco/` 中的完整本地组件，再执行 `npm run package:windows`。该目录已加入 Git 忽略规则，每次发布复用其中的 Java/JCo，缺失时直接报错，不自动下载 Java，也不从本机其他软件提取 JCo。目录结构、版本替换和编译桥接类所需 JDK 见 [RFC 构建说明](rfc-transport.md#从源码构建和配置)。
+
+构建还需要 Node.js/npm、Windows 自带的 .NET Framework C# 编译器和 PowerShell 5.1。Node.js、NSIS 和 VC++ 的下载缓存缺失时需要联网；用户安装生成的包时无需联网。
 
 GUI 启动器使用 .NET Framework 4.7 目标声明、`GuiLauncher.manifest` 的 Windows 10 兼容声明，以及随包复制到 `bin/saplink-gui.exe.config` 的 WinForms `PerMonitorV2` 配置。在创建托盘或菜单窗口前初始化 DPI 感知，旧 Windows API 不支持逐显示器 V2 时回退到系统 DPI，避免高缩放下的位图拉伸。不要只分发 EXE 而遗漏对应配置；DPI 设置属于启动器进程，更新网页无法修复已运行的旧托盘程序。修改后需重新构建安装包并重启托盘程序，验证高缩放菜单及明暗、高对比度主题。
 
@@ -96,11 +98,17 @@ powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File packagin
 powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File packaging/windows/release-test.ps1
 ```
 
-发布产物按 `package.json` 的版本号输出到 `outputs/installers/<version>/`，例如 `outputs/installers/1.0.0/`。每种架构生成一个标准名称安装包及对应 `.sha256`，同时生成架构无关的 `SapLink-<version>-skill.zip` 与 `.zip.sha256`；技能包保留 `saplink-manager/` 顶层及 SKILL.md、agents、references。对应版本的发布说明也放在该目录；不同版本分别保留，同版本重打包只更新自己的目录，不影响其他版本。不再生成图标后缀副本。公开分发的文件保持版本唯一；更换图标或程序后更新版本号，避免覆盖同版本文件引起缓存混淆。安装包只包含明确选定的应用文件和生产依赖；源码、测试、本地连接配置、凭据、缓存均不打包。第三方许可随包提供：Node 位于 `runtime/LICENSE`，VC 运行库与 NSIS 位于 `licenses`，依赖许可位于各 `app/node_modules` 包中。
+发布产物按 `package.json` 的版本号输出到 `outputs/installers/<version>/`，例如 `outputs/installers/1.0.0/`。每种架构生成一个标准名称安装包及对应 `.sha256`，同时生成架构无关的 `SapLink-<version>-skill.zip` 与 `.zip.sha256`；技能包保留 `saplink-manager/` 顶层及 SKILL.md、agents、references。对应版本的发布说明也放在该目录；不同版本分别保留，同版本重打包只更新自己的目录，不影响其他版本。不再生成图标后缀副本。公开分发的文件保持版本唯一；更换图标或程序后更新版本号，避免覆盖同版本文件引起缓存混淆。安装包只包含明确选定的应用文件和生产依赖；源码、测试、本地连接配置、凭据、缓存均不打包。第三方许可随包提供：Node 位于 `runtime/LICENSE`，VC 运行库与 NSIS 位于 `licenses`，Java 许可位于 `runtime/java/legal`，JCo 原文件及其随附声明位于 `runtime/jco`，依赖许可位于各 `app/node_modules` 包中。
 
-测试安装包单独输出到 `.saplink/installer-build/tests`，不进入发布目录。隔离安装测试使用专用临时目录和 `HKCU\Software\SapLinkInstallerTest`，不修改真实用户 PATH 或桌面；测试快捷方式放在测试安装目录内。测试会保留临时文件用于排错，不应将 `-test-setup.exe` 作为发行包分发。不同架构的测试依次执行，因为它们使用同一个测试注册表位置。
+测试安装包单独输出到 `.saplink/installer-build/tests`，不进入发布目录。隔离安装测试为每次运行分配临时目录和 `HKCU\Software\SapLinkInstallerTest-<运行ID>`，不修改真实用户 PATH 或桌面；测试快捷方式放在测试安装目录内。测试会保留临时文件用于排错，不应将 `-test-setup.exe` 作为发行包分发。
 
 构建包含目标 Node 与原生凭据模块的执行检查。x64 Windows 不能执行 ARM64 检查，因此在 x64 构建机选择 `-Architecture x64`，ARM64 产物在 ARM64 构建机生成。ARM64 Windows 11 可以在支持 x64 模拟的环境生成并检查两个版本。
+
+### RFC 环境代码维护
+
+`src/rfc-environment.ts` 将随包清单校验、开发环境 Java/JCo 路径发现和本地加载检查分开；完整包先选择随包组件，源码模式保留已保存路径、显式环境变量和自动检测的优先级。`src/rfc.ts` 与检查流程共用 `javaProcessEnvironment`，避免继承 JVM 全局选项。重构时保持这些选择规则和失败时不混用组件的行为。
+
+`packaging/windows/build.ps1` 分别读取 Java 元数据、选择原始 JCo 归档、验证 x64 DLL，再组装组件并调用 `Assert-BundledRfcRuntime` 实际加载。打包回执记录本地版本与关键文件 SHA-256；此检查不建立 SAP 会话。
 
 ## COS 双更新源发布
 
