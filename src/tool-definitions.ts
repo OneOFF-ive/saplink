@@ -190,8 +190,12 @@ const toolDescriptions: Record<ToolName, string> = {
     "CALL FUNCTION syntax). End the definition with a period. Definition comments may be lost; implementation " +
     "comments must not start with reserved prefixes *\" or *\"---. SAP may normalize the definition."),
   syntax_check: 'Check the requested version and return backend diagnostics.',
-  activate_objects: ("Activate selected source objects with inactive revisions, or a function group with the revision from " +
-    "get_function_group. Group activation affects its members. May partially succeed."),
+  activate_objects: ("Jointly activate a reviewed set of up to 20 source objects/function groups. Save ALL dependent changes first, then supply each inactive revision " +
+    "or the group revision from get_function_group. All targets are version-checked before any activation is sent. Groups expand to their inactive members and container in the same request. " +
+    "Do not list both a group and its members. No automatic dependency discovery, scope expansion, sequential fallback or rollback. " +
+    "If SAP requests a preaudit confirmation, at most one second phase is sent after validating its scope. " +
+    "May partially succeed; inspect per-object results/member_results even on error. Verification is passed, not_activated, mismatch or unknown. " +
+    "Read current versions before retrying; errors never automatically replay activation."),
   list_transport_requests: ("List the configured SAP user transport requests and tasks. Supply transport_number for a direct header-only query of a known request/task, avoiding the full list. Use this to find an existing modifiable task " +
     "when SAP requires change recording; package names alone do not establish that requirement. Confirm the " +
     "intended task with the user if ambiguous. Does not create or release requests or select a default task."),

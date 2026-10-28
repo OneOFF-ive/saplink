@@ -10,9 +10,10 @@ import { AppError, safeError, attachBackendDiagnostic, type BackendDiagnostic } 
 import { functionDefinition } from './function-signature.js';
 import { parseTransportList, parseTransportSummary } from './transports.js';
 import { checkSavedVersion } from './syntax-check.js';
-import { groupActivationBody, activationResponse } from './activation.js';
+import { activationBody, scopedActivationBody, activationResponse, type ActivationReference } from './activation.js';
 import { probeEnhancementActivation, type EnhancementActivation } from './enhancements.js';
 import { tableQuery, readOnlySql, queryResult, queryCapabilities, type TableQuery, type SqlQuery } from './data-query.js';
+import { RfcTransport, type AdtTransport, type RfcRuntime, type RfcRole } from './rfc.js';
 
 export type Version = 'active' | 'inactive';
 export type ProgramKind = 'report' | 'include' | 'module_pool' | 'subroutine_pool';
@@ -41,6 +42,8 @@ export function functionGroupUri(uri: string): string {
 }
 export const isFunctionGroup = (uri: string) => /^\/sap\/bc\/adt\/functions\/groups\/[^/]+$/.test(uri);
 export type GroupSnapshot = { object_uri: string; revision: string; name: string; members: { object_uri: string; version: Version; revision: string; hash: string; definition_comments_hash?: string }[] };
+export type ActivationTarget = { object_uri: string; snapshot?: GroupSnapshot };
+export type BatchActivationResult = { success: boolean; messages: unknown[]; inactive?: unknown[] };
 export type Source = { object_uri: string; source_uri: string; source: string; version: Version; revision: string; hash: string };
 export type CreatedTransport = { request_number: string; owner: string; status: string; tasks: { task_number: string; owner: string; status: string }[]; tasks_truncated: boolean };
 function verificationSource(source: string): string {
@@ -126,6 +129,7 @@ export interface Backend {
   functionGroupSnapshot?(group: string): Promise<GroupSnapshot>;
   check(object: string, version: Version): Promise<unknown>;
   activate(object: string, snapshot?: GroupSnapshot): Promise<{ success: boolean; messages: unknown[] }>;
+  activateBatch(objects: ActivationTarget[], onDispatch?: () => void | Promise<void>): Promise<BatchActivationResult>;
   transports(number?: string): Promise<unknown>;
   createTransportRequest?(object: string, pkg: string, description: string): Promise<string>;
   verifyTransportRequest?(number: string): Promise<CreatedTransport | undefined>;
@@ -136,7 +140,7 @@ export interface Backend {
 class BoundedHttp implements HttpClient {
   lastDiagnostic: BackendDiagnostic = {};
   lastFailure?: { http_status: number; request_path: string; request_method: string };
-  constructor(private base: string, private onActivity?: () => void, private onDiagnostic?: (value: BackendDiagnostic) => void) {}
+  constructor(private base: string, private onActivity?: () => void) {}
   async request(o: HttpClientOptions) {
     this.lastFailure = undefined;
     const url = new URL(o.url, this.base);
@@ -199,25 +203,27 @@ class BoundedHttp implements HttpClient {
       if (error instanceof HttpClientException) throw error;
       throw new HttpClientException('Backend network request failed', axios.isAxiosError(error) ? error.code : undefined,
         undefined, undefined, o);
-    } finally { this.lastDiagnostic.elapsed_ms = Math.round(performance.now() - started); this.onActivity?.(); this.onDiagnostic?.({ ...this.lastDiagnostic }); }
+    } finally { this.lastDiagnostic.elapsed_ms = Math.round(performance.now() - started); this.onActivity?.(); }
   }
 }
 
 
-function bindDiagnostics(http: AdtHTTP, transport: BoundedHttp) {
+function bindDiagnostics(http: AdtHTTP, transport: AdtTransport) {
   const request = http.request.bind(http);
   http.request = async (url, options) => {
     try { return await request(url, options); }
-    catch (error) { attachBackendDiagnostic(error, transport.lastDiagnostic); throw error; }
+    catch (error) { const failure = transport.terminalError ?? error; attachBackendDiagnostic(failure, transport.lastDiagnostic); throw failure; }
   };
 }
-function diagnosticClient(connection: Connection, password: string, transport: BoundedHttp) {
-  const client = new ADTClient(transport, connection.username, password, connection.client, connection.language);
+function diagnosticClient(connection: Connection, password: string, transport: AdtTransport) {
+  const client = new ADTClient(transport, connection.username, connection.rfc ? '' : password, connection.client, connection.language);
+  transport.bindSession?.(client.httpClient);
   bindDiagnostics(client.httpClient, transport);
   return client;
 }
 
-export type AdtBackendOptions = { queryIdleTimeoutMs?: number; now?: () => number };
+export type AdtBackendOptions = { queryIdleTimeoutMs?: number; now?: () => number; rfcRuntime?: RfcRuntime;
+  transportFactory?: (role: RfcRole, onActivity?: () => void) => AdtTransport };
 
 function queryIdleTimeoutMs() {
   const seconds = process.env.SAPLINK_QUERY_IDLE_TIMEOUT_SECONDS ?? '300';
@@ -234,7 +240,8 @@ export class AdtBackend implements Backend {
   takeSaveDiagnostics() { const result = this.saveDiagnostics; this.saveDiagnostics = []; return result; }
   private qualityHttp: AdtHTTP;
   private reader: ADTClient;
-  private readerHttp: BoundedHttp;
+  private readerHttp!: AdtTransport;
+  private channels: AdtTransport[] = [];
   private createReader: () => ADTClient;
   private readerLastActivity?: number;
   private readonly queryIdleTimeoutMs: number;
@@ -244,17 +251,37 @@ export class AdtBackend implements Backend {
     if (!Number.isSafeInteger(this.queryIdleTimeoutMs) || this.queryIdleTimeoutMs < 1 || this.queryIdleTimeoutMs > 86400000)
       throw new AppError('INVALID_CONFIG', 'Query reader idle timeout must be between 1 and 86400000 milliseconds');
     this.now = options.now ?? (() => performance.now());
-    this.client = diagnosticClient(connection, password, new BoundedHttp(connection.base_url, undefined, diagnostic => {
-      if (this.capturingSave && diagnostic.request_method === 'PUT' && /\/source\/main$/.test(diagnostic.request_path ?? '') && this.saveDiagnostics.length < 8)
-        this.saveDiagnostics.push(diagnostic);
-    }));
+    const transport = (role: RfcRole, onActivity?: () => void): AdtTransport => {
+      const result = options.transportFactory?.(role, onActivity) ?? (connection.rfc
+        ? new RfcTransport(connection, password, role, options.rfcRuntime, onActivity)
+        : new BoundedHttp(connection.base_url, onActivity));
+      if (role === 'editor') {
+        const request = result.request.bind(result);
+        result.request = async options => {
+          const previous = result.lastDiagnostic;
+          try { return await request(options); }
+          finally {
+            const diagnostic = result.lastDiagnostic;
+            if (diagnostic !== previous && this.capturingSave && diagnostic.request_method === 'PUT'
+              && /\/source\/main$/.test(diagnostic.request_path ?? '') && this.saveDiagnostics.length < 8)
+              this.saveDiagnostics.push({ ...diagnostic });
+          }
+        };
+      }
+      this.channels.push(result);
+      return result;
+    };
+    this.client = diagnosticClient(connection, password, transport('editor'));
     this.client.stateful = session_types.stateful;
     // Version probes must not alter the stateful editor context that owns SAP locks.
-    this.readerHttp = new BoundedHttp(connection.base_url, () => { this.readerLastActivity = this.now(); });
-    this.createReader = () => diagnosticClient(connection, password, this.readerHttp);
+    this.createReader = () => {
+      this.readerHttp = transport('reader', () => { this.readerLastActivity = this.now(); });
+      return diagnosticClient(connection, password, this.readerHttp);
+    };
     this.reader = this.createReader();
-    const qualityTransport = new BoundedHttp(connection.base_url);
-    this.qualityHttp = new AdtHTTP(qualityTransport, connection.username, password, connection.client, connection.language);
+    const qualityTransport = transport('quality');
+    this.qualityHttp = new AdtHTTP(qualityTransport, connection.username, connection.rfc ? '' : password, connection.client, connection.language);
+    qualityTransport.bindSession?.(this.qualityHttp);
     bindDiagnostics(this.qualityHttp, qualityTransport);
     // Disable the ADT library's implicit login-error replay for backend executions.
     this.qualityHttp.stateful = session_types.stateful;
@@ -263,7 +290,8 @@ export class AdtBackend implements Backend {
     const discovery = await this.client.adtDiscovery();
     if (!discovery.length) throw new AppError('ADT_UNAVAILABLE', 'Backend did not return a usable ADT discovery document');
     return { discovery, data_query: queryCapabilities(discovery), probed_at: new Date().toISOString(),
-      source_lock_policy: { function_module: 'module', function_group_include: 'parent_group' },
+      transport: this.connection.rfc ? 'rfc' : 'http',
+      source_lock_policy: { function_module: 'module', function_group_include: 'include' },
       repository_query: { tools: Object.keys(repositorySchemas), source_version: 'active', max_items: 500,
         availability_policy: 'Tools are implemented locally; backend availability and authorization must be verified by actual calls' },
       quality_tools: { tools: Object.keys(qualitySchemas), execution_policy: 'write_enabled_confirm_execution_request_id',
@@ -275,7 +303,7 @@ export class AdtBackend implements Backend {
   }
   async quality(tool: QualityTool, input: QualityInput) {
     return new QualityTools(this.qualityHttp, this.reader, (object, version) => this.read(object, version),
-      this.connection.connection_id, this.connection.base_url, adtUri).run(tool, input);
+      this.connection.connection_id, this.connection.rfc ? undefined : this.connection.base_url, adtUri).run(tool, input);
   }
   async inspectRepository(tool: RepositoryTool, input: RepositoryInput) {
     return new RepositoryQueries(this.reader, (object, version) => this.read(object, version), adtUri).run(tool, input);
@@ -301,6 +329,8 @@ export class AdtBackend implements Backend {
   }
   private async recreateReader() {
     if (this.reader.loggedin) await this.reader.logout().catch(() => {});
+    await this.readerHttp.close?.();
+    this.channels = this.channels.filter(transport => transport !== this.readerHttp);
     this.reader = this.createReader();
     this.readerLastActivity = undefined;
   }
@@ -375,9 +405,9 @@ export class AdtBackend implements Backend {
     return pkg['adtcore:name'];
   }
   private lockUri(object: string) {
-    const uri = programUri(object);
-    // Function module source saving requires the module's own ADT lock handle.
-    return uri.startsWith('/sap/bc/adt/functions/groups/') && !uri.includes('/fmodules/') ? functionGroupUri(uri) : uri;
+    // A source PUT requires that resource's own handle, including FUGR/I Includes.
+    // The group handle is only used when explicitly locking the group container.
+    return programUri(object);
   }
   async transportRequirement(object: string, pkg: string, _operation: 'I' | 'U') {
     // CTS operation I inserts an object into change recording, for both create and edit.
@@ -537,47 +567,62 @@ export class AdtBackend implements Backend {
       position_format: 'backend-native; line and offset require real-system verification' };
   }
   async activate(object: string, snapshot?: GroupSnapshot) {
-    if (isFunctionGroup(object)) {
-      if (!snapshot || snapshot.object_uri !== object) throw new AppError('VERSION_CONFLICT', 'Group activation requires a matching member snapshot');
-      // Validate the complete snapshot before sending any activation request.
-      for (const member of snapshot.members) {
-        if (functionGroupUri(member.object_uri) !== object || member.object_uri === object) {
-          throw new AppError('INVALID_URI', 'Activation member belongs to another group');
+    return this.activateBatch([{ object_uri: object, snapshot }]);
+  }
+  async activateBatch(objects: ActivationTarget[], onDispatch?: () => void | Promise<void>): Promise<BatchActivationResult> {
+    if (!objects.length || objects.length > 20) throw new AppError('INVALID_INPUT', 'Activate between 1 and 20 selected objects');
+    const selected = new Set<string>();
+    // Validate all containers before metadata lookup or dispatch.
+    for (const target of objects) {
+      const uri = programUri(target.object_uri);
+      if (selected.has(uri)) throw new AppError('INVALID_INPUT', 'Duplicate activation target');
+      selected.add(uri);
+      if (isFunctionGroup(uri)) {
+        if (!target.snapshot || target.snapshot.object_uri !== uri) throw new AppError('VERSION_CONFLICT', 'Group activation requires a matching member snapshot');
+        if (target.snapshot.members.length > 500) throw new AppError('CAPABILITY_UNSUPPORTED', 'Function group exceeds snapshot limit');
+        for (const member of target.snapshot.members) {
+          if (functionGroupUri(member.object_uri) !== uri || member.object_uri === uri)
+            throw new AppError('INVALID_URI', 'Activation member belongs to another group');
         }
-      }
-      const targets = [...new Set([...snapshot.members.filter(member => member.version === 'inactive')
-        .map(member => member.object_uri), object])];
-      const members = [];
-      for (const uri of targets) {
-        const metadata = await this.reader.objectStructure(uri);
-        members.push({ uri, name: metadata.metaData['adtcore:name'] });
-      }
-      const results: { object_uri: string; success: boolean; messages: unknown[] }[] = [];
-      for (const member of members) {
-        try {
-          // Use the same minimal reference format that works for single-object activation.
-          let result = await this.client.activate(member.name, member.uri);
-          if (result.inactive.length && !result.messages.some(message => /[EAX]/.test(message.type))) {
-            const body = groupActivationBody(result, object, snapshot.members.map(member => member.object_uri), this.connection.username);
-            const response = await this.client.httpClient.request('/sap/bc/adt/activation', {
-              method: 'POST', qs: { method: 'activate', preauditRequested: false },
-              headers: { 'Content-Type': 'application/xml', Accept: 'application/xml' }, body
-            });
-            const completed = activationResponse(response.body);
-            result = { ...completed, messages: [...result.messages, ...completed.messages] };
-          }
-          results.push({ object_uri: member.uri, ...result });
-          if (!result.success) return { success: false, messages: results.flatMap(r => r.messages), member_results: results };
-        } catch (error) {
-          const failure = safeError(error);
-          throw new AppError(failure.code, failure.message, { member_results: results,
-            failed_object_uri: member.uri, cause: failure.details });
-        }
-      }
-      return { success: true, messages: results.flatMap(r => r.messages), member_results: results };
+      } else if (target.snapshot) throw new AppError('INVALID_INPUT', 'Only function groups accept snapshots');
     }
-    const metadata = await this.client.objectStructure(programUri(object), 'inactive');
-    return this.client.activate(metadata.metaData['adtcore:name'], object);
+    for (const target of objects) {
+      const uri = programUri(target.object_uri);
+      if (!isFunctionGroup(uri) && uri.includes('/functions/groups/') && selected.has(functionGroupUri(uri)))
+        throw new AppError('INVALID_INPUT', 'Select either a function group or its individual members');
+    }
+    const targets = new Map<string, ActivationReference>();
+    const approved = new Map<string, ActivationReference>();
+    for (const target of objects) {
+      const uri = programUri(target.object_uri);
+      const entries = target.snapshot ? [...target.snapshot.members.map(member => ({ uri: member.object_uri, activate: member.version === 'inactive' })), { uri, activate: true }]
+        : [{ uri, activate: true }];
+      for (const entry of entries) {
+        const metadata = await this.reader.objectStructure(entry.uri);
+        const name = metadata.metaData['adtcore:name'], type = metadata.metaData['adtcore:type'];
+        if (!name || !type) throw new AppError('ACTIVATION_SCOPE_INVALID', 'Activation metadata has no name or type');
+        const ref: ActivationReference = { uri: entry.uri, name, type,
+          ...(entry.uri.includes('/functions/groups/') ? { parentUri: functionGroupUri(entry.uri) } : {}) };
+        approved.set(entry.uri, ref);
+        if (entry.activate) targets.set(entry.uri, ref);
+        if (isFunctionGroup(entry.uri)) approved.set(`${entry.uri}/source/main`, { ...ref, uri: `${entry.uri}/source/main` });
+      }
+    }
+    const request = async (body: string, preauditRequested: boolean) => {
+      await onDispatch?.();
+      const response = await this.client.httpClient.request('/sap/bc/adt/activation', {
+        method: 'POST', qs: { method: 'activate', preauditRequested },
+        headers: { 'Content-Type': 'application/xml', Accept: 'application/xml' }, body
+      });
+      return activationResponse(response.body);
+    };
+    const result = await request(activationBody([...targets.values()]), true);
+    if (result.inactive.length && !result.messages.some(message => /[EAX]/.test(message.type))) {
+      const body = scopedActivationBody(result, [...approved.values()], this.connection.username, [...targets.values()]);
+      const completed = await request(body, false);
+      return { ...completed, messages: [...result.messages, ...completed.messages] };
+    }
+    return result;
   }
   private async transportSummary(number: string) {
     if (!/^[A-Z0-9]{3}K[0-9]{6}$/.test(number)) throw new AppError('INVALID_INPUT', 'Invalid transport number');
@@ -669,7 +714,14 @@ export class AdtBackend implements Backend {
     try { if (this.client.loggedin) await this.client.logout(); }
     finally {
       try { if (this.reader.loggedin) await this.reader.logout(); }
-      finally { if (this.qualityHttp.loggedin) await this.qualityHttp.logout(); }
+      finally {
+        try { if (this.qualityHttp.loggedin) await this.qualityHttp.logout(); }
+        finally {
+          const cleanup = await Promise.allSettled(this.channels.map(transport => transport.close?.()));
+          const failed = cleanup.find(result => result.status === 'rejected');
+          if (failed?.status === 'rejected') throw failed.reason;
+        }
+      }
     }
   }
 }

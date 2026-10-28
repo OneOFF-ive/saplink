@@ -27,6 +27,8 @@ SapLink 将 SAP 中的源码、开发对象和数据查询能力，通过 MCP �
 
 应用独立运行，不依赖 VS Code 或 SAP GUI。通过本地管理界面配置 SAP 连接后，支持 Streamable HTTP 的 MCP 客户端即可接入。
 
+添加连接时可选择 HTTP/HTTPS 或 RFC/JCo。RFC 支持直连及不带路由密码的 SAProuter 路由，复用现有 ADT 工具与写入保护。x64 安装包自带 Java；JCo 由用户从 SAP 获取，可在管理界面检查环境并指定本地目录，无需手工配置环境变量。配置方法见 [ADT over RFC](docs/rfc-transport.md)。旧连接继续使用 HTTP/HTTPS。
+
 ## ♾️ 三环相连，无限可能
 
 SapLink 的图标由三个相扣的圆环构成：左右两个大圆环代表 **SAP** 与 **AI**，中间的小圆环代表 **SapLink**，将两者连接起来。

@@ -54,6 +54,7 @@ class FakeBackend implements Backend {
   async check() { return { passed: true }; }
   async activate() { if (this.activationPass) { this.active = this.inactive!; this.inactive = undefined; }
     return { success: this.activationPass, messages: [] }; }
+  async activateBatch(_objects: unknown[], onDispatch?: () => void | Promise<void>) { await onDispatch?.(); return this.activate(); }
   async transports() { return []; }
   async close() {}
 }

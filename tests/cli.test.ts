@@ -128,10 +128,18 @@ test('JSON diagnostics and argument errors are structured; tokens are not printe
     assert.equal((await f.run('service', 'start', '--port', 'oops')).code, 1);
     assert.equal((await f.run('not-a-command')).result.error.code, 'INVALID_ARGUMENTS');
     const tokenPath = join(f.directory, 'client-token.json');
-    const created = await f.run('token', 'create', '--out', tokenPath);
+    const created = await f.run('token', 'create', '--name', 'My Client', '--out', tokenPath);
     assert.equal(created.code, 0);
     const secret = JSON.parse(await readFile(tokenPath, 'utf8'));
     assert.equal(await f.store.authenticate(secret.token), true);
+    assert.equal(created.result.data.name, 'My Client'); assert.equal(secret.name, 'My Client');
+    const beforeRename = (await f.store.load()).tokens[0];
+    const renamed = await f.run('token', 'rename', secret.id, '--name', '开发助手');
+    assert.equal(renamed.code, 0); assert.equal(renamed.result.data.name, '开发助手');
+    assert.deepEqual((await f.store.load()).tokens[0], { ...beforeRename, name: '开发助手' });
+    assert.equal(await f.store.authenticate(secret.token), true);
+    const listed = await f.run('token', 'list'); assert.equal(listed.result.data[0].name, '开发助手');
+    assert.equal(JSON.stringify(renamed.result).includes(secret.token), false);
     assert.equal(JSON.stringify(created.result).includes(secret.token), false);
     const again = await f.run('token', 'create', '--out', tokenPath);
     assert.equal(again.result.error.code, 'EEXIST');
@@ -167,6 +175,33 @@ test('noninteractive connection edits preserve login secrets and never reuse cre
     assert.equal((await f.store.load()).connections[0].base_url, 'https://sap.test');
     assert.equal((await f.run('connection', 'remove', 'dev')).result.error.code, 'CONFIRMATION_REQUIRED');
     assert.equal((await f.store.load()).connections.length, 1);
+  } finally { await f.cleanup(); }
+});
+
+test('CLI selects transport, preserves router settings and requires credentials for route changes', async () => {
+  const f = await fixture();
+  try {
+    const connection = connectionSchema.parse({ connection_id: randomUUID(), name: 'routed', base_url: 'https://sap.test', client: '001', username: 'TEST', language: 'EN',
+      rfc: { ashost: 'sap.test', sysnr: '00', saprouter: '/H/router/S/3299' } });
+    await f.store.save({ schema_version: 1, connections: [connection], tokens: [] });
+    const preserved = await f.run('connection', 'edit', 'routed', '--language', 'ZH');
+    assert.equal(preserved.code, 0); assert.deepEqual(preserved.result.data.rfc, connection.rfc);
+    for (const flags of [['--rfc-saprouter', '/H/other/S/3299'], ['--clear-rfc-saprouter'], ['--transport', 'http']]) {
+      const changed = await f.run('connection', 'edit', 'routed', ...flags);
+      assert.equal(changed.result.error.code, 'INTERACTION_REQUIRED');
+      assert.deepEqual((await f.store.load()).connections[0].rfc, connection.rfc);
+    }
+    for (const flags of [['--transport', 'http', '--rfc-ashost', 'sap.test'], ['--transport', 'unknown'],
+      ['--transport', 'rfc', '--http-transport'], ['--rfc-saprouter', '/H/router', '--clear-rfc-saprouter']])
+      assert.equal((await f.run('connection', 'edit', 'routed', ...flags)).result.error.code, 'INVALID_INPUT');
+    const missingRfc = await f.run('connection', 'add', 'new', '--transport', 'rfc', '--url', 'https://sap.test', '--client', '001', '--username', 'TEST');
+    assert.equal(missingRfc.result.error.code, 'INVALID_INPUT');
+    const simplified = await f.run('connection', 'add', 'simple', '--transport', 'rfc', '--rfc-ashost', 'sap.test', '--rfc-sysnr', '02', '--client', '001', '--username', 'TEST');
+    assert.equal(simplified.result.error.code, 'INTERACTION_REQUIRED');
+    assert.match(simplified.result.error.message, /password/);
+    const invalidRoute = await f.run('connection', 'edit', 'routed', '--rfc-saprouter', '/H/router/P/route-secret');
+    assert.equal(invalidRoute.result.error.code, 'INVALID_INPUT'); assert.match(invalidRoute.result.error.message, /SAProuter/);
+    assert.doesNotMatch(JSON.stringify(invalidRoute.result), /route-secret/);
   } finally { await f.cleanup(); }
 });
 

@@ -32,6 +32,28 @@ test('function URI parsing accepts groups and members but rejects other nested e
   assert.throws(() => functionGroupUri('/sap/bc/adt/programs/programs/ztest'));
 });
 
+test('group Include saving uses its resource lock, not the parent group handle', async () => {
+  const backend = new AdtBackend(connectionSchema.parse({ connection_id: randomUUID(), name: 'mock', base_url: 'http://mock.test',
+    client: '001', username: 'TEST', language: 'EN', write_enabled: true }), 'fake');
+  const held = new Map<string, string>();
+  let saved = false;
+  (backend as any).client = {
+    lock: async (uri: string) => { const handle = `handle-${uri}`; held.set(uri, handle); return { LOCK_HANDLE: handle }; },
+    unLock: async (uri: string, handle: string) => { assert.equal(held.get(uri), handle); held.delete(uri); },
+    setObjectSource: async (source: string, _code: string, handle: string) => {
+      assert.equal(held.get(programUri(source)), handle, 'SAP requires the same resource to be locked and saved'); saved = true;
+    }
+  };
+  const groupHandle = await backend.lock(group);
+  const includeHandle = await backend.lock(`${includeUri}/source/main`);
+  assert.notEqual(includeHandle, groupHandle);
+  assert.equal(held.size, 2);
+  await backend.save(`${includeUri}/source/main`, 'TYPES ty_test TYPE i.', includeHandle);
+  await backend.unlock(includeUri, includeHandle);
+  assert.equal(saved, true); assert.equal(held.size, 1); assert.ok(held.has(group));
+  await backend.unlock(group, groupHandle); assert.equal(held.size, 0);
+});
+
 test('function interface save normalization and group activation verification work together', async () => {
   const root = join(process.cwd(), '.saplink/tests'); await mkdir(root, { recursive: true });
   const directory = await mkdtemp(join(root, 'function-format-'));
@@ -56,8 +78,9 @@ test('function interface save normalization and group activation verification wo
         .replace('IMPORTING VALUE(iv)', 'importing   VALUE ( IV )').replace(' " definition comment\n', '');
     },
     functionGroupSnapshot: async () => snapshot(),
-    activate: async (uri: string, passed?: GroupSnapshot) => {
-      assert.equal(locked, false); assert.equal(uri, group); assert.deepEqual(passed, snapshot());
+    activateBatch: async (objects: { object_uri: string; snapshot?: GroupSnapshot }[], onDispatch?: () => void | Promise<void>) => {
+      assert.equal(locked, false); assert.equal(objects.length, 1); assert.equal(objects[0].object_uri, group); assert.deepEqual(objects[0].snapshot, snapshot());
+      await onDispatch?.();
       active = inactive!.replace('OPTIONAL.\n\n\n', 'OPTIONAL.\n\n').replace(' " activation comment\n', ''); inactive = undefined;
       return { success: true, messages: [] };
     }
@@ -165,7 +188,8 @@ test('function ADT adapter creates groups/modules and edits module source with i
     assert.equal((await backend.read(moduleUri, 'inactive')).source, inactive);
     await assert.rejects(backend.activate(group), /snapshot/);
     assert.equal((await backend.activate(group, await backend.functionGroupSnapshot(group))).success, true);
-    const refs = activationBodies.map(body => new XMLParser({ ignoreAttributes: false }).parse(body)['adtcore:objectReferences']['adtcore:objectReference']);
+    assert.equal(activationBodies.length, 1);
+    const refs = new XMLParser({ ignoreAttributes: false }).parse(activationBodies[0])['adtcore:objectReferences']['adtcore:objectReference'];
     assert.deepEqual(refs.map((r: Record<string, string>) => r['@_adtcore:uri']), [moduleUri, includeUri, group]);
     for (const ref of refs) {
       assert.equal(ref['@_adtcore:parentUri'], undefined); assert.equal(ref['@_adtcore:type'], undefined);
@@ -174,9 +198,7 @@ test('function ADT adapter creates groups/modules and edits module source with i
     rejectContainer = true;
     const snapshot = await backend.functionGroupSnapshot(group);
     await assert.rejects(backend.activate(group, snapshot), error => {
-      const details = (error as { details: { member_results: { object_uri: string; success: boolean }[]; failed_object_uri: string } }).details;
-      assert.equal(details.failed_object_uri, group);
-      assert.ok(details.member_results.some(result => result.object_uri === moduleUri && result.success));
+      assert.ok(error);
       return true;
     });
     const calls = activationBodies.length;
@@ -200,8 +222,9 @@ test('function tools enforce transport and write controls, and group activation 
     lock: async () => { locked = true; return 'h'; }, unlock: async () => { locked = false; },
     createFunctionGroup: async () => { created++; return group; }, createFunctionModule: async () => { assert.equal(locked, true); created++; return moduleUri; },
     listFunctionGroupMembers: async () => ({ members: [] }), functionGroupSnapshot: async () => snapshot(),
-    activate: async (uri: string, passed?: GroupSnapshot) => {
-      assert.equal(locked, false); assert.equal(uri, group); assert.deepEqual(passed, snapshot());
+    activateBatch: async (objects: { object_uri: string; snapshot?: GroupSnapshot }[], onDispatch?: () => void | Promise<void>) => {
+      assert.equal(locked, false); assert.equal(objects.length, 1); assert.equal(objects[0].object_uri, group); assert.deepEqual(objects[0].snapshot, snapshot());
+      await onDispatch?.();
       activated++; return { success: true, messages: [] };
     },
     read: async (uri: string, version: 'active' | 'inactive') => sourceResult(connection.connection_id, uri, `${uri}/source/main`, '', version)

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { qualitySchemas, qualityObject, type QualityInput, type QualityTool } from './quality-tools.js';
 import { repositorySchemas, type RepositoryInput, type RepositoryTool } from './repository-query.js';
 import { searchEnhancements } from './enhancements.js';
-import { AdtBackend, adtUri, programUri, functionGroupUri, isFunctionGroup, compareSavedSource, savedSourceHash, definitionCommentsHash, type Backend, type Version, type ProgramKind } from './adt.js';
+import { AdtBackend, adtUri, programUri, functionGroupUri, isFunctionGroup, compareSavedSource, savedSourceHash, definitionCommentsHash, type Backend, type Version, type ProgramKind, type Source, type GroupSnapshot, type BatchActivationResult } from './adt.js';
 import { ConfigStore, digest, type Connection, type Credentials } from './config.js';
 import { AuditLog } from './audit.js';
 import { AppError, safeError } from './errors.js';
@@ -218,7 +218,8 @@ export class Operations {
             client: c.client,
             language: c.language,
             username: c.username,
-            write_enabled: c.write_enabled
+            write_enabled: c.write_enabled,
+            ...(c.rfc ? { transport: 'rfc', rfc: c.rfc } : {})
           }))
         };
       const connection = config.connections.find(c => c.connection_id === input.connection_id);
@@ -395,7 +396,7 @@ export class Operations {
       handle = await backend.lock(object);
     }
     catch (error) {
-      if (safeError(error).code === 'OUTCOME_UNKNOWN') {
+      if (['OUTCOME_UNKNOWN', 'RFC_CONTEXT_LOST', 'RFC_PROTOCOL_ERROR'].includes(safeError(error).code)) {
         this.poisoned.add(backend);
         context.warnings.push('LOCK_STATE_UNKNOWN');
       }
@@ -721,92 +722,90 @@ export class Operations {
         });
       }
       case 'activate_objects': {
-        for (const o of input.objects!)
-          await backend.packageOf(programUri(o.object_uri));
+        const selected = input.objects!.map(object => ({ ...object, object_uri: programUri(object.object_uri) }));
+        const uris = new Set(selected.map(object => object.object_uri));
+        if (uris.size !== selected.length) throw new AppError('INVALID_INPUT', 'Duplicate activation target');
+        for (const object of selected) {
+          if (!isFunctionGroup(object.object_uri) && object.object_uri.includes('/functions/groups/') && uris.has(functionGroupUri(object.object_uri)))
+            throw new AppError('INVALID_INPUT', 'Select either a function group or its individual members');
+          await backend.packageOf(object.object_uri);
+        }
+        if (!backend.activateBatch) throw new AppError('CAPABILITY_UNSUPPORTED', 'Joint activation is unavailable; no sequential fallback was used');
         await context.event('started');
-        const results: unknown[] = [];
-        for (const o of input.objects!) {
-          const uri = programUri(o.object_uri);
-          try {
+        const plans: { object_uri: string; snapshot?: GroupSnapshot; source?: Source }[] = [];
+        // Validate every reviewed version before activating any target.
+        for (const object of selected) {
+          const uri = object.object_uri;
+          const plan = await this.locked(backend, uri, context, async () => {
             if (isFunctionGroup(uri)) {
-              if (!backend.functionGroupSnapshot)
-                throw new AppError('CAPABILITY_UNSUPPORTED', 'Function group snapshots unavailable');
-              const snapshot = await this.locked(backend, uri, context, async () => {
-                const snapshot = await backend.functionGroupSnapshot!(uri);
-                if (snapshot.revision !== o.expected_revision)
-                  throw new AppError('VERSION_CONFLICT', 'Function group members changed');
-                return snapshot;
-              });
-              if (this.poisoned.has(backend))
-                throw new AppError('LOCK_CLEANUP_FAILED', 'Group editor lock was not released');
-              if ((await backend.functionGroupSnapshot(uri)).revision !== snapshot.revision)
-                throw new AppError('VERSION_CONFLICT', 'Function group changed after unlocking');
-              await context.event('activation_version_checked');
-              context.dispatched = true;
-              context.confirmed = false;
-              const activated = await backend.activate(uri, snapshot);
-              context.confirmed = true;
-              await context.event(activated.success ? 'activated' : 'activation_failed');
-              results.push({
-                object_uri: uri,
-                ...activated
-              });
-              if (!activated.success)
-                throw new AppError('ACTIVATION_FAILED', 'Function group activation failed', { results });
-              for (const member of snapshot.members) {
-                const active = await backend.read(member.object_uri, 'active');
-                if (savedSourceHash(active.source, member.object_uri) !== member.hash)
-                  throw new AppError('VERIFY_FAILED', 'Function group member differs after activation', { object_uri: member.object_uri });
-                if (member.definition_comments_hash && definitionCommentsHash(active.source, member.object_uri) !== member.definition_comments_hash) {
-                  context.warnings.push('FUNCTION_DEFINITION_COMMENTS_CHANGED');
-                }
+              if (!backend.functionGroupSnapshot) throw new AppError('CAPABILITY_UNSUPPORTED', 'Function group snapshots unavailable');
+              const snapshot = await backend.functionGroupSnapshot(uri);
+              if (snapshot.revision !== object.expected_revision) throw new AppError('VERSION_CONFLICT', 'Function group members changed', { object_uri: uri });
+              return { object_uri: uri, snapshot };
+            }
+            const source = await backend.read(uri, 'inactive');
+            if (source.revision !== object.expected_revision) throw new AppError('VERSION_CONFLICT', 'Inactive source changed; read it again', { object_uri: uri });
+            return { object_uri: uri, source };
+          });
+          plans.push(plan);
+          if (this.poisoned.has(backend)) throw new AppError('LOCK_CLEANUP_FAILED', 'Editor lock was not released; activation was not sent');
+        }
+        let activation: BatchActivationResult | undefined;
+        let failure: ReturnType<typeof safeError> | undefined;
+        try {
+          activation = await backend.activateBatch(plans.map(({ object_uri, snapshot }) => ({ object_uri, snapshot })), async () => {
+            // Recheck after backend metadata preparation, immediately before the first activation request.
+            if (!context.dispatched) {
+              for (const plan of plans) {
+                const revision = plan.snapshot ? (await backend.functionGroupSnapshot!(plan.object_uri)).revision
+                  : (await backend.read(plan.object_uri, 'inactive')).revision;
+                if (revision !== (plan.snapshot ?? plan.source)!.revision)
+                  throw new AppError('VERSION_CONFLICT', 'Activation set changed after unlocking; review the set again', { object_uri: plan.object_uri });
               }
-              await context.event('activation_verified');
-              continue;
+              await context.event('activation_version_checked');
             }
-            const source = await this.locked(backend, uri, context, async () => {
-              const source = await backend.read(uri, 'inactive');
-              if (source.revision !== o.expected_revision)
-                throw new AppError('VERSION_CONFLICT', 'Inactive source changed; read it again');
-              return source;
-            });
-            // SAP activation must acquire its own enqueue lock; release our editor lock first.
-            if (this.poisoned.has(backend))
-              throw new AppError('LOCK_CLEANUP_FAILED', 'Editor lock was not released; activation was not sent');
-            const checked = await backend.read(uri, 'inactive');
-            if (checked.revision !== source.revision)
-              throw new AppError('VERSION_CONFLICT', 'Inactive source changed after unlocking');
-            await context.event('activation_version_checked');
-            context.dispatched = true;
-            context.confirmed = false;
-            const result = await backend.activate(uri);
-            context.confirmed = true;
-            await context.event(result.success ? 'activated' : 'activation_failed');
-            if (result.success) {
-              const active = await backend.read(uri, 'active');
-              const comparison = compareSavedSource(source.source, active.source, uri);
-              context.warnings.push(...comparison.warnings);
-              if (!comparison.equivalent)
-                throw new AppError('VERIFY_FAILED', 'Active source differs after activation', { difference: comparison.difference });
-              await context.event('activation_verified');
+            context.dispatched = true; context.confirmed = false;
+          });
+          context.confirmed = true;
+          await context.event(activation.success ? 'activated' : 'activation_failed');
+        } catch (error) {
+          failure = safeError(error);
+          if (!context.dispatched) throw error;
+        }
+        // A response failure does not imply rollback. Inspect every selected source, even after a mismatch.
+        const results: { object_uri: string; success: boolean; verification: string; member_results?: unknown[]; error?: unknown }[] = [];
+        const verify = async (uri: string, hash: string, comments?: string) => {
+          try {
+            const active = await backend.read(uri, 'active');
+            if (savedSourceHash(active.source, uri) === hash) {
+              if (comments && definitionCommentsHash(active.source, uri) !== comments) context.warnings.push('FUNCTION_DEFINITION_COMMENTS_CHANGED');
+              return { object_uri: uri, success: true, verification: 'passed', active_revision: active.revision };
             }
-            results.push({
-              object_uri: uri,
-              ...result
-            });
-            if (!result.success)
-              throw new AppError('ACTIVATION_FAILED', 'Activation failed', { results });
+            const inactive = await backend.read(uri, 'inactive').catch(() => undefined);
+            return { object_uri: uri, success: false, verification: inactive && savedSourceHash(inactive.source, uri) === hash ? 'not_activated' : 'mismatch', active_revision: active.revision };
+          } catch (error) {
+            return { object_uri: uri, success: false, verification: 'unknown', error: safeError(error) };
           }
-          catch (error) {
-            const failure = safeError(error);
-            throw new AppError(failure.code, failure.message, {
-              results,
-              failed_object_uri: uri,
-              cause: failure.details
-            });
+        };
+        for (const plan of plans) {
+          if (plan.snapshot) {
+            const members = [];
+            for (const member of plan.snapshot.members) members.push(await verify(member.object_uri, member.hash, member.definition_comments_hash));
+            results.push({ object_uri: plan.object_uri, success: members.every(member => member.success),
+              verification: 'members_checked', member_results: members });
+          } else {
+            const source = plan.source!;
+            results.push(await verify(plan.object_uri, savedSourceHash(source.source, plan.object_uri), definitionCommentsHash(source.source, plan.object_uri)));
           }
         }
-        return { results };
+        const details = { results, messages: activation?.messages ?? [], inactive: activation?.inactive ?? [],
+          ...(failure ? { cause: failure.details } : {}),
+          guidance: 'Joint activation is not transactional. Inspect per-object results and current versions before retrying; no automatic replay was performed.' };
+        if (failure) throw new AppError(failure.code, failure.message, details);
+        if (!activation!.success) throw new AppError('ACTIVATION_FAILED', 'SAP did not confirm the complete activation set', details);
+        if (results.some(result => !result.success)) throw new AppError('VERIFY_FAILED', 'Some active sources could not be verified', details);
+        await context.event('activation_verified');
+        return { results, messages: activation!.messages, mode: 'joint' };
       }
       default: throw new AppError('UNKNOWN_TOOL', 'Unknown tool');
     }

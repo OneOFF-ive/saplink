@@ -26,9 +26,11 @@ Management API authentication matches paths case-insensitively, consistent with 
 
 The SELECT guard rejects both CLIENT and CLIENTS outside quoted values, including USING ALL CLIENTS, USING CLIENTS IN and nested queries. SAP backend support and authorization checks still apply.
 
-MCP initialization provides client instructions for data handling and safe write recovery. Parameter descriptions explain identifiers, filters and revision/request IDs. Tool arguments are limited to 2000 combined object members/array elements before schema validation. Client instructions are guidance, not an enforcement boundary; server validation and SAP authorizations remain required.
+MCP initialization provides client instructions for data handling and safe write recovery. Tool arguments are limited to 2000 combined object members/array elements before schema validation. Client instructions are guidance, not an enforcement boundary; server validation and SAP authorizations remain required.
 
 ## Backend transport and access scope
+
+Optional RFC connections use Java/JCo to carry ADT requests over the configured SAP connection, with independent reader/editor/quality contexts and no HTTP fallback. RFC history links are reduced to validated paths within the selected object; advertised HTTP hosts and ports are never contacted. HTTP connections retain same-origin validation. SAProuter is routing, not an encryption option; SNC/SSO is not implemented. Runtime discovery and component loading checks are local and create no SAP destination. Java may be bundled, but SAP JCo is supplied separately by the user. See [RFC transport](rfc-transport.md).
 
 Backend connections accept HTTP and HTTPS. Prefer HTTPS with a trusted server certificate; the bounded Axios client uses default TLS verification, forbids cross-origin requests and never follows redirects, including HTTPS-to-HTTP redirects. No insecure-certificate switch or automatic downgrade is provided. Existing HTTP connections remain compatible and still send authentication and data without transport encryption. Validate connectivity and supported workflows against each target SAP system.
 

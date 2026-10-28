@@ -5,7 +5,8 @@ import { connectionFieldHints } from './config.js';
 export function cliFailure(error: unknown) {
   if (error instanceof AppError) return safeError(error);
   if (error instanceof z.ZodError) {
-    const fields = [...new Set(error.issues.map(issue => String(issue.path[0] ?? '')))];
+    const fields = [...new Set(error.issues.map(issue => issue.path[0] === 'rfc' && issue.path.length > 1
+      ? `rfc_${String(issue.path[1])}` : String(issue.path[0] ?? '')))];
     return { code: 'INVALID_INPUT', message: fields.map(field => connectionFieldHints[field] ?? 'Invalid command arguments.').join('\n') };
   }
   const code = (error as NodeJS.ErrnoException)?.code;

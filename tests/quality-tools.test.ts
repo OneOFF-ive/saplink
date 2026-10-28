@@ -90,3 +90,22 @@ test('history accepts only discovered same-origin ADT resources without Client o
   assert.equal(out.entries[0].resource, object + '/source/main?version=00001');
   assert.throws(() => parseVersions('<feed><entry><content src="https://evil.test/source"/></entry></feed>', object, origin, adtUri));
 });
+
+test('RFC history link policy discards HTTP authority but retains object scope and strict URI validation', () => {
+  const policy = { transport: 'rfc' as const, objectUri: object };
+  const resource = `${object}/source/main?version=00001`;
+  for (const host of ['http://sap.test:8123', 'https://alias.internal:8443', 'https://other.internal:443']) {
+    assert.equal(versionResource(host + resource, object + '/', policy, adtUri), resource);
+    assert.throws(() => versionResource(host + resource, object + '/', origin, adtUri));
+  }
+  assert.equal(versionResource('source/main?version=00001', object + '/', policy, adtUri), resource);
+  const feed = `<feed><entry><content src="https://alias.internal:8443${resource}"/></entry></feed>`;
+  assert.equal(parseVersions(feed, object + '/versions', policy, adtUri).entries[0].resource, resource);
+  for (const value of [`//sap.test${resource}`, `ftp://sap.test${resource}`, `file://${resource}`, `javascript:${resource}`,
+    `https://user:secret@sap.test${resource}`, resource + '#fragment', resource + '&sap-client=999', resource + '&action=delete',
+    '/sap/bc/adt/programs/programs/ztest_other/source/main', '/sap/bc/adt/atc/runs',
+    `${object}/source/../main`, `${object}/source/%2e%2e/main`, `${object}/source/%252e%252e/main`,
+    `${object}/source/%5cmain`, `${object}/source/%ZZ`, `${object}/source/main\n`, '/sap/bc/soap/rfc']) {
+    assert.throws(() => versionResource(value, object + '/', policy, adtUri), value);
+  }
+});

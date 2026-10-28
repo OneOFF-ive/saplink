@@ -207,7 +207,19 @@ TABLES 用 TYPE，不用旧式 STRUCTURE；参数不是 SE37 Local Interface 注
 
 SAP 可能重建定义区格式。已支持语法允许 token 等价的格式变化，返回 `normalization_applied`；定义注释变化可返回 `FUNCTION_DEFINITION_COMMENTS_CHANGED`。不支持的语法退回严格验证。遇到 `VERIFY_FAILED`，检查 difference 并读 inactive，不直接覆盖或激活未审阅内容。
 
-整体激活前调用 `get_function_group`，以其 `data.revision` 作为组的 expected_revision 提交 activate_objects；不能用成员 revision 替代。组快照最多 500 个成员；整体流程先激活快照中 inactive 成员，再激活组，读回全部成员。可能部分成功，不是事务；失败时查看 member_results，不重跑全部组以掩盖失败。
+整体激活前调用 `get_function_group`，以其 `data.revision` 作为组的 expected_revision 提交 activate_objects；不能用成员 revision 替代。组快照最多 500 个成员；快照中 inactive 成员与组容器放入同一次联合请求，随后读回全部成员。不要同时列出组与其成员。可能部分成功，不是事务；失败时查看 results 中的 member_results，不重跑全部组以掩盖失败。
+
+### 多对象依赖与联合激活
+
+互相依赖的修改应先全部保存为 inactive，然后将本次已审阅、已授权的对象集合一次交给 `activate_objects`。最多选择 20 个顶层对象；函数组展开成员不占此顶层计数，每组仍限 500 个成员。当前对象范围是已支持的程序、Include、函数模块和函数组，不因此新增类或 DDIC 对象写入支持。
+
+服务先在各对象编辑锁内校验版本、释放全部编辑锁，在发送首个请求前再次核对整个集合。任一版本冲突或解锁失败时，不发送激活。全部目标作为一个集合提交给 SAP，由 SAP 处理集合内依赖，不按列表顺序逐个激活。若 SAP 返回 preaudit 待确认对象，仅在其属于审阅范围、对象身份及所属用户符合要求时，最多提交一次第二阶段的联合请求；遇到集合之外的对象时返回 `ACTIVATION_SCOPE_INVALID`，详情列出 unapproved_objects，不自动扩大范围。
+
+单对象 syntax_check 可能因另一个对象的新接口尚未激活而报依赖错误；应审阅诊断并确认整个变更集合，由 SAP 的联合激活检查给出最终结果，不能通过逐个激活或忽略真实语法错误解决。
+
+成功返回 `data.mode=joint`。无论激活失败、网络结果未知还是读回不一致，服务都会尽可能核实全部已选源码，在 `error.details.results` 提供逐对象结果；函数组内嵌 `member_results`。`verification=passed` 表示 active 源码与审阅版本一致，`not_activated` 表示 active 不一致且相同草稿仍在，`mismatch` 表示版本不一致，`unknown` 表示无法读取核实。函数组顶层 `members_checked` 是成员检查的汇总，需查看 success 和各成员状态。
+
+联合请求不保证全成全败，也不自动回滚或重放。版本检查与 SAP 获取激活锁之间仍有并发窗口；返回的核实结果是观察时的状态。重试前重新读版本并审阅，不把换 request_id 当作故障恢复。
 
 ## 9. 传输任务与请求
 
@@ -278,7 +290,7 @@ filters 支持 eq、ne、gt、ge、lt、le、like，值必须为原始字符串�
 | OBJECT_LOCKED | 报告锁冲突，不强制解锁、不换身份绕过 |
 | SESSION_NEEDS_REVIEW / LOCK_CLEANUP_FAILED 警告 | 核实 SAP 锁和已完成变更，由管理员决定恢复服务 |
 | AUTH_FAILED / HTTP_FORBIDDEN / CSRF_FAILED | 按分类排查登录或后端错误，403 不一定是开发权限不足 |
-| ACTIVATION_FAILED / partial | 查看已完成对象、failed_object_uri、results/member_results，分别读回 |
+| ACTIVATION_FAILED / partial | 查看 error.details.results 及组内 member_results，分别读回已核实、未激活或未知的对象 |
 | OUTCOME_UNKNOWN / write_dispatched 后错误 | 先检查 SAP 状态，不断言失败且未修改 |
 | REQUEST_ID_CONFLICT | 同一 ID 已用于不同参数，确认旧操作后使用新 ID |
 | REQUEST_LIMIT / CACHED_DETAILS_OMITTED | 缓存容量满交管理员处理；详情省略时读取真实状态 |

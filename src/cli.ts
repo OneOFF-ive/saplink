@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 import { Command, CommanderError } from 'commander';
-import { input, password, confirm } from '@inquirer/prompts';
+import { input, password, confirm, select } from '@inquirer/prompts';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { open, readFile, unlink } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { appVersion } from './version.js';
-import { ConfigStore, WindowsCredentials, connectionSchema, type Connection } from './config.js';
+import { ConfigStore, WindowsCredentials, connectionSchema, connectionBaseUrl, connectionIdentityChanged, type Connection } from './config.js';
 import { AdtBackend } from './adt.js';
 import { AppError } from './errors.js';
 import { acquireLease } from './lease.js';
@@ -48,6 +48,7 @@ async function mutate<T>(action: () => Promise<T>, connectionChange = true): Pro
 type ConnectionOptions = {
   url?: string; client?: string; username?: string; language?: string;
   enableWrites?: boolean; disableWrites?: boolean; passwordPrompt?: boolean;
+  transport?: string; rfcAshost?: string; rfcSysnr?: string; rfcSaprouter?: string; clearRfcSaprouter?: boolean; httpTransport?: boolean;
 };
 
 function addConnectionOptions(command: Command) {
@@ -55,6 +56,12 @@ function addConnectionOptions(command: Command) {
     .option('--client <client>', 'Three-digit SAP Client, preserving leading zeros')
     .option('--username <username>', 'SAP login username')
     .option('--language <language>', 'Two-letter language, e.g. EN')
+    .option('--transport <http|rfc>', 'Connection transport; existing connections preserve their configured transport')
+    .option('--rfc-ashost <host>', 'Use ADT over RFC via this application server')
+    .option('--rfc-sysnr <number>', 'Two-digit RFC system number; required with a new RFC host')
+    .option('--rfc-saprouter <route>', 'Optional non-secret SAProuter hops, e.g. /H/router.example/S/3299')
+    .option('--clear-rfc-saprouter', 'Remove the saved router route and connect directly over RFC')
+    .option('--http-transport', 'Use HTTP transport and remove RFC settings')
     .option('--enable-writes', 'Explicitly enable writes on this connection')
     .option('--disable-writes', 'Disable writes on this connection')
     .option('--password-prompt', 'Ask the human for the password in a local Windows dialog');
@@ -62,29 +69,46 @@ function addConnectionOptions(command: Command) {
 
 async function connectionInput(name: string, options: ConnectionOptions, old?: Connection) {
   if (options.enableWrites && options.disableWrites) throw new AppError('INVALID_INPUT', 'Choose either --enable-writes or --disable-writes.');
+  if (options.transport !== undefined && !['http', 'rfc'].includes(options.transport)) throw new AppError('INVALID_INPUT', 'Transport must be http or rfc.');
+  const hasRfcOptions = options.rfcAshost !== undefined || options.rfcSysnr !== undefined || options.rfcSaprouter !== undefined || options.clearRfcSaprouter;
+  if ((options.httpTransport || options.transport === 'http') && (hasRfcOptions || options.transport === 'rfc'))
+    throw new AppError('INVALID_INPUT', 'Choose either HTTP transport or RFC settings.');
+  if (options.rfcSaprouter !== undefined && options.clearRfcSaprouter) throw new AppError('INVALID_INPUT', 'Choose a router route or clear it, not both.');
+  let transport = options.httpTransport ? 'http' : options.transport ?? (hasRfcOptions || old?.rfc ? 'rfc' : 'http');
+  let rfc = transport === 'rfc' ? { ashost: options.rfcAshost ?? old?.rfc?.ashost, sysnr: options.rfcSysnr ?? old?.rfc?.sysnr,
+    saprouter: options.clearRfcSaprouter ? undefined : options.rfcSaprouter ?? old?.rfc?.saprouter } : undefined;
   const hasOptions = Object.values(options).some(value => value !== undefined);
   const interactive = !jsonOutput && Boolean(process.stdin.isTTY) && !hasOptions;
   let fields;
   if (interactive) {
+    transport = await select({ message: 'Connection type:', default: !old || old.rfc ? 'rfc' : 'http',
+      choices: [{ name: 'RFC / JCo', value: 'rfc' }, { name: 'HTTP / HTTPS', value: 'http' }] });
+    rfc = transport === 'rfc' ? {
+      ashost: await input({ message: 'RFC application server:', default: old?.rfc?.ashost }),
+      sysnr: await input({ message: 'RFC system number (two digits):', default: old?.rfc?.sysnr ?? '00' }),
+      saprouter: await input({ message: 'SAProuter route (optional, e.g. /H/router/S/3299; no route passwords):', default: old?.rfc?.saprouter })
+    } : undefined;
     fields = {
-      base_url: await input({ message: 'ADT server URL (HTTPS recommended):', default: old?.base_url }),
+      base_url: transport === 'rfc' ? undefined : await input({ message: 'ADT server URL (HTTPS recommended):', default: old?.rfc ? undefined : old?.base_url }),
       client: await input({ message: 'Client (three digits):', default: old?.client ?? '100' }),
       username: await input({ message: 'SAP username:', default: old?.username }),
       language: (await input({ message: 'Language:', default: old?.language ?? 'EN' })).toUpperCase(),
       write_enabled: await confirm({ message: 'Enable program writes?', default: old?.write_enabled ?? false })
     };
   } else {
-    if (!old && (!options.url || !options.client || !options.username)) {
-      throw new AppError('INTERACTION_REQUIRED', 'Provide --url, --client and --username; use --password-prompt for secure local password entry.');
+    if (!old && ((transport === 'http' && !options.url) || !options.client || !options.username)) {
+      throw new AppError('INTERACTION_REQUIRED', 'Provide --client and --username, plus --url for HTTP; use --password-prompt for secure local password entry.');
     }
     fields = {
-      base_url: options.url ?? old?.base_url, client: options.client ?? old?.client,
+      base_url: options.url ?? (transport === 'http' ? old?.base_url : undefined), client: options.client ?? old?.client,
       username: options.username ?? old?.username, language: (options.language ?? old?.language ?? 'EN').toUpperCase(),
       write_enabled: options.enableWrites ? true : options.disableWrites ? false : old?.write_enabled ?? false
     };
   }
-  const connection = connectionSchema.parse({ ...fields, name, connection_id: old?.connection_id ?? randomUUID() });
-  const identityChanged = Boolean(old && (connection.base_url !== old.base_url || connection.username !== old.username || connection.client !== old.client));
+  const validatedRfc = connectionSchema.pick({ rfc: true }).parse({ rfc }).rfc;
+  const connection = connectionSchema.parse({ ...fields, base_url: connectionBaseUrl(fields.base_url, validatedRfc, old),
+    ...(validatedRfc ? { rfc: validatedRfc } : {}), name, connection_id: old?.connection_id ?? randomUUID() });
+  const identityChanged = Boolean(old && connectionIdentityChanged(old, connection));
   let replacePassword = !old || identityChanged || Boolean(options.passwordPrompt);
   if (interactive && old && !identityChanged) replacePassword = await confirm({ message: 'Replace stored password?', default: false });
   let secret: string | undefined;
@@ -238,22 +262,23 @@ connections.command('test <name>').action(async name => {
 
 const token = cli.command('token').description('Manage MCP tokens; AI use should write secrets to a file');
 token.command('list').action(async () => {
-  printSuccess((await store.load()).tokens.map(({ id, created_at }) => ({ id, created_at })), jsonOutput);
+  printSuccess((await store.load()).tokens.map(({ id, name, created_at }) => ({ id, name, created_at })), jsonOutput);
 });
 token.command('create').option('--out <file>', 'Write the secret to a NEW local file; do not print it')
+  .option('--name <name>', 'Display name for this token')
   .action(async options => {
     if (!options.out && (jsonOutput || !process.stdout.isTTY)) {
       throw new AppError('TOKEN_OUTPUT_REQUIRED', 'Use --out <new-local-file> to avoid printing the token into captured AI output.');
     }
     const result = await mutate(async () => {
-      if (!options.out) return store.createToken();
+      if (!options.out) return store.createToken(options.name);
       const path = resolve(options.out);
       const file = await open(path, 'wx', 0o600);
       let created: Awaited<ReturnType<ConfigStore['createToken']>> | undefined;
       try {
-        created = await store.createToken();
+        created = await store.createToken(options.name);
         await file.writeFile(JSON.stringify(created, null, 2) + '\n');
-        return { id: created.id, token_file: path, contains_secret: true };
+        return { id: created.id, name: created.name, token_file: path, contains_secret: true };
       } catch (error) {
         if (created) {
           const config = await store.load();
@@ -267,6 +292,11 @@ token.command('create').option('--out <file>', 'Write the secret to a NEW local 
     }, false);
     printSuccess(result, jsonOutput);
   });
+token.command('rename <id>').requiredOption('--name <name>', 'New display name')
+  .action(async (id, options) => {
+    printSuccess(await mutate(() => store.renameToken(id, options.name), false), jsonOutput);
+  });
+
 token.command('revoke <id>').action(async id => {
   const result = await mutate(async () => {
     const config = await store.load();

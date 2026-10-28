@@ -2,7 +2,7 @@ import express from 'express';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
-import { connectionSchema, connectionFieldHints, type ConfigStore, type Credentials } from './config.js';
+import { connectionSchema, connectionBaseUrl, connectionFieldHints, connectionIdentityChanged, type ConfigStore, type Credentials } from './config.js';
 import { AdtBackend } from './adt.js';
 import { Operations } from './operations.js';
 import { startHttp } from './server.js';
@@ -14,14 +14,18 @@ import { getAutomaticUpdate } from './updates.js';
 import { appVersion } from './version.js';
 import { SelfUpdater } from './self-update.js';
 import { localPortInUse } from './local-port.js';
+import { readSapLogon } from './sap-logon.js';
+import { checkRfcEnvironment, discoverRfcEnvironment, saveRfcEnvironment } from './rfc-environment.js';
 
 const draft = connectionSchema.omit({ connection_id: true }).extend({
+  base_url: connectionSchema.shape.base_url.optional(),
   write_enabled: z.boolean(),
   password: z.string().max(512).optional()
 }).strict();
 
 function validationResponse(error: z.ZodError) {
-  const fields = [...new Set(error.issues.map(issue => String(issue.path[0] ?? '')))]
+  const fields = [...new Set(error.issues.map(issue => issue.path[0] === 'rfc' && issue.path.length > 1
+    ? `rfc_${String(issue.path[1])}` : String(issue.path[0] ?? '')))]
     .filter(field => Object.hasOwn(connectionFieldHints, field))
     .map(field => ({ field, message: connectionFieldHints[field] }));
   const message = fields.length
@@ -130,8 +134,9 @@ export async function startAdmin(store: ConfigStore, credentials: Credentials, p
     res.json({
       version: appVersion,
       connections: config.connections,
-      tokens: config.tokens.map(({ id, created_at }) => ({
+      tokens: config.tokens.map(({ id, name, created_at }) => ({
         id,
+        name,
         created_at
       })),
       running: Boolean(state.current),
@@ -140,6 +145,23 @@ export async function startAdmin(store: ConfigStore, credentials: Credentials, p
       mcp_port: state.port,
       busy
     });
+  });
+  app.get('/api/sap-logon/connections', async (_req, res) => {
+    res.json(await readSapLogon());
+  });
+  app.get('/api/rfc/environment', (_req, res) => {
+    res.json(discoverRfcEnvironment({ directory: store.directory }));
+  });
+  app.post('/api/rfc/environment/check', async (req, res) => {
+    z.object({}).strict().parse(req.body ?? {});
+    res.json(await exclusive(() => checkRfcEnvironment({ directory: store.directory })));
+  });
+  app.put('/api/rfc/environment', async (req, res) => {
+    const settings = await exclusive(() => changeConfig(async () => {
+      if (state.current) throw new AppError('MCP_RUNNING', '请先停止 MCP 服务再更改 RFC 运行环境。');
+      return saveRfcEnvironment(store.directory, req.body);
+    }));
+    res.json({ settings });
   });
   app.post('/api/updates/check', async (req, res) => {
     z.object({}).strict().parse(req.body ?? {});
@@ -190,6 +212,7 @@ export async function startAdmin(store: ConfigStore, credentials: Credentials, p
       const { password, ...fields } = p;
       const c = connectionSchema.parse({
         ...fields,
+        base_url: connectionBaseUrl(fields.base_url, fields.rfc),
         connection_id: randomUUID()
       });
       const config = await store.load();
@@ -221,11 +244,12 @@ export async function startAdmin(store: ConfigStore, credentials: Credentials, p
       const old = config.connections[index];
       const updated = connectionSchema.parse({
         ...fields,
+        base_url: connectionBaseUrl(fields.base_url, fields.rfc, old),
         connection_id: old.connection_id
       });
       if (config.connections.some(c => c !== old && c.name === updated.name))
         throw new AppError('DUPLICATE_NAME', '连接名称已存在');
-      if (!password && (old.base_url !== updated.base_url || old.username !== updated.username || old.client !== updated.client))
+      if (!password && connectionIdentityChanged(old, updated))
         throw new AppError('PASSWORD_REQUIRED', '地址或登录身份已变更，请重新输入密码');
       let previous: string | undefined;
       if (password) {
@@ -271,7 +295,14 @@ export async function startAdmin(store: ConfigStore, credentials: Credentials, p
     }));
     res.json({ success: true });
   });
-  app.post('/api/tokens', async (_req, res) => { res.json(await exclusive(() => changeConfig(() => store.createToken()))); });
+  app.post('/api/tokens', async (req, res) => {
+    const p = z.object({ name: z.string().optional() }).strict().parse(req.body ?? {});
+    res.json(await exclusive(() => changeConfig(() => store.createToken(p.name))));
+  });
+  app.put('/api/tokens/:id', async (req, res) => {
+    const p = z.object({ name: z.string() }).strict().parse(req.body);
+    res.json(await exclusive(() => changeConfig(() => store.renameToken(req.params.id as string, p.name))));
+  });
   app.delete('/api/tokens/:id', async (req, res) => {
     await exclusive(() => changeConfig(async () => {
       const config = await store.load();
@@ -318,7 +349,8 @@ export async function startAdmin(store: ConfigStore, credentials: Credentials, p
     setImmediate(() => { void (requestExit ? requestExit() : close()).catch(() => { process.exitCode = 1; }); });
   });
   const assets = fileURLToPath(new URL('../web/', import.meta.url));
-  app.get('/icons.js', (_req, res) => res.sendFile(fileURLToPath(new URL('../node_modules/lucide/dist/umd/lucide.js', import.meta.url))));
+  // This fixed asset may live beneath a .codex worktree; no user-supplied path is accepted.
+  app.get('/icons.js', (_req, res) => res.sendFile(fileURLToPath(new URL('../node_modules/lucide/dist/umd/lucide.js', import.meta.url)), { dotfiles: 'allow' }));
   app.use(express.static(assets, { etag: false }));
   app.use((_req, res) => res.sendStatus(404));
   app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

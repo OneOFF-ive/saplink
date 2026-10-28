@@ -2,7 +2,7 @@
 
 本文说明 SapLink 当前源码的模块、接口和操作流程，核对时 package.json 版本为 1.0.1，不表示该版本已公开发布。产品介绍见 [README](../README.md)，安装与使用步骤见 [部署与运维手册](operations.md)。CLI 入口和包名为 saplink；配置目录、凭据服务名、环境变量和安装登记标识见[命名与本地数据](local-data.md)。
 
-文档核对日期：2026-10-18。客户端操作见 [MCP 客户端手册](mcp-client-guide.md)，部署与排障见 [运维手册](operations.md)，外部分发链路见 [发布与 Actions](releases-and-actions.md)。本文描述实现，不表示所有功能已在每个 SAP 版本验证。
+客户端操作见 [MCP 客户端手册](mcp-client-guide.md)，部署与排障见 [运维手册](operations.md)，外部分发链路见 [发布与 Actions](releases-and-actions.md)。本文描述实现，不表示所有功能已在每个 SAP 版本验证。
 
 ## 1. 目标与范围
 
@@ -27,7 +27,7 @@
 - 创建函数组与空函数模块，浏览成员，修改及检查函数模块和组内 Include；通过组快照校验整体激活。
 - 对象锁、版本冲突、传输请求和部分失败处理。
 
-当前不提供 stdio MCP、SAP GUI 配置解析、RFC、SAProuter、SNC/SSO、调试、任意 ABAP 执行、删除对象或释放传输请求。
+当前不提供 stdio MCP、SNC/SSO、调试、任意 ABAP 执行、删除对象或释放传输请求。RFC/JCo 支持应用服务器直连或不带路由密码的 SAProuter，以及从本地 SAP Logon 配置导入连接参数；配置及能力边界见 [ADT over RFC](rfc-transport.md)。
 
 ## 2. 总体架构
 
@@ -47,7 +47,7 @@ flowchart LR
     Operations --> Audit[本地操作记录]
 ```
 
-采用单进程模块化结构，不拆分微服务。CLI 启动服务后，各连接按需建立独立 SAP 会话。MCP 会话不等于 SAP 会话，不向 agent 暴露 SAP cookie、CSRF token 或锁句柄。
+主体采用单进程模块化结构，不拆分微服务。可选 RFC 模式由主体管理各通道的 Java/JCo 子进程，通过私有管道通信。CLI 启动服务后，各连接按需建立独立 SAP 会话。MCP 会话不等于 SAP 会话，不向 agent 暴露 SAP cookie、CSRF token 或锁句柄。
 
 技术栈：TypeScript、Node.js、官方 MCP TypeScript SDK、Express、Zod、`abap-adt-api` 和 Axios。Windows 凭据使用 `@napi-rs/keyring`，依赖版本记录在 package.json 与 package-lock.json。业务层通过 Backend 接口调用 ADT 适配器。
 
@@ -69,7 +69,7 @@ flowchart LR
 | --- | --- |
 | `src/tool-definitions.ts` | 导出 toolSchemas、ToolName 和 toolDescription，集中维护参数校验及客户端描述 |
 | `src/quality-tools.ts` | ATC/Unit schema、单对象执行、结果汇总和版本读取；分析会话禁用隐式执行重放 |
-| `src/source-versions.ts` | 历史 Atom 解析和发现资源的同源 ADT 链接校验 |
+| `src/source-versions.ts` | 历史 Atom 解析；HTTP 同源校验，RFC 当前对象范围内的 ADT 路径校验 |
 | `src/source-diff.ts` | 有界行差异计算和输出截断 |
 | `src/reference-query.ts` | where-used 节点与片段两阶段查询、XML 标识转义、位置去重和展开预算及部分结果 |
 | `src/repository-query.ts` | 仓库语义查询的 schema、只读 ADT 适配、源码定位、域值字符串解析及嵌套结果数量限制 |
@@ -234,7 +234,7 @@ create_transport_request 是写操作，复用连接 write_enabled、串行队�
 
 语法检查针对明确版本调用后端支持的检查能力，返回结构化诊断。激活是独立写操作：在编辑锁内核对 inactive revision，释放编辑锁后再次核对，再调用 SAP 激活接口，由激活接口获取所需锁。解锁失败或版本变化时不发出激活请求；激活成功后读回 active 源码进行验证。解锁到激活之间存在并发窗口，不承诺原子版本条件激活。
 
-多对象激活顺序执行，失败即停止；返回已完成结果和 failed_object_uri，不回滚先前对象。激活成功后读回沿用保存比较策略。组整体激活包含组快照中的成员；服务不激活无关对象的全部 inactive 版本，不承诺跨对象原子性。
+多对象激活先统一校验全部版本，再以一个集合提交给 SAP；不按输入顺序逐个激活。返回逐对象 results，组内嵌 member_results；即使提交失败或结果未知，也尽可能读回全部成员，区分已核实、草稿仍在、内容不一致和无法核实。读回沿用保存比较策略。组内 inactive 成员、组容器与其他已选对象使用同一联合请求；不自动纳入额外依赖或回滚，不承诺跨对象原子性。
 
 ## 9. 错误与恢复
 
@@ -272,7 +272,7 @@ create_transport_request 是写操作，复用连接 write_enabled、串行队�
 
 进程被强制终止时锁清理无法保证。操作记录应保留可用于核实的连接、对象、完成阶段和清理状态，不提供强制解锁或自动回滚工具。
 
-函数组激活实现补充：不再提交带手工 type/parentUri 的批量引用；先完整验证成员归属，再使用与单对象激活相同的最小引用格式逐个激活 inactive 成员，最后激活组容器。成功与失败结果均保留 member_results，失败后不继续执行或自动重试；已成功的成员不会回滚。完成后仍读回快照内所有成员校验。成员内容校验哈希统一忽略纯空行和换行格式，原始源码 revision 不变。
+联合激活实现补充：先完整验证成员归属，以最小 URI/name 引用集合提交首个激活请求，兼容拒绝初始手工 type/parentUri 的后端。若 SAP 返回 preaudit 待确认对象，核对 URI、名称、类型、父对象、所有者与删除标记，仅在审阅范围内最多提交一次第二阶段的联合请求。超范围对象返回 ACTIVATION_SCOPE_INVALID，并列出 unapproved_objects；不循环重试或逐个降级激活。成员内容校验哈希统一忽略纯空行和换行格式，原始源码 revision 不变。版本复核在元数据准备完成、首个请求发送前执行；仍有 SAP 获取锁前的并发窗口。验证边界及结果字段见[联合激活说明](mcp-client-guide.md#多对象依赖与联合激活)。
 
 ## 10. 本地数据与操作记录
 

@@ -7,6 +7,7 @@ import { AdtBackend } from './adt.js';
 import { serviceStatus } from './service.js';
 import { cliFailure } from './cli-output.js';
 import { localPortInUse } from './local-port.js';
+import { checkRfcEnvironment } from './rfc-environment.js';
 
 type Check = { name: string; status: 'passed' | 'warning' | 'failed'; message: string };
 
@@ -69,6 +70,12 @@ export async function doctor(store: ConfigStore, credentials: Credentials, port:
   } catch (error) { add('service', 'failed', cliFailure(error).message); }
 
   if (config && process.platform === 'win32') {
+    if (config.connections.some(connection => connection.rfc)) {
+      try {
+        const environment = await checkRfcEnvironment({ directory: store.directory });
+        for (const check of environment.checks) add(`rfc:${check.name}`, check.passed ? 'passed' : 'failed', check.message);
+      } catch { add('rfc:environment', 'failed', 'RFC 运行环境配置无效，请在管理页面重新设置。'); }
+    }
     for (const connection of config.connections) {
       try {
         await credentials.get(connection.connection_id);

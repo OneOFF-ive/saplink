@@ -12,6 +12,7 @@
 | 管理连接、令牌、服务与日志 | [部署与运维手册](operations.md) |
 | 让终端型 AI 客户端管理本地服务 | [AI 终端管理](ai-management.md) |
 | 理解模块、会话、锁和版本保护 | [架构文档](architecture.md) |
+| 配置可选的 RFC/JCo 传输与验证范围 | [ADT over RFC](rfc-transport.md) |
 | 运行源码、测试与构建安装包 | [开发与构建指南](development.md) |
 | 发布正式版、配置 secrets 与排查 Actions 同步 | [发布与 GitHub Actions](releases-and-actions.md) |
 | 了解安全边界与异常锁文件恢复 | [安全说明](security.md) |

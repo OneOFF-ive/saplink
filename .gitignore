@@ -6,4 +6,5 @@ dist/
 coverage/
 __pycache__/
 /outputs/
+/bridge/classes/
 .DS_Store

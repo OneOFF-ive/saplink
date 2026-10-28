@@ -117,7 +117,7 @@ function render() {
   $('#app-version').textContent = state.version ? `SapLink ${state.version}` : 'SapLink';
   renderUpdate();
   const query = $('#search').value.toLowerCase();
-  const connections = state.connections.filter(c => [c.name, c.base_url, c.username].some(v => v.toLowerCase().includes(query)));
+  const connections = state.connections.filter(c => [c.name, c.base_url, c.username, c.rfc?.ashost ?? '', c.rfc?.saprouter ?? ''].some(v => v.toLowerCase().includes(query)));
   $('#connection-count').textContent = state.connections.length;
   $('#connection-total').textContent = `${state.connections.length} 个连接`;
   $('#empty-connections').hidden = connections.length !== 0;
@@ -125,8 +125,13 @@ function render() {
   const rows = $('#connection-rows'); rows.replaceChildren();
   for (const c of connections) {
     const row = element('tr');
-    const name = element('td'); name.append(element('strong', c.name), element('small', c.language));
-    const address = element('td'); const url = element('div', c.base_url, 'address'); url.title = c.base_url; address.append(url);
+    const name = element('td'); const identity = element('div', undefined, 'connection-identity');
+    const symbol = element('span', undefined, 'connection-symbol'); symbol.append(icon(c.rfc ? 'network' : 'globe'));
+    const detail = element('div'); detail.append(element('strong', c.name), element('small', `${c.rfc ? 'RFC / JCo' : 'HTTP / HTTPS'} · ${c.language}`));
+    identity.append(symbol, detail); name.append(identity);
+    const address = element('td'); const connectionAddress = c.rfc ? `RFC ${c.rfc.ashost} / ${c.rfc.sysnr}` : c.base_url;
+    const url = element('div', connectionAddress, 'address'); url.title = connectionAddress; address.append(url);
+    if (c.rfc?.saprouter) { const route = element('small', '经 SAProuter'); route.title = c.rfc.saprouter; address.append(route); }
     const login = element('td'); login.append(element('strong', c.client), element('small', c.username));
     const access = element('td'); access.append(badge(c.write_enabled ? '允许写入' : '只读', c.write_enabled ? 'writable' : 'neutral'));
     const test = element('td'); const result = tests.get(c.connection_id);
@@ -139,10 +144,11 @@ function render() {
   }
   const tokens = $('#token-rows'); tokens.replaceChildren();
   for (const t of state.tokens) {
-    const row = element('tr'); const id = element('td'); id.append(element('code', t.id));
+    const row = element('tr'); const name = element('td'); name.append(element('strong', t.name ?? '未命名令牌'));
     const actions = element('td'); const group = element('div', undefined, 'row-actions');
-    group.append(buttonIcon('trash-2', '撤销令牌', () => confirmAction('撤销令牌', `撤销 ${t.id}？使用此令牌的客户端将无法连接。`, () => act(() => api(`tokens/${t.id}`, 'DELETE'))), working, true));
-    actions.append(group); row.append(id, element('td', new Date(t.created_at).toLocaleString()), actions); tokens.append(row);
+    group.append(buttonIcon('pencil', '修改令牌名称', () => openTokenName(t), working),
+      buttonIcon('trash-2', '撤销令牌', () => confirmAction('撤销令牌', `撤销“${t.name ?? '未命名令牌'}”（创建于 ${new Date(t.created_at).toLocaleString()}）？使用此令牌的客户端将无法连接。`, () => act(() => api(`tokens/${t.id}`, 'DELETE'))), working, true));
+    actions.append(group); row.append(name, element('td', new Date(t.created_at).toLocaleString()), actions); tokens.append(row);
   }
   $('#empty-tokens').hidden = state.tokens.length !== 0;
   $('#tokens-view .table-wrap').hidden = state.tokens.length === 0;
@@ -181,7 +187,13 @@ function openConnection(connection) {
     form.elements[key].value = values[key];
   }
   form.elements.write_enabled.checked = values.write_enabled;
+  form.elements.transport.value = !connection || values.rfc ? 'rfc' : 'http';
+  form.elements.rfc_ashost.value = values.rfc?.ashost ?? '';
+  form.elements.rfc_sysnr.value = values.rfc?.sysnr ?? '';
+  form.elements.rfc_saprouter.value = values.rfc?.saprouter ?? '';
+  updateRfcFields();
   form.elements.password.required = !connection; $('#password-hint').hidden = !connection;
+  $('#password-hint').textContent = '留空保留已保存密码；更改连接方式、目标或 SAProuter 路由时需重新输入。';
   $('#connection-dialog').showModal();
 }
 function confirmAction(title, message, action) {
@@ -195,6 +207,76 @@ async function testConnection(c) {
   tests.set(c.connection_id, result ? { label: '连接成功', kind: 'success' } : { label: '连接失败', kind: 'error' }); render();
 }
 const connectionForm = $('#connection-form');
+function updateRfcFields() {
+  const enabled = $('#connection-form').elements.transport.value === 'rfc';
+  $('#sap-logon-import').hidden = !enabled || Boolean(editing);
+  $('#rfc-fields').hidden = !enabled;
+  $('#rfc-address-hint').hidden = !enabled;
+  $('#saprouter-field').hidden = !enabled;
+  $('#connection-url-field').hidden = enabled;
+  $('#connection-form').elements.base_url.disabled = enabled;
+  $('#connection-form').elements.base_url.required = !enabled;
+  $('#connection-form').elements.rfc_saprouter.disabled = !enabled;
+  for (const name of ['rfc_ashost', 'rfc_sysnr']) {
+    $('#connection-form').elements[name].disabled = !enabled;
+    $('#connection-form').elements[name].required = enabled;
+  }
+}
+connectionForm.elements.transport.onchange = updateRfcFields;
+let sapLogonConnections = [];
+let sapLogonWarnings = [];
+function applySapLogon(entry) {
+  if (editing || connectionForm.elements.transport.value !== 'rfc' || !entry.available || !entry.rfc) return;
+  const fields = connectionForm.elements;
+  fields.rfc_ashost.value = entry.rfc.ashost;
+  fields.rfc_sysnr.value = entry.rfc.sysnr;
+  fields.rfc_saprouter.value = entry.rfc.saprouter ?? '';
+  if (entry.client) fields.client.value = entry.client;
+  if (entry.language) {
+    if (![...fields.language.options].some(option => option.value === entry.language)) fields.language.append(new Option(entry.language, entry.language));
+    fields.language.value = entry.language;
+  }
+  for (const name of ['rfc_ashost', 'rfc_sysnr', 'rfc_saprouter', 'client', 'language']) {
+    fields[name].setCustomValidity(''); fields[name].removeAttribute('aria-invalid');
+  }
+  $('#form-error').textContent = '';
+  $('#sap-logon-dialog').close();
+  toast('已填入连接参数，请填写连接名称、用户名和密码');
+}
+function renderSapLogon() {
+  const query = $('#sap-logon-search').value.trim().toLowerCase();
+  const list = $('#sap-logon-list'); list.replaceChildren();
+  const matches = sapLogonConnections.filter(entry => [entry.label, entry.system_id, entry.rfc?.ashost ?? '', entry.rfc?.saprouter ?? ''].some(value => value.toLowerCase().includes(query)));
+  $('#sap-logon-status').textContent = [query ? `匹配 ${matches.length} 个连接，共 ${sapLogonConnections.length} 个。` : `找到 ${sapLogonConnections.length} 个连接，点击即可填入。`, ...sapLogonWarnings].join(' ');
+  for (const entry of matches) {
+    const row = element('button', undefined, 'sap-logon-entry'); row.type = 'button';
+    row.disabled = !entry.available;
+    row.setAttribute('aria-label', `${entry.available ? '导入' : '暂不支持'} ${entry.label}`);
+    const symbol = element('span', undefined, 'sap-logon-symbol'); symbol.append(icon('server'));
+    const details = element('span', undefined, 'sap-logon-details'); details.append(element('strong', entry.label));
+    const address = entry.rfc ? `${entry.rfc.ashost} · 系统号 ${entry.rfc.sysnr}` : entry.reason;
+    details.append(element('span', [entry.system_id, address].filter(Boolean).join(' · '), 'field-hint'));
+    if (entry.rfc?.saprouter) details.append(element('span', `Router：${entry.rfc.saprouter}`, 'field-hint'));
+    const action = element('span', undefined, 'sap-logon-action'); action.append(icon(entry.available ? 'arrow-right' : 'circle-slash'));
+    row.onclick = () => applySapLogon(entry); row.append(symbol, details, action); list.append(row);
+  }
+  if (!matches.length) list.append(element('p', sapLogonConnections.length ? '没有匹配的连接。' : '未找到本地 SAP Logon 连接，可以关闭此窗口手动填写。', 'field-hint'));
+  icons();
+}
+$('#sap-logon-search').oninput = renderSapLogon;
+$('#import-sap-logon').onclick = async () => {
+  if (editing || connectionForm.elements.transport.value !== 'rfc') return;
+  sapLogonConnections = []; sapLogonWarnings = []; $('#sap-logon-search').value = '';
+  $('#sap-logon-list').replaceChildren(); $('#sap-logon-status').textContent = '正在读取本地连接…';
+  $('#sap-logon-dialog').showModal();
+  $('#sap-logon-search').focus();
+  try {
+    const result = await api('sap-logon/connections');
+    sapLogonConnections = result.connections;
+    sapLogonWarnings = result.warnings;
+    renderSapLogon();
+  } catch (error) { $('#sap-logon-status').textContent = error.message; }
+};
 for (const control of connectionForm.querySelectorAll('input, select')) {
   control.addEventListener('input', () => {
     control.setCustomValidity('');
@@ -213,8 +295,10 @@ for (const control of connectionForm.querySelectorAll('input, select')) {
 connectionForm.onsubmit = async event => {
   event.preventDefault(); if (working) return;
   const form = event.currentTarget; const fields = Object.fromEntries(new FormData(form));
-  const data = { name: fields.name, base_url: fields.base_url, client: fields.client, username: fields.username,
+  const data = { name: fields.name, ...(fields.transport === 'rfc' ? {} : { base_url: fields.base_url }), client: fields.client, username: fields.username,
     language: fields.language, write_enabled: form.elements.write_enabled.checked,
+    ...(fields.transport === 'rfc' ? { rfc: { ashost: fields.rfc_ashost, sysnr: fields.rfc_sysnr,
+      ...(fields.rfc_saprouter?.trim() ? { saprouter: fields.rfc_saprouter.trim() } : {}) } } : {}),
     ...(fields.password ? { password: fields.password } : {}) };
   working = true; render(); form.querySelector('[type=submit]').disabled = true;
   try { await api(editing ? `connections/${editing.connection_id}` : 'connections', editing ? 'PUT' : 'POST', data);
@@ -249,9 +333,79 @@ for (const node of document.querySelectorAll('.nav')) node.onclick = () => {
 $('#add-connection').onclick = $('#empty-add').onclick = () => openConnection();
 $('#search').oninput = render;
 $('#port').oninput = () => { $('#mcp-url').textContent = `http://127.0.0.1:${$('#port').value}/mcp`; };
-$('#create-token').onclick = async () => {
-  const result = await act(() => api('tokens', 'POST'), null);
-  if (result) { $('#new-token').value = `Bearer ${result.token}`; $('#token-dialog').showModal(); }
+let editingToken;
+function openTokenName(token) {
+  editingToken = token;
+  $('#token-name-form').reset(); $('#token-name-error').textContent = '';
+  $('#token-name-title').textContent = token ? '修改令牌名称' : '创建访问令牌';
+  $('#token-name-submit').textContent = token ? '保存名称' : '创建令牌';
+  $('#token-name').value = token?.name ?? '';
+  $('#token-name-dialog').showModal(); $('#token-name').focus();
+}
+$('#create-token').onclick = () => openTokenName();
+let environmentBusy = false;
+function renderRfcEnvironment(result) {
+  const detected = result.detected ?? { java: result.java, jco_jar: result.jar };
+  const source = { settings: '已保存', environment: '环境变量', bundled: '安装包自带', system: '本机检测' };
+  $('#rfc-java-detected').textContent = detected.java ? `${source[detected.java.source]}：${detected.java.path}` : '尚未找到 Java';
+  $('#rfc-jco-detected').textContent = detected.jco_jar ? `${source[detected.jco_jar.source]}：${detected.jco_jar.path}` : '尚未找到 JCo';
+  const checks = $('#rfc-environment-checks'); checks.replaceChildren();
+  for (const check of result.checks ?? []) {
+    const row = element('div', undefined, `environment-check ${check.passed ? 'success' : 'error'}`);
+    row.append(icon(check.passed ? 'circle-check' : 'circle-alert'), element('span', check.message)); checks.append(row);
+  }
+  $('#rfc-environment-status').textContent = result.versions ? `Java ${result.versions.java} · ${result.versions.architecture} · JCo ${result.versions.jco}` : '';
+  icons();
+}
+async function openRfcEnvironment() {
+  $('#rfc-environment-error').textContent = '';
+  $('#rfc-environment-status').textContent = '正在检测本机路径…';
+  $('#rfc-environment-checks').replaceChildren();
+  $('#rfc-environment-form').reset();
+  $('#rfc-environment-dialog').showModal();
+  try {
+    const result = await api('rfc/environment');
+    for (const name of ['java_home', 'jco_directory']) $('#rfc-environment-form').elements[name].value = result.settings[name] ?? '';
+    renderRfcEnvironment(result);
+    $('#save-rfc-environment').disabled = state.running;
+    if (state.running) $('#rfc-environment-status').textContent = 'MCP 正在运行，可检查环境；更改路径前请先停止 MCP。';
+  } catch (error) { $('#rfc-environment-error').textContent = error.message; }
+}
+$('#open-rfc-environment').onclick = openRfcEnvironment;
+$('#open-rfc-environment-service').onclick = openRfcEnvironment;
+async function verifyRfcEnvironment(save) {
+  if (environmentBusy) return;
+  environmentBusy = true; $('#rfc-environment-error').textContent = '';
+  $('#check-rfc-environment').disabled = $('#save-rfc-environment').disabled = true;
+  $('#rfc-environment-status').textContent = '正在加载 Java 和 JCo…';
+  try {
+    if (save) {
+      const fields = $('#rfc-environment-form').elements;
+      await api('rfc/environment', 'PUT', Object.fromEntries(['java_home', 'jco_directory'].map(name => [name, fields[name].value.trim()]).filter(([, value]) => value)));
+    }
+    renderRfcEnvironment(await api('rfc/environment/check', 'POST', {}));
+  } catch (error) { $('#rfc-environment-error').textContent = error.message; $('#rfc-environment-status').textContent = ''; }
+  finally { environmentBusy = false; $('#check-rfc-environment').disabled = false; $('#save-rfc-environment').disabled = state.running; }
+}
+$('#rfc-environment-form').onsubmit = event => { event.preventDefault(); void verifyRfcEnvironment(true); };
+$('#check-rfc-environment').onclick = () => verifyRfcEnvironment(false);
+$('#token-name-form').onsubmit = async event => {
+  event.preventDefault(); if (working) return;
+  const name = $('#token-name').value.trim();
+  $('#token-name-error').textContent = '';
+  working = true; render(); $('#token-name-submit').disabled = true;
+  try {
+    const result = await api(editingToken ? `tokens/${editingToken.id}` : 'tokens', editingToken ? 'PUT' : 'POST', { name });
+    $('#token-name-dialog').close();
+    if (!editingToken) {
+      $('#created-token-name').textContent = result.name;
+      $('#new-token').value = `Bearer ${result.token}`; $('#token-dialog').showModal();
+    } else toast('令牌名称已更新');
+    await refresh();
+  } catch (error) {
+    if ($('#token-name-dialog').open) $('#token-name-error').textContent = error.message;
+    else toast(error.message, true);
+  } finally { working = false; $('#token-name-submit').disabled = false; render(); }
 };
 $('#start-service').onclick = () => act(() => api('service/start', 'POST', { port: Number($('#port').value) }), 'MCP 服务已启动');
 $('#clear-cache').onclick = async () => {

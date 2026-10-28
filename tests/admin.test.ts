@@ -32,6 +32,22 @@ test('local web management protects APIs and manages connections, credentials, t
     assert.ok(home.headers.get('content-security-policy')?.includes("frame-ancestors 'none'"));
     assert.equal((await fetch(`${origin}/icons.js`)).status, 200);
     assert.equal((await fetch(`${origin}/api/state`)).status, 401);
+    assert.equal((await fetch(`${origin}/api/sap-logon/connections`)).status, 401);
+    assert.equal((await fetch(`${origin}/api/rfc/environment`)).status, 401);
+    assert.equal((await api('rfc/environment')).status, 200);
+    assert.equal((await api('rfc/environment', 'PUT', { java_home: 'relative' })).body.error.code, 'INVALID_INPUT');
+    const localJco = join(directory, 'jco-files');
+    assert.equal((await api('rfc/environment', 'PUT', { jco_directory: localJco })).status, 200);
+    const environment = await api('rfc/environment');
+    assert.equal(environment.body.settings.jco_directory, localJco);
+    assert.equal(environment.body.jar.source, 'settings');
+    const checked = await api('rfc/environment/check', 'POST', {});
+    assert.equal(checked.status, 200); assert.equal(checked.body.healthy, false); assert.equal(checked.body.sap_connected, false);
+    assert.equal((await api('rfc/environment', 'PUT', {})).status, 200);
+    const imported = await api('sap-logon/connections'); assert.equal(imported.status, 200);
+    assert.ok(Array.isArray(imported.body.connections));
+    for (const entry of imported.body.connections) assert.ok(Object.keys(entry).every(key =>
+      ['id', 'label', 'system_id', 'available', 'reason', 'rfc', 'client', 'language'].includes(key)));
     const expectedVersion = JSON.parse(await readFile(join(process.cwd(), 'package.json'), 'utf8')).version;
     assert.equal((await api('state')).body.version, expectedVersion);
     assert.equal((await fetch(`${origin}/api/cache/clear`, { method: 'POST', headers: { Origin: origin } })).status, 401);
@@ -96,9 +112,46 @@ test('local web management protects APIs and manages connections, credentials, t
     assert.equal(changedTarget.body.error.code, 'PASSWORD_REQUIRED');
     const update = await api(`connections/${id}`, 'PUT', { ...draft, password: undefined, write_enabled: true });
     assert.equal(update.status, 200); assert.equal(update.body.connection_id, id);
-    const token = await api('tokens', 'POST'); assert.equal(token.status, 200);
+    const rfcDraft = { ...draft, rfc: { ashost: 'rfc.test', sysnr: '00' } };
+    assert.equal((await api(`connections/${id}`, 'PUT', { ...rfcDraft, password: undefined })).body.error.code, 'PASSWORD_REQUIRED');
+    const rfcUpdated = await api(`connections/${id}`, 'PUT', rfcDraft);
+    assert.equal(rfcUpdated.status, 200); assert.deepEqual(rfcUpdated.body.rfc, rfcDraft.rfc);
+    const simplifiedEdit = await api(`connections/${id}`, 'PUT', { ...rfcDraft, base_url: undefined, password: undefined });
+    assert.equal(simplifiedEdit.status, 200);
+    assert.equal(simplifiedEdit.body.base_url, rfcDraft.base_url, 'preserve legacy origin without changing login identity');
+    const simplifiedCreate = await api('connections', 'POST', { ...rfcDraft, name: 'simple_rfc', base_url: undefined });
+    assert.equal(simplifiedCreate.status, 200); assert.equal(simplifiedCreate.body.base_url, 'http://rfc.invalid');
+    assert.equal((await api(`connections/${simplifiedCreate.body.connection_id}`, 'DELETE')).status, 200);
+    assert.equal((await api('connections', 'POST', { ...draft, name: 'http_without_url', base_url: undefined })).status, 400);
+    const routedDraft = { ...rfcDraft, rfc: { ...rfcDraft.rfc, saprouter: '/H/router.example/S/3299' } };
+    assert.equal((await api(`connections/${id}`, 'PUT', { ...routedDraft, password: undefined })).body.error.code, 'PASSWORD_REQUIRED');
+    assert.equal((await store.load()).connections[0].rfc?.saprouter, undefined);
+    const routed = await api(`connections/${id}`, 'PUT', routedDraft);
+    assert.equal(routed.status, 200); assert.equal(routed.body.rfc.saprouter, routedDraft.rfc.saprouter);
+    const invalidRoute = await api(`connections/${id}`, 'PUT', { ...routedDraft, rfc: { ...routedDraft.rfc, saprouter: '/H/router/P/route-secret' } });
+    assert.equal(invalidRoute.status, 400); assert.equal(invalidRoute.body.error.fields[0].field, 'rfc_saprouter');
+    assert.equal(JSON.stringify(invalidRoute.body).includes('route-secret'), false);
+    assert.equal((await api(`connections/${id}`, 'PUT', { ...rfcDraft, password: undefined })).body.error.code, 'PASSWORD_REQUIRED');
+    assert.equal((await api(`connections/${id}`, 'PUT', rfcDraft)).status, 200);
+    assert.equal((await api(`connections/${id}`, 'PUT', { ...draft, password: undefined })).body.error.code, 'PASSWORD_REQUIRED');
+    assert.equal((await api(`connections/${id}`, 'PUT', draft)).status, 200);
+    const token = await api('tokens', 'POST', { name: '  开发客户端  ' }); assert.equal(token.status, 200);
+    assert.equal(token.body.name, '开发客户端');
+    const tokenBeforeRename = (await store.load()).tokens[0];
+    const renamed = await api(`tokens/${token.body.id}`, 'PUT', { name: '测试客户端' });
+    assert.equal(renamed.status, 200); assert.equal(renamed.body.name, '测试客户端');
+    assert.equal(renamed.body.token, undefined); assert.equal(renamed.body.hash, undefined);
+    assert.deepEqual((await store.load()).tokens[0], { ...tokenBeforeRename, name: '测试客户端' });
+    for (const name of ['', '   ', 'x'.repeat(81), 'line\nnext']) {
+      assert.equal((await api('tokens', 'POST', { name })).body.error.code, 'INVALID_INPUT');
+      assert.equal((await api(`tokens/${token.body.id}`, 'PUT', { name })).body.error.code, 'INVALID_INPUT');
+    }
+    assert.equal((await api('tokens/missing', 'PUT', { name: 'Missing' })).body.error.code, 'NOT_FOUND');
+    assert.equal((await fetch(`${origin}/api/tokens/${token.body.id}`, { method: 'PUT', headers: { Origin: origin, 'Content-Type': 'application/json' }, body: JSON.stringify({name:'Unauthorized'}) })).status, 401);
     assert.equal(await store.authenticate(token.body.token), true);
     const state = await api('state');
+    assert.equal(state.body.tokens[0].name, '测试客户端');
+    assert.equal(JSON.stringify(state.body).includes(tokenBeforeRename.hash), false);
     assert.equal(JSON.stringify(state.body).includes(token.body.token), false);
     assert.equal(JSON.stringify(state.body).includes('synthetic-secret'), false);
     assert.equal((await readFile(join(directory, 'config.json'), 'utf8')).includes('synthetic-secret'), false);
@@ -106,6 +159,7 @@ test('local web management protects APIs and manages connections, credentials, t
     const port = (probe.address() as { port: number }).port; await new Promise<void>(resolve => probe.close(() => resolve()));
     assert.equal((await api('service/start', 'POST', { port })).status, 200);
     assert.equal((await api('state')).body.running, true);
+    assert.equal((await api('rfc/environment', 'PUT', {})).body.error.code, 'MCP_RUNNING');
     const client = new Client({ name: 'cache-admin-test', version: '1' });
     try {
       await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), {

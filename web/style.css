@@ -1,19 +1,19 @@
 /* Follow the browser preference automatically, including changes while the page is open. */
 :root {
   color-scheme: light dark;
-  --page: #f7fbff;
+  --page: #f4f6fa;
   --surface: #ffffff;
-  --text: #172b42;
-  --text-secondary: #334d68;
-  --muted: #596f85;
-  --border: #d7e5f2;
-  --hover: #edf6ff;
-  --subtle: #f0f7ff;
-  --selected: #e0f0ff;
-  --accent: #1765b5;
-  --accent-hover: #105297;
+  --text: #182338;
+  --text-secondary: #3f4d63;
+  --muted: #69768a;
+  --border: #e1e6ef;
+  --hover: #f0f4fb;
+  --subtle: #f7f9fc;
+  --selected: #e6f2fb;
+  --accent: #007acc;
+  --accent-hover: #006bb3;
   --on-accent: #ffffff;
-  --focus: #1765b5;
+  --focus: #007acc;
   --success-bg: #e9f6ee;
   --success-text: #236846;
   --success-border: #b5d9c4;
@@ -38,10 +38,10 @@
     --hover: #282828;
     --subtle: #1e1e1e;
     --selected: #303030;
-    --accent: #eeeeee;
-    --accent-hover: #d4d4d4;
-    --on-accent: #111111;
-    --focus: #ffffff;
+    --accent: #2b7f9f;
+    --accent-hover: #348faf;
+    --on-accent: #ffffff;
+    --focus: #2b7f9f;
     --success-bg: #172b22;
     --success-text: #96d9b2;
     --success-border: #345a43;
@@ -81,11 +81,12 @@ button {
   gap:8px;
   cursor:pointer;
   border:1px solid var(--border);
-  border-radius:5px;
+  border-radius:9px;
   padding:9px 14px;
   color:var(--text-secondary);
   background:var(--surface);
-  min-height:38px
+  min-height:40px;
+  transition: background .16s ease, border-color .16s ease, box-shadow .16s ease
 }
 button:hover {
   background:var(--hover)
@@ -152,7 +153,8 @@ nav {
   background:transparent;
   padding:12px;
   min-height:44px;
-  color:var(--muted)
+  color:var(--muted);
+  border-radius:10px
 }
 .nav.active {
   background:var(--selected);
@@ -219,7 +221,7 @@ main {
   letter-spacing:0
 }
 h1 {
-  font-size:26px;
+  font-size:28px;
   font-weight:600;
   margin:0
 }
@@ -260,7 +262,7 @@ h2 {
   gap:8px;
   padding:0 12px;
   background:var(--surface);
-  border-radius:5px;
+  border-radius:10px;
   width:320px;
   max-width:100%;
   color:var(--muted)
@@ -278,9 +280,10 @@ h2 {
 }
 .table-wrap {
   overflow-x:auto;
-  border-top:1px solid var(--border);
-  border-bottom:1px solid var(--border);
-  background:var(--surface)
+  border:1px solid var(--border);
+  border-radius:14px;
+  background:var(--surface);
+  box-shadow:0 4px 22px var(--toast-shadow)
 }
 table {
   width:100%;
@@ -347,7 +350,7 @@ td small {
   font-weight:500;
   line-height:18px;
   padding:3px 9px;
-  border-radius:4px;
+  border-radius:20px;
   white-space:nowrap
 }
 .neutral {
@@ -438,15 +441,19 @@ code {
 }
 dialog {
   border:1px solid var(--border);
-  border-radius:8px;
-  padding:26px;
+  border-radius:18px;
+  padding:28px;
   width:470px;
   max-width:calc(100vw - 28px);
   color:var(--text);
-  box-shadow:0 16px 55px var(--dialog-shadow)
+  box-shadow:0 24px 90px var(--dialog-shadow);
+  max-height:calc(100dvh - 40px);
+  scrollbar-width:thin;
+  scrollbar-color:var(--border) transparent
 }
 dialog::backdrop {
-  background:var(--backdrop)
+  background:var(--backdrop);
+  backdrop-filter:blur(5px)
 }
 .dialog-heading {
   display:flex;
@@ -464,10 +471,10 @@ label {
 }
 input,select,textarea {
   border:1px solid var(--border);
-  background:var(--surface);
+  background:var(--subtle);
   color:var(--text);
-  border-radius:4px;
-  padding:10px 11px;
+  border-radius:9px;
+  padding:11px 12px;
   min-width:0;
   width:100%
 }
@@ -491,7 +498,8 @@ input,select,textarea {
 }
 .field-hint {
   font-size:11px;
-  color:var(--muted)
+  color:var(--muted);
+  line-height:1.65
 }
 .inline-error {
   font-size:12px;
@@ -733,3 +741,76 @@ dialog {
 
 #release-details { margin-top:24px; }
 #release-notes { white-space:pre-wrap; overflow-wrap:anywhere; font:inherit; line-height:1.7; max-height:480px; overflow-y:auto; }
+
+#sap-logon-list { max-height: min(50vh, 480px); overflow-y: auto; padding: 4px; margin: 0 -4px; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+.sap-logon-entry { display: flex; align-items: center; gap: 14px; width: 100%; padding: 14px; border: 1px solid transparent; border-radius: 10px; background: transparent; margin-bottom: 3px; text-align: left; }
+.sap-logon-details { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.sap-logon-details strong { display: block; color: var(--text); font-size: 13px; font-weight: 600; }
+.sap-logon-details .field-hint { display: block; margin-top: 4px; }
+.sap-logon-symbol { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 9px; background: var(--subtle); color: var(--muted); flex-shrink: 0; }
+.sap-logon-action { color: var(--muted); flex-shrink: 0; opacity: .6; }
+.sap-logon-action svg { width: 16px; height: 16px; }
+.sap-logon-entry:not(:disabled):hover, .sap-logon-entry:focus-visible { background: var(--subtle); border-color: var(--border); }
+.sap-logon-entry:not(:disabled):hover .sap-logon-symbol, .sap-logon-entry:not(:disabled):hover .sap-logon-action { color: var(--accent); opacity: 1; }
+
+/* Shared visual hierarchy across the connection table and setup dialogs. */
+.eyebrow { letter-spacing: .14em; font-weight: 600; color: var(--accent); }
+.brand strong { letter-spacing: -.5px; }
+.nav.active { box-shadow: inset 3px 0 var(--accent); }
+.nav.active svg { stroke-width: 2; }
+.nav #connection-count { background: var(--surface); padding: 1px 7px; border-radius: 6px; }
+.sidebar-foot { line-height: 1.6; }
+th { font-size: 11px; padding-top: 16px; padding-bottom: 16px; }
+tbody tr { transition: background .16s ease; }
+tbody tr:hover { background: var(--hover); }
+.connection-identity { display: flex; align-items: center; gap: 12px; }
+.connection-symbol, .import-icon { display: grid; place-items: center; flex-shrink: 0; color: var(--accent); background: var(--selected); border: 1px solid var(--border); border-radius: 11px; width: 40px; height: 40px; }
+.connection-identity strong { max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.connection-identity small { font-size: 11px; }
+.row-actions { gap: 5px; }
+.icon-button { border-radius: 8px; }
+.address { font-variant-numeric: tabular-nums; }
+.table-wrap td { height: 86px; }
+.primary { font-weight: 600; box-shadow: 0 2px 5px var(--toast-shadow); }
+.search:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--selected); }
+.search input:focus-visible { outline: none; }
+.dialog-subtitle { margin: 7px 0 0; color: var(--muted); font-size: 12px; font-weight: 400; }
+.dialog-heading { align-items: flex-start; gap: 16px; }
+.dialog-heading h2 { font-size: 20px; letter-spacing: -.3px; }
+#connection-dialog, #sap-logon-dialog { width: 640px; }
+.form-section-title { margin: 24px 0 16px; padding-top: 20px; border-top: 1px solid var(--border); font-size: 12px; font-weight: 600; color: var(--text); }
+#connection-form > .form-section-title:first-of-type { margin-top: 0; padding-top: 0; border-top: 0; }
+#connection-form label { color: var(--text-secondary); font-weight: 500; }
+#connection-form .field-hint { font-weight: 400; }
+#sap-logon-import { display: flex; align-items: center; gap: 12px; padding: 16px; margin: 2px 0 22px; border: 1px solid var(--border); background: var(--subtle); border-radius: 12px; }
+.import-copy { flex: 1; min-width: 0; }
+.import-copy strong { font-size: 12px; font-weight: 600; }
+.import-copy p { margin: 5px 0 0; }
+#import-sap-logon { flex-shrink: 0; font-size: 12px; color: var(--accent); }
+#import-sap-logon svg { width: 14px; height: 14px; }
+#connection-form .dialog-actions { position: sticky; bottom: -28px; margin: 18px -28px -28px; padding: 18px 28px; background: var(--surface); border-top: 1px solid var(--border); z-index: 1; }
+.check-row { background: var(--subtle); border: 1px solid var(--border); border-radius: 10px; padding: 13px 14px; }
+#sap-logon-status { margin: 14px 0; }
+.service-panel { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 24px; }
+.service-title { border-top: 0; padding-top: 0; }
+#toast { border-radius: 12px; }
+@media (max-width: 650px) {
+  #connection-dialog, #sap-logon-dialog { padding: 20px; max-height: calc(100dvh - 24px); }
+  #connection-form .dialog-actions { bottom: -20px; margin: 18px -20px -20px; padding: 16px 20px; }
+  #sap-logon-import { flex-wrap: wrap; }
+  #import-sap-logon { width: 100%; }
+  .connection-symbol { display: none; }
+  .table-wrap { margin-right: 0; }
+  .service-panel { padding: 18px; }
+}
+@media (max-width: 420px) {
+  #connection-form > .form-grid { grid-template-columns: 1fr; gap: 0; }
+  .import-icon { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { button, tbody tr { transition: none; } }
+.text-button { min-height: 0; padding: 0 4px; border: 0; background: transparent; color: var(--accent); font-size: inherit; }
+#rfc-environment-dialog { width: 640px; }
+#rfc-environment-dialog .field-hint { overflow-wrap: anywhere; }
+#rfc-environment-dialog a { color: var(--accent); }
+.environment-check { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; margin: 8px 0; border-radius: 8px; font-size: 12px; line-height: 1.6; }
+.environment-check svg { width: 16px; height: 16px; margin-top: 2px; }

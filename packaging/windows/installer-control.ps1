@@ -3,7 +3,8 @@
   [Parameter(Mandatory=$true)][string]$InstallDirectory,
   [string]$InstallerPath,
   [string]$ReportPath,
-  [switch]$TestMode
+  [switch]$TestMode,
+  [ValidatePattern('^([a-f0-9]{32})?$')][string]$TestRunId = ''
 )
 $ErrorActionPreference = 'Stop'
 function Write-InstallerMessage([string]$Message) {
@@ -18,8 +19,9 @@ $installRoot = [IO.Path]::GetFullPath($InstallDirectory).TrimEnd('\')
 if ($installRoot -eq [IO.Path]::GetPathRoot($installRoot).TrimEnd('\') -or $installRoot.Contains(';')) {
   throw 'Choose a dedicated application directory without semicolons.'
 }
-$productKey = if ($TestMode) { 'Software\SapLinkInstallerTest' } else { 'Software\SapLink' }
-$environmentKey = if ($TestMode) { 'Software\SapLinkInstallerTest\Environment' } else { 'Environment' }
+if ($TestRunId -and !$TestMode) { throw 'A test run ID is only valid in isolated test mode.' }
+$productKey = if ($TestMode) { 'Software\SapLinkInstallerTest' + $(if ($TestRunId) { '-' + $TestRunId } else { '' }) } else { 'Software\SapLink' }
+$environmentKey = if ($TestMode) { $productKey + '\Environment' } else { 'Environment' }
 $manifestPath = Join-Path $installRoot 'install-manifest.json'
 
 function Read-Manifest {

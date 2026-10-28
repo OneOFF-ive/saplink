@@ -1,5 +1,6 @@
 ﻿param([ValidateSet('x64','arm64')][string]$Architecture = 'arm64')
 $ErrorActionPreference = 'Stop'
+$testRunId = [Guid]::NewGuid().ToString('N')
 $repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $stage = Join-Path $repository ('.saplink\installer-build\stage-' + $Architecture)
 $compiler = Join-Path $repository '.saplink\installer-cache\nsis-3.12\makensis.exe'
@@ -8,14 +9,14 @@ $testOutput = Join-Path $repository '.saplink\installer-build\tests'
 New-Item -ItemType Directory -Path $testOutput -Force | Out-Null
 $installer = Join-Path $testOutput "SapLink-$version-win-$Architecture-test-setup.exe"
 $iconName = 'saplink-' + (Get-FileHash -LiteralPath (Join-Path $stage 'saplink.ico')).Hash.Substring(0,12).ToLowerInvariant() + '.ico'
-& $compiler /V2 /INPUTCHARSET UTF8 "/DAPP_VERSION=$version" "/DTARGET_ARCH=$Architecture" "/DSTAGE_DIR=$stage" "/DOUTPUT_FILE=$installer" "/DICON_FILENAME=$iconName" /DTEST_MODE (Join-Path $PSScriptRoot 'installer.nsi')
+& $compiler /V2 /INPUTCHARSET UTF8 "/DAPP_VERSION=$version" "/DTARGET_ARCH=$Architecture" "/DSTAGE_DIR=$stage" "/DOUTPUT_FILE=$installer" "/DICON_FILENAME=$iconName" /DTEST_MODE "/DTEST_RUN_ID=$testRunId" (Join-Path $PSScriptRoot 'installer.nsi')
 if ($LASTEXITCODE -ne 0) { throw 'Test installer compilation failed.' }
 
 $testRoot = Join-Path $env:TEMP ('SapLink Installer Test ' + [Guid]::NewGuid().ToString('N'))
 $install = Join-Path $testRoot '安装目录 with spaces'
 $config = Join-Path $testRoot 'private-config'
 $working = Join-Path $testRoot 'unrelated terminal directory'
-$keyName = 'Software\SapLinkInstallerTest'
+$keyName = 'Software\SapLinkInstallerTest-' + $testRunId
 $registry = [Microsoft.Win32.Registry]::CurrentUser
 if ($registry.OpenSubKey($keyName)) { throw 'Installer test registry already exists; preserve it for inspection before rerunning.' }
 $actualEnvironment = $registry.OpenSubKey('Environment')
@@ -53,6 +54,26 @@ try {
   [IO.File]::WriteAllText((Join-Path $config 'runtime.lock'), $staleRecord, [Text.UTF8Encoding]::new($false))
   Write-Host "Installing ($Architecture) into $install"
   Assert-True ((Run-Installer) -eq 0) 'Silent install failed.'
+  if ($Architecture -eq 'x64') {
+    Assert-True (Test-Path -LiteralPath (Join-Path $install 'runtime\java\bin\java.exe')) 'Bundled RFC Java is missing.'
+    Assert-True (Test-Path -LiteralPath (Join-Path $install 'runtime\java\legal\java.base\LICENSE')) 'Java legal notices are missing.'
+    & (Join-Path $install 'runtime\java\bin\java.exe') -version
+    Assert-True ($LASTEXITCODE -eq 0) 'Installed private Java cannot start.'
+    $rfcModule = Join-Path $install 'app\dist\rfc-environment.js'
+    $discoveryScript = Join-Path $testRoot 'check-rfc-environment.mjs'
+    $discoverySource = @'
+import {pathToFileURL} from 'node:url';
+const m=await import(pathToFileURL(process.argv[2]).href);
+const r=m.discoverRfcEnvironment({directory:process.argv[3],env:{}});
+console.log(JSON.stringify({source:r.java?.source,path:r.java?.path,jcoFound:!!r.jar}));
+'@
+    [IO.File]::WriteAllText($discoveryScript, $discoverySource, [Text.UTF8Encoding]::new($false))
+    $javaDiscovery = & (Join-Path $install 'runtime\node.exe') $discoveryScript $rfcModule $config
+    Assert-True ($LASTEXITCODE -eq 0) 'Installed RFC discovery failed.'
+    $discovered = $javaDiscovery | ConvertFrom-Json
+    Assert-True ($discovered.source -eq 'bundled' -and !$discovered.jcoFound) 'A clean install must find private Java and report missing external JCo.'
+    Assert-True (@(Get-ChildItem -LiteralPath $install -Recurse -File | Where-Object { $_.Name -match '^(sapjco.*\.jar|com\.sap\.conn\.jco.*\.jar|sapjco3\.dll)$' }).Count -eq 0) 'Installer contains a redistributed JCo component.'
+  }
   $secondInstall = Join-Path $testRoot 'second application copy'
   $manifestHash = (Get-FileHash -LiteralPath (Join-Path $install 'install-manifest.json')).Hash
   Assert-True ((Run-Installer -Directory $secondInstall) -eq 15) 'A second installation directory was not rejected.'

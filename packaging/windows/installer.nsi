@@ -22,9 +22,14 @@ SetCompressor /SOLID zlib
   !define ICON_FILENAME "saplink.ico"
 !endif
 !ifdef TEST_MODE
-  !define PRODUCT_KEY "Software\SapLinkInstallerTest"
-  !define UNINSTALL_KEY "Software\SapLinkInstallerTest\Uninstall"
-  !define TEST_FLAG " -TestMode"
+  !ifdef TEST_RUN_ID
+    !define PRODUCT_KEY "Software\SapLinkInstallerTest-${TEST_RUN_ID}"
+    !define TEST_FLAG " -TestMode -TestRunId ${TEST_RUN_ID}"
+  !else
+    !define PRODUCT_KEY "Software\SapLinkInstallerTest"
+    !define TEST_FLAG " -TestMode"
+  !endif
+  !define UNINSTALL_KEY "${PRODUCT_KEY}\Uninstall"
 !else
   !define PRODUCT_KEY "Software\SapLink"
   !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\SapLink"

@@ -91,7 +91,7 @@ type Snapshot = { source_uri: string; source: string; revision: string; version:
 type Read = (object: string, version: 'active' | 'inactive') => Promise<Snapshot>;
 export class QualityTools {
   constructor(private http: AdtHTTP, private reader: ADTClient, private read: Read,
-    private connectionId: string, private origin: string, private validate: (value: string) => string) {}
+    private connectionId: string, private origin: string | undefined, private validate: (value: string) => string) {}
 
   private async history(object: string) {
     const metadata = await this.reader.objectStructure(object, 'active');
@@ -105,9 +105,10 @@ export class QualityTools {
     }
     const discovered = links.find(link => link.rel === 'http://www.sap.com/adt/relations/versions')?.href;
     if (!discovered) throw new AppError('CAPABILITY_UNSUPPORTED', 'SAP metadata exposes no main-source version history');
-    const resource = versionResource(discovered, base, this.origin, this.validate);
+    const policy = this.origin ?? { transport: 'rfc' as const, objectUri: object };
+    const resource = versionResource(discovered, base, policy, this.validate);
     const response = await this.http.request(resource, { headers: { Accept: 'application/atom+xml;type=feed' } });
-    const parsed = parseVersions(response.body, resource, this.origin, this.validate);
+    const parsed = parseVersions(response.body, resource, policy, this.validate);
     return { entries: parsed.entries.slice(0, 500).map(entry => ({ ...entry,
       version_id: digest(JSON.stringify([this.connectionId, object, entry.resource])) })), truncated: parsed.has_next || parsed.entries.length > 500 };
   }

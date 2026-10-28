@@ -7,7 +7,7 @@ const execute = promisify(execFile);
 
 // The password travels only through a private child-process pipe into keyring memory.
 // It is never placed in command arguments, environment variables or CLI output.
-export async function promptLocalPassword(connection: Pick<Connection, 'name' | 'base_url' | 'username' | 'client'>): Promise<string> {
+export async function promptLocalPassword(connection: Pick<Connection, 'name' | 'base_url' | 'username' | 'client' | 'rfc'>): Promise<string> {
   if (process.platform !== 'win32') throw new AppError('INTERACTION_REQUIRED', 'Local password dialog requires Windows.');
   const script = `
 $ErrorActionPreference = 'Stop'
@@ -39,7 +39,8 @@ try {
   try {
     const result = await execute('powershell.exe', ['-NoProfile', '-NonInteractive', '-STA', '-Command', script],
       { windowsHide: true, cwd: process.env.SystemRoot ?? 'C:\\Windows', timeout: 300000, maxBuffer: 8192, encoding: 'utf8',
-        env: { ...process.env, SAPLINK_PROMPT_NAME: connection.name, SAPLINK_PROMPT_SERVER: connection.base_url,
+        env: { ...process.env, SAPLINK_PROMPT_NAME: connection.name,
+          SAPLINK_PROMPT_SERVER: connection.rfc ? `RFC ${connection.rfc.ashost} / ${connection.rfc.sysnr}` : connection.base_url,
           SAPLINK_PROMPT_CLIENT: connection.client, SAPLINK_PROMPT_USER: connection.username } });
     if (!result.stdout) throw new AppError('PASSWORD_REQUIRED', 'Password cannot be empty.');
     return result.stdout;
