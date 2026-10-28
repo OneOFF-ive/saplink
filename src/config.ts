@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { AppError } from './errors.js';
 
 export const connectionFieldHints: Record<string, string> = {
-  name: '连接名称仅允许英文字母、数字、下划线（_）和连字符（-），不允许中文、空格、点号或斜杠。例如 sap_system_01。',
+  name: '连接名称允许中文、英文字母、数字、下划线（_）和连字符（-），不允许空格、点号、斜杠或其他特殊字符。例如 开发系统_DEV 或 sap_system_01。',
   base_url: 'ADT 地址必须是 http:// 或 https:// 开头的服务器地址，例如 https://sap-host:443；路径只能为空、/ 或 /sap/bc/adt，不允许内嵌用户名密码、查询参数或 # 片段。',
   client: 'Client 必须是 3 位半角数字，例如 001 或 100；请保留前导零。',
   username: 'SAP 用户名不能为空，请填写 SAP 登录用户名。',
@@ -29,7 +29,7 @@ export const sapRouterSchema = z.preprocess(value => typeof value === 'string' ?
 
 export const connectionSchema = z.object({
   connection_id: z.string().uuid(),
-  name: z.string().regex(/^[a-zA-Z0-9_-]+$/),
+  name: z.string().regex(/^[\p{Script=Han}a-zA-Z0-9_-]+$/u),
   base_url: z.string().transform((value, context) => {
     try {
       return normalizeUrl(value);

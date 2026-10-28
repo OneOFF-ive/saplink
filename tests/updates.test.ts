@@ -402,3 +402,56 @@ test('missing COS prose falls back to the same GitHub tag without replacing COS 
     assert.equal(urls[2],'https://api.github.com/repos/OneOFF-ive/saplink/releases/tags/v0.2.0');
   } finally {await rm(directory,{recursive:true,force:true});}
 });
+
+test('MCP restarts trigger checks without blocking the listener or queueing overlapping checks', {timeout: 20000}, async () => {
+  const {startRuntimeUpdateChecks} = await import('../src/updates.js');
+  const {startHttp} = await import('../src/server.js');
+  const {ConfigStore} = await import('../src/config.js');
+  const {Operations} = await import('../src/operations.js');
+  const directory = await temporaryDirectory();
+  const store = new ConfigStore(directory);
+  const credentials = {get: async () => '', set: async () => {}, remove: async () => {}};
+  let calls = 0;
+  let nextRequest: (() => void) | undefined;
+  let enter!: () => void;
+  const entered = new Promise<void>(resolve => {enter = resolve;});
+  let finish!: (value: Response) => void;
+  let completed!: () => void;
+  const checked = new Promise<void>(resolve => {completed = resolve;});
+  const automatic = startRuntimeUpdateChecks(directory, {manifestUrl: null, fetcher: (async () => {
+    calls++;
+    if (calls === 2) {enter(); return new Promise<Response>(resolve => {finish = resolve;});}
+    if (calls > 2) { nextRequest?.(); throw new Error('update source offline'); }
+    return new Response(JSON.stringify({...release,tag_name:'v9.0.0'}));
+  }) as typeof fetch, notify: result => {if (result.latest_version === '9.1.0') completed();}});
+  let runtime: Awaited<ReturnType<typeof startHttp>> | undefined;
+  try {
+    await automatic.initialCheck;
+    assert.equal(startRuntimeUpdateChecks(directory), automatic, 'reuse the existing scheduler');
+    runtime = await startHttp(store, new Operations(store, credentials), 0);
+    await entered;
+    const address = runtime.listener.address() as {port: number};
+    assert.equal((await fetch(`http://127.0.0.1:${address.port}/mcp`)).status, 401, 'MCP responds while update check is pending');
+    await runtime.close(); runtime = undefined;
+    runtime = await startHttp(store, new Operations(store, credentials), 0);
+    assert.equal(calls, 2, 'restart during an active check neither duplicates nor queues');
+    finish(new Response(JSON.stringify({...release,tag_name:'v9.1.0'})));
+    await checked;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(calls, 2, 'finishing the existing check does not schedule a follow-up');
+    await automatic.check();
+    assert.equal(calls, 3, 'no queued check after the in-flight check finishes');
+    // Failed background checks do not stop the listener.
+    const next = runtime.listener.address() as {port:number};
+    assert.equal((await fetch(`http://127.0.0.1:${next.port}/mcp`)).status, 401);
+    await runtime.close(); runtime = undefined;
+    const freshCheck = new Promise<void>(resolve => { nextRequest = resolve; });
+    runtime = await startHttp(store, new Operations(store, credentials), 0);
+    await freshCheck;
+    assert.equal(calls, 4, 'a later restart triggers another check');
+  } finally {
+    automatic.stop();
+    await runtime?.close();
+    await rm(directory, {recursive:true, force:true});
+  }
+});

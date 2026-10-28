@@ -814,3 +814,7 @@ tbody tr:hover { background: var(--hover); }
 #rfc-environment-dialog a { color: var(--accent); }
 .environment-check { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; margin: 8px 0; border-radius: 8px; font-size: 12px; line-height: 1.6; }
 .environment-check svg { width: 16px; height: 16px; margin-top: 2px; }
+
+.token-intro { margin-bottom:24px; padding:20px 24px; border:1px solid var(--border); border-radius:12px; background:var(--subtle); line-height:1.7; }
+.token-intro h2 { margin:0 0 8px; font-size:16px; }
+.token-intro p { margin:8px 0 0; color:var(--text-secondary); }

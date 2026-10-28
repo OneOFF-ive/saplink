@@ -1,5 +1,5 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { AppError } from './errors.js';
@@ -257,9 +257,28 @@ export function startAutomaticUpdates(currentVersion: string, directory: string,
   return { initialCheck, check, stop: () => { controller.abort(); if (timer) clearInterval(timer); } };
 }
 
-export function startRuntimeUpdateChecks(directory: string) {
-  return startAutomaticUpdates(appVersion, directory, {
+// One scheduler per configuration directory; HTTP restarts reuse its timer.
+const runtimeChecks = new Map<string, ReturnType<typeof startAutomaticUpdates>>();
+
+export function notifyMcpStarted(directory: string) {
+  // The CLI registers its initial check after startup. Before registration, that
+  // initial check covers the first listener; subsequent listeners request a refresh.
+  void runtimeChecks.get(resolve(directory))?.check();
+}
+
+export function startRuntimeUpdateChecks(directory: string,
+  options: Parameters<typeof startAutomaticUpdates>[2] = {}) {
+  const key = resolve(directory);
+  const existing = runtimeChecks.get(key);
+  if (existing) return existing;
+  const automatic = startAutomaticUpdates(appVersion, directory, {
     // The management UI displays update availability without popups or notice files.
-    disabled: process.env.SAPLINK_AUTO_UPDATE_CHECK === '0'
+    disabled: process.env.SAPLINK_AUTO_UPDATE_CHECK === '0', ...options
   });
+  const runtime = { ...automatic, stop: () => {
+    automatic.stop();
+    if (runtimeChecks.get(key) === runtime) runtimeChecks.delete(key);
+  } };
+  runtimeChecks.set(key, runtime);
+  return runtime;
 }

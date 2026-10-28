@@ -8,6 +8,7 @@ import { clientInstructions } from './client-guidance.js';
 import { toolSchemas, toolDescription, type ToolName } from './tool-definitions.js';
 import { writeTools } from './tool-policy.js';
 import { appVersion } from './version.js';
+import { notifyMcpStarted } from './updates.js';
 
 export function makeMcp(operations: Operations) {
   const server = new McpServer({
@@ -141,6 +142,7 @@ export async function startHttp(store: ConfigStore, operations: Operations, port
   });
   listener.requestTimeout = 30000;
   listener.headersTimeout = 10000;
+  notifyMcpStarted(store.directory);
   return {
     listener,
     clearCache: () => operations.clearCache(),

@@ -196,7 +196,8 @@ function openConnection(connection) {
   $('#password-hint').textContent = '留空保留已保存密码；更改连接方式、目标或 SAProuter 路由时需重新输入。';
   $('#connection-dialog').showModal();
 }
-function confirmAction(title, message, action) {
+function confirmAction(title, message, action, danger = true) {
+  $('#confirm-action').className = danger ? 'danger' : 'primary';
   $('#confirm-title').textContent = title; $('#confirm-message').textContent = message;
   $('#confirm-action').onclick = () => { $('#confirm-dialog').close(); void action(); };
   $('#confirm-dialog').showModal();
@@ -325,11 +326,12 @@ for (const node of document.querySelectorAll('.close-dialog')) node.onclick = ()
 };
 $('#connection-dialog').addEventListener('close', () => { $('#connection-form').elements.password.value = ''; });
 $('#token-dialog').addEventListener('close', () => { $('#new-token').value = ''; });
-for (const node of document.querySelectorAll('.nav')) node.onclick = () => {
-  for (const view of document.querySelectorAll('.view')) view.hidden = view.id !== `${node.dataset.view}-view`;
-  for (const item of document.querySelectorAll('.nav')) item.classList.toggle('active', item === node);
-  $('#breadcrumb').textContent = labels[node.dataset.view];
-};
+function showView(name) {
+  for (const view of document.querySelectorAll('.view')) view.hidden = view.id !== `${name}-view`;
+  for (const item of document.querySelectorAll('.nav')) item.classList.toggle('active', item.dataset.view === name);
+  $('#breadcrumb').textContent = labels[name];
+}
+for (const node of document.querySelectorAll('.nav')) node.onclick = () => showView(node.dataset.view);
 $('#add-connection').onclick = $('#empty-add').onclick = () => openConnection();
 $('#search').oninput = render;
 $('#port').oninput = () => { $('#mcp-url').textContent = `http://127.0.0.1:${$('#port').value}/mcp`; };
@@ -416,7 +418,31 @@ $('#token-name-form').onsubmit = async event => {
     else toast(error.message, true);
   } finally { working = false; $('#token-name-submit').disabled = false; render(); }
 };
-$('#start-service').onclick = () => act(() => api('service/start', 'POST', { port: Number($('#port').value) }), 'MCP 服务已启动');
+async function startService() {
+  return act(async () => {
+    // Use the current configuration, including connections changed by another client.
+    const latest = await api('state');
+    state = latest;
+    if (latest.running) return;
+    if (!latest.connections.length) {
+      confirmAction('请先配置系统连接', '尚未配置 SAP 系统连接，请先添加至少一个连接，再启动 MCP 服务。点击确认前往系统连接页面。', () => {
+        showView('connections');
+        $('#add-connection').focus();
+      }, false);
+      return;
+    }
+    if (!latest.tokens.length) {
+      confirmAction('请先创建访问令牌', '尚未创建访问令牌。AI 客户端需要这张“通行证”才能连接 SapLink，请先创建至少一个令牌，再启动 MCP 服务。点击确认前往访问令牌页面。', () => {
+        showView('tokens');
+        $('#create-token').focus();
+      }, false);
+      return;
+    }
+    await api('service/start', 'POST', { port: Number($('#port').value) });
+    toast('MCP 服务已启动');
+  }, null);
+}
+$('#start-service').onclick = startService;
 $('#clear-cache').onclick = async () => {
   const result = await act(() => api('cache/clear', 'POST'), null);
   if (result) { tests.clear(); render(); toast(`已清理 ${result.cleared_sessions} 个连接缓存，保留 ${result.retained_write_requests} 条写入防重复记录`); }

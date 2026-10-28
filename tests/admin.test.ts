@@ -70,8 +70,8 @@ test('local web management protects APIs and manages connections, credentials, t
     assert.equal((await fetch(`${origin}/api/state`, { headers: { 'X-Admin-Token': key, Origin: 'http://evil.test' } })).status, 403);
     assert.equal((await fetch(`${origin}/api/tokens`, { method: 'POST', headers: { 'X-Admin-Token': key } })).status, 403);
     assert.equal((await fetch(`${origin}/api/application/stop`, { method: 'POST', headers: { Origin: origin } })).status, 401);
-    const draft = { name: 'test_system', base_url: 'http://sap.test:8000', client: '001', username: 'TEST', language: 'EN', write_enabled: false, password: 'synthetic-secret' };
-    for (const name of ['中文系统', 'sap system', 'sap.system', 'sap/system']) {
+    const draft = { name: '开发系统_DEV', base_url: 'http://sap.test:8000', client: '001', username: 'TEST', language: 'EN', write_enabled: false, password: 'synthetic-secret' };
+    for (const name of ['sap system', 'sap.system', 'sap/system', '开发 系统', '开发/系统']) {
       const invalid = await api('connections', 'POST', { ...draft, name });
       assert.equal(invalid.status, 400);
       assert.equal(invalid.body.error.code, 'INVALID_INPUT');
@@ -102,7 +102,9 @@ test('local web management protects APIs and manages connections, credentials, t
     assert.equal(passwords.size, 0);
     await store.save(initial);
     const created = await api('connections', 'POST', draft); assert.equal(created.status, 200);
-    const id = created.body.connection_id; assert.ok(id); assert.equal(created.body.password, undefined);
+    const id = created.body.connection_id; assert.ok(id);
+    assert.equal(created.body.name, draft.name);
+    assert.equal((await store.load()).connections[0].name, draft.name); assert.equal(created.body.password, undefined);
     const invalidEdit = await api(`connections/${id}`, 'PUT', { ...draft, name: 'bad.name' });
     assert.equal(invalidEdit.body.error.fields[0].field, 'name');
     assert.equal(passwords.get(id), draft.password);
