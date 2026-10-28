@@ -1,5 +1,6 @@
-param([Parameter(Mandatory=$true)][string]$Plan, [switch]$ValidateOnly, [switch]$TestMode)
+param([Parameter(Mandatory=$true)][string]$Plan, [switch]$ValidateOnly, [switch]$TestMode, [ValidatePattern('^([a-f0-9]{32})?$')][string]$TestRunId = '')
 $ErrorActionPreference = 'Stop'
+if ($TestRunId -and !$TestMode) { throw 'Test run ID requires isolated test mode.' }
 $job = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Plan))
 $planData = $null
 $keepPending = $false
@@ -35,7 +36,7 @@ try {
     $directory = [IO.Path]::GetDirectoryName($directory)
   }
   if ($TestMode -and $planData.mode -ne 'stopped') { throw 'Isolated tests must not restart applications.' }
-  $registration = if ($TestMode) { 'HKCU:\Software\SapLinkInstallerTest' } else { 'HKCU:\Software\SapLink' }
+  $registration = if ($TestMode) { 'HKCU:\Software\SapLinkInstallerTest' + $(if ($TestRunId) { '-' + $TestRunId } else { '' }) } else { 'HKCU:\Software\SapLink' }
   $registered = (Get-ItemProperty -LiteralPath $registration).InstallDir
   if (!$registered -or [IO.Path]::GetFullPath($registered).TrimEnd('\') -ne $installRoot) { throw 'Registered installation does not match.' }
   $manifest = Get-Content -LiteralPath (Join-Path $installRoot 'install-manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -46,6 +47,7 @@ try {
     if ($null -ne $port -and ($port -isnot [int] -or $port -lt 1 -or $port -gt 65535)) { throw 'Invalid restart port.' }
   }
   if (($planData.mode -eq 'service' -and !$planData.mcp_port) -or ($planData.mode -eq 'ui' -and !$planData.ui_port)) { throw 'Missing restart port.' }
+  if ($null -ne $planData.show_install_progress -and $planData.show_install_progress -isnot [bool]) { throw 'Invalid installation progress option.' }
   $pathsValidated = $true
   Verify-Installer
   if ($ValidateOnly) { Write-Output 'Update plan and installer validated; nothing installed.'; exit 0 }
@@ -73,7 +75,13 @@ try {
   Verify-Installer
   $env:SAPLINK_CONFIG_DIR = $configRoot
   # NSIS requires /D to be last and its value to be unquoted, including paths with spaces.
-  $installer = Start-Process -FilePath $planData.installer -ArgumentList ('/S /D=' + $installRoot) -WindowStyle Hidden -PassThru
+  # GUI updates use the installer-owned progress page while the application is stopped.
+  # Older plans and CLI updates retain silent installation.
+  if ($planData.show_install_progress) {
+    $installer = Start-Process -FilePath $planData.installer -ArgumentList ('/UPDATE /D=' + $installRoot) -WindowStyle Normal -PassThru
+  } else {
+    $installer = Start-Process -FilePath $planData.installer -ArgumentList ('/S /D=' + $installRoot) -WindowStyle Hidden -PassThru
+  }
   if (!$installer.WaitForExit(600000)) { $keepPending = $true; throw 'Installer outcome is unknown; inspect the still-running installer before retrying.' }
   if ($installer.ExitCode -ne 0) { throw "Installer returned exit code $($installer.ExitCode). Reopen or repair SapLink; configuration is preserved." }
   $installed = Get-Content -LiteralPath (Join-Path $installRoot 'install-manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json

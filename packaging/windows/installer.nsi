@@ -53,11 +53,15 @@ VIAddVersionKey "LegalCopyright" "SapLink project"
 !define MUI_FINISHPAGE_RUN "$INSTDIR\bin\saplink-gui.exe"
 !define MUI_FINISHPAGE_RUN_TEXT "打开 SapLink 图形管理界面"
 !define MUI_FINISHPAGE_TEXT "安装完成。请重新打开终端后使用 saplink 命令。$\r$\n$\r$\n图形界面启动后可从系统托盘重新打开或正常退出。卸载时保留连接配置、日志和 Windows 凭据。"
+!define MUI_PAGE_CUSTOMFUNCTION_PRE SkipUpdateWizardPage
 !insertmacro MUI_PAGE_WELCOME
+!define MUI_PAGE_CUSTOMFUNCTION_PRE SkipUpdateWizardPage
 !insertmacro MUI_PAGE_COMPONENTS
+!define MUI_PAGE_CUSTOMFUNCTION_PRE SkipUpdateWizardPage
 !define MUI_PAGE_CUSTOMFUNCTION_SHOW ShowInstallDirectory
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
+!define MUI_PAGE_CUSTOMFUNCTION_PRE SkipUpdateWizardPage
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
@@ -67,6 +71,14 @@ VIAddVersionKey "LegalCopyright" "SapLink project"
 Var StartMenuDirectory
 Var DesktopShortcut
 Var ExistingInstallDirectory
+Var AutomaticUpdate
+
+; /UPDATE shows actual NSIS installation progress without an interactive wizard.
+Function SkipUpdateWizardPage
+  ${If} $AutomaticUpdate == "1"
+    Abort
+  ${EndIf}
+FunctionEnd
 
 Function ReadExistingInstallation
   ReadRegStr $ExistingInstallDirectory HKCU "${PRODUCT_KEY}" "InstallDir"
@@ -87,6 +99,15 @@ Function ShowInstallDirectory
 FunctionEnd
 
 Function .onInit
+  StrCpy $AutomaticUpdate "0"
+  ${GetParameters} $0
+  ClearErrors
+  ${GetOptions} $0 "/UPDATE" $1
+  ${IfNot} ${Errors}
+    StrCpy $AutomaticUpdate "1"
+    SetSilent normal
+    SetAutoClose true
+  ${EndIf}
   ${IfNot} ${AtLeastWin10}
     MessageBox MB_ICONSTOP "需要 Windows 10 或 Windows 11。" /SD IDOK
     Abort
@@ -121,6 +142,11 @@ Function .onInit
     ${EndIf}
   ${EndIf}
   Call ReadExistingInstallation
+  ${If} $AutomaticUpdate == "1"
+  ${AndIf} $ExistingInstallDirectory == ""
+    SetErrorLevel 15
+    Abort
+  ${EndIf}
   ${If} $ExistingInstallDirectory != ""
     ${If} $INSTDIR != $ExistingInstallDirectory
       MessageBox MB_ICONSTOP "已安装 SapLink：$\r$\n$ExistingInstallDirectory$\r$\n$\r$\n只能在原目录升级或修复。更换目录前请先卸载旧版本；连接配置和凭据会保留。" /SD IDOK
@@ -143,6 +169,7 @@ Section "SapLink 主程序（内置 Node.js，离线安装）" Core
   ${EndIf}
   InitPluginsDir
   SetOutPath "$PLUGINSDIR"
+  File /oname=installer-host.exe "${STAGE_DIR}\installer-host.exe"
   File /oname=installer-control.ps1 "${STAGE_DIR}\installer-control.ps1"
   !insertmacro RunInstallerControl "$PLUGINSDIR\installer-control.ps1" '-Action Check -InstallDirectory "$INSTDIR"${TEST_FLAG}'
   ${If} $0 != 0
@@ -204,6 +231,7 @@ SectionEnd
 
 Section "Uninstall"
   InitPluginsDir
+  CopyFiles /SILENT "$INSTDIR\installer-host.exe" "$PLUGINSDIR\installer-host.exe"
   CopyFiles /SILENT "$INSTDIR\installer-control.ps1" "$PLUGINSDIR\installer-control.ps1"
   !insertmacro RunInstallerControl "$PLUGINSDIR\installer-control.ps1" '-Action Check -InstallDirectory "$INSTDIR"${TEST_FLAG}'
   ${If} $0 != 0

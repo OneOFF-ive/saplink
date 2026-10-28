@@ -205,7 +205,7 @@ export class SelfUpdater {
     const script = join(job, 'update-runner.ps1');
     await copyFile(join(installation.root, 'update-runner.ps1'), script);
     const plan = { schema_version: 1, id, install_directory: installation.root, installer, sha256: download.sha256,
-      version, architecture: installation.architecture, config_directory: resolve(this.directory), ...restart };
+      version, architecture: installation.architecture, config_directory: resolve(this.directory), show_install_progress: restart.mode === 'ui', ...restart };
     const planPath = join(job, 'plan.json');
     await writeFile(planPath, JSON.stringify(plan), { mode: 0o600 });
     await this.dependencies.launch(installation, script, planPath);
@@ -218,7 +218,7 @@ export class SelfUpdater {
       await delay(100);
     }
     if (!ready) throw new AppError('UPDATE_RUNNER_TIMEOUT', '未确认更新程序就绪，当前应用继续运行。');
-    this.progress = { ...this.progress, phase: 'installing', message: '安装包已验证，正在正常关闭应用并安装。完成后会重新启动。' };
+    this.progress = { ...this.progress, phase: 'installing', message: restart.mode === 'ui' ? '安装包已验证，正在正常关闭应用。安装进度将在独立窗口中显示，完成后恢复原运行状态。' : '安装包已验证，正在正常关闭应用并静默安装，完成后恢复原运行状态。' };
     // After commitment only the runner may release the reservation, even if graceful shutdown fails.
     handOff();
     await writeFile(join(job, 'commit.json'), JSON.stringify({ id }), { mode: 0o600 });

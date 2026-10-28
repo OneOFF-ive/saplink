@@ -271,6 +271,9 @@ try {
     }
     Copy-Item -LiteralPath (Join-Path $repository 'README.md') -Destination $app
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'installer-control.ps1') -Destination $stage
+    & $csc /nologo /target:winexe /platform:anycpu /define:GUI "/out:$stage\installer-host.exe" (Join-Path $PSScriptRoot 'Launcher.cs') (Join-Path $PSScriptRoot 'InstallerControlHost.cs')
+    Assert-Exit 'Installer control host compilation'
+
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'update-runner.ps1') -Destination $stage
     New-Item -ItemType Directory -Path (Join-Path $stage 'licenses') | Out-Null
     Copy-Item -LiteralPath (Join-Path $cache 'nsis-3.12\COPYING') -Destination (Join-Path $stage 'licenses\NSIS-COPYING.txt')

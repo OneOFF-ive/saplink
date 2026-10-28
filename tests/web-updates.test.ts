@@ -82,3 +82,11 @@ test('missing COS architecture still allows trying the verified GitHub fallback'
   const {nodes}=screen({...available,downloads:[{architecture:'arm64',url:'https://example.test/arm64.exe'}]});
   assert.equal(nodes.get('#install-update').disabled,false);
 });
+
+test('installation phase does not reuse the completed download percentage', () => {
+  const {nodes,context,render}=screen(available);
+  vm.runInContext('Object.assign(state.update_install,{phase:"installing",downloaded_bytes:100,total_bytes:100,message:"正在安装"})',context);
+  render();
+  assert.equal(nodes.get('#update-progress').value,undefined);
+  assert.equal(nodes.get('#update-summary').textContent,'正在安装');
+});

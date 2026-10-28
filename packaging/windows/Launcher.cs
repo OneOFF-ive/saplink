@@ -100,11 +100,11 @@ internal static class Launcher
         string powershell = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe");
         var command = new StringBuilder(Quote(powershell) + " -NoProfile -NonInteractive -ExecutionPolicy Bypass -File " +
             Quote(arguments[1]) + " -Plan " + Quote(arguments[2]));
-        // PowerShell needs valid console handles; give it its own hidden console,
-        // with no inherited terminal/GUI pipes from the application being replaced.
+        // Run without a console or inherited pipes so Windows Terminal cannot
+        // expose a window that users could close during the upgrade.
         var startup = new StartupInfo { Size = Marshal.SizeOf(typeof(StartupInfo)), Flags = 1, ShowWindow = 0 };
         ProcessInfo process;
-        if (!CreateProcess(powershell, command, IntPtr.Zero, IntPtr.Zero, false, 0x210, IntPtr.Zero,
+        if (!CreateProcess(powershell, command, IntPtr.Zero, IntPtr.Zero, false, 0x08000200, IntPtr.Zero,
             Path.GetDirectoryName(arguments[1]), ref startup, out process)) return 1;
         CloseHandle(process.Thread); CloseHandle(process.Process);
         return 0;

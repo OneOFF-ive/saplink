@@ -33,6 +33,7 @@ async function setup(directory: string, overrides: Partial<UpdateDependencies> =
     download: (item, folder, progress) => downloadInstaller(item, folder, progress, fetcher(executable, { 'Content-Length': String(executable.length) })),
     launch: async (_installation, _script, path) => {
       const plan = JSON.parse(await readFile(path, 'utf8'));
+      assert.equal(plan.show_install_progress, plan.mode === 'ui');
       assert.equal(plan.version, '9.0.0'); assert.equal(plan.architecture, 'x64'); assert.equal(plan.sha256, sha256);
       assert.equal(await readFile(plan.installer, 'utf8'), executable.toString());
       await writeFile(join(dirname(path), 'ready.json'), JSON.stringify({ id: plan.id }));

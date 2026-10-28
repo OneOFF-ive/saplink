@@ -56,9 +56,9 @@ function renderUpdate() {
     update ? '暂未获取到可用的正式版本信息，请稍后重试。' : '可手动检查新版本。');
   const progress = $('#update-progress');
   progress.hidden = !running;
-  if (install?.total_bytes) progress.value = Math.min(100, install.downloaded_bytes / install.total_bytes * 100);
+  if (install?.phase === 'downloading' && install?.total_bytes) progress.value = Math.min(100, install.downloaded_bytes / install.total_bytes * 100);
   else progress.removeAttribute('value');
-  if (running && install?.downloaded_bytes) $('#update-summary').textContent += '（已下载 ' + (install.downloaded_bytes / 1048576).toFixed(1) + ' MiB）';
+  if (install?.phase === 'downloading' && install?.downloaded_bytes) $('#update-summary').textContent += '（已下载 ' + (install.downloaded_bytes / 1048576).toFixed(1) + ' MiB）';
   const notice = $('#update-notice');
   notice.hidden = !update?.update_available;
   notice.replaceChildren();
@@ -91,7 +91,7 @@ async function pollUpdate() {
     if (state.update_install.phase === 'failed') { updateRequested = false; clearInterval(updatePoll); }
   } catch {
     clearInterval(updatePoll);
-    $('#update-summary').textContent = '连接已断开，应用可能正在退出并安装更新。完成后将重新打开管理界面；请勿重复安装。';
+    $('#update-summary').textContent = '管理服务已断开，应用可能正在退出并安装更新。请查看独立安装进度窗口，完成后将重新打开管理界面；请勿重复安装。';
   }
 }
 $('#check-updates').onclick = async () => {

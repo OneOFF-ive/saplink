@@ -184,7 +184,7 @@ node scripts/create-update-manifest.mjs --version 0.1.0 --architectures x64
 powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File packaging/windows/update-test.ps1
 ```
 
-原生测试使用临时模拟安装目录及 `Software\SapLinkInstallerTest` 注册表，不更改真实安装与用户 PATH，涵盖启动器编译、隐藏助手交接、哈希拒绝、含空格路径的真实 NSIS 静默升级、版本验证和配置保留。它需要已缓存的 NSIS 和安装图标，不能与其他占用同一测试注册表的安装测试同时运行。`-TestMode` 不由生产启动入口传递。
+原生测试使用临时模拟安装目录及每次独立的 `Software\SapLinkInstallerTest-<随机ID>` 注册表，不更改真实安装与用户 PATH，涵盖启动器编译、隐藏助手交接、哈希拒绝、含空格路径的真实 NSIS 静默升级、版本验证和配置保留。它需要已缓存的 NSIS 和安装图标，支持通过独立测试 ID 隔离其他安装测试。`-TestMode` 不由生产启动入口传递。
 
 ### 单独生成技能发行包
 
@@ -199,3 +199,7 @@ powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File packagin
 Sync COS downloads 在发布 latest.json 之前，将同一正式 Release 的 name、body 同步为 `saplink/v<version>/release-notes.json`（schema_version=1、version、title、notes），通过匿名 HTTPS 回读确认后继续发布。重复同步可刷新说明，不替换安装包；说明使用 no-cache。旧版严格安装清单保持原来的四个字段。
 
 新版客户端发现更新时优先从清单同源的对应版本目录获取说明，校验版本一致并缓存；标题最多 1024 字符、说明最多 64000 字符、响应最多 256 KiB。说明缺失或不可用时，尝试 GitHub 同一版本标签的标题和说明；两处均不可用也不影响已验证安装包的更新。界面以纯文本保留换行展示，避免执行 Release 中的 HTML。
+
+管理界面更新计划设置 `show_install_progress=true`。更新助手使用 NSIS `/UPDATE` 模式，仅显示真实安装进度页，自动跳过其余向导页并关闭；CLI 计划保持 `/S` 静默模式。管理页安装阶段使用不定进度，不把已下载字节显示为安装完成百分比。
+
+`InstallerControlHost.cs` 编译为 GUI 子系统辅助程序，使用 `CreateNoWindow` 启动 PowerShell，安装/卸载控制结果经报告文件传递，避免终端闪现和输出管道阻塞。独立更新助手同样使用 CREATE_NO_WINDOW 创建。`update-test.ps1 -ShowInstallProgress` 可在隔离安装目录验证自动进度窗口；测试另外检查后台 PowerShell 的 GetConsoleWindow 为零、含空格参数与退出码传递。
