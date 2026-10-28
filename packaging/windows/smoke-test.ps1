@@ -54,7 +54,7 @@ try {
   [IO.File]::WriteAllText((Join-Path $config 'runtime.lock'), $staleRecord, [Text.UTF8Encoding]::new($false))
   Write-Host "Installing ($Architecture) into $install"
   Assert-True ((Run-Installer) -eq 0) 'Silent install failed.'
-  if ($Architecture -eq 'x64') {
+  & {
     Assert-True (Test-Path -LiteralPath (Join-Path $install 'runtime\java\bin\java.exe')) 'Bundled RFC Java is missing.'
     Assert-True (Test-Path -LiteralPath (Join-Path $install 'runtime\java\legal\java.base\LICENSE')) 'Java legal notices are missing.'
     & (Join-Path $install 'runtime\java\bin\java.exe') -version
@@ -64,15 +64,14 @@ try {
     $discoverySource = @'
 import {pathToFileURL} from 'node:url';
 const m=await import(pathToFileURL(process.argv[2]).href);
-const r=m.discoverRfcEnvironment({directory:process.argv[3],env:{}});
-console.log(JSON.stringify({source:r.java?.source,path:r.java?.path,jcoFound:!!r.jar}));
+const r=await m.checkRfcEnvironment({directory:process.argv[3],env:{JAVA_HOME:'invalid',SAPLINK_RFC_JAVA:'invalid',SAPLINK_RFC_JCO_JAR:'invalid',JAVA_TOOL_OPTIONS:'-invalid'}});
+console.log(JSON.stringify({source:r.detected.java?.source,managed:r.managed,healthy:r.healthy,versions:r.versions}));
 '@
     [IO.File]::WriteAllText($discoveryScript, $discoverySource, [Text.UTF8Encoding]::new($false))
     $javaDiscovery = & (Join-Path $install 'runtime\node.exe') $discoveryScript $rfcModule $config
     Assert-True ($LASTEXITCODE -eq 0) 'Installed RFC discovery failed.'
     $discovered = $javaDiscovery | ConvertFrom-Json
-    Assert-True ($discovered.source -eq 'bundled' -and !$discovered.jcoFound) 'A clean install must find private Java and report missing external JCo.'
-    Assert-True (@(Get-ChildItem -LiteralPath $install -Recurse -File | Where-Object { $_.Name -match '^(sapjco.*\.jar|com\.sap\.conn\.jco.*\.jar|sapjco3\.dll)$' }).Count -eq 0) 'Installer contains a redistributed JCo component.'
+    Assert-True ($discovered.source -eq 'bundled' -and $discovered.managed -and $discovered.healthy -and $discovered.versions.architecture -eq 'amd64') 'The installed complete RFC runtime must load without any system configuration.'
   }
   $secondInstall = Join-Path $testRoot 'second application copy'
   $manifestHash = (Get-FileHash -LiteralPath (Join-Path $install 'install-manifest.json')).Hash

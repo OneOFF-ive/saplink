@@ -55,3 +55,39 @@ test('environment checks report missing components without SAP access or launchi
     assert.throws(() => discoverRfcEnvironment(f.options), /配置无效/);
   } finally { await f.close(); }
 });
+
+
+test('installed complete runtime ignores stale settings and inherited component overrides, and never falls back', async () => {
+  const f = await fixture();
+  try {
+    const runtime = join(f.root, 'install', 'runtime');
+    await f.file(join(runtime, 'java', 'bin', 'java.exe'));
+    await f.file(join(runtime, 'jco', 'sapjco3.jar'));
+    await f.file(join(runtime, 'jco', 'sapjco3.dll'));
+    await writeFile(join(runtime, 'rfc-runtime.json'), JSON.stringify({schema_version: 1, architecture: 'x64'}));
+    await mkdir(f.directory, {recursive: true});
+    await writeFile(join(f.directory, 'rfc-runtime.json'), 'stale broken settings');
+    const options = {...f.options, env: {SAPLINK_RFC_JAVA: 'invalid', SAPLINK_RFC_JCO_JAR: 'invalid', SAPLINK_RFC_NATIVE_DIR: 'invalid', SAPLINK_RFC_BRIDGE_CLASSES: 'invalid'}};
+    let result = discoverRfcEnvironment(options);
+    assert.equal(result.managed, true);
+    assert.equal(result.java?.source, 'bundled');
+    assert.equal(result.jar?.source, 'bundled');
+    assert.equal(result.native?.source, 'bundled');
+    assert.equal(result.classes, join(f.appRoot, 'bridge', 'classes'));
+    await f.file(join(runtime, 'jco', 'com.sap.conn.jco_3.1.14.jar'));
+    await writeFile(join(runtime, 'rfc-runtime.json'), JSON.stringify({schema_version:1, architecture:'x64', jar_file:'com.sap.conn.jco_3.1.14.jar'}));
+    result = discoverRfcEnvironment(options);
+    assert.equal(result.jar?.path, join(runtime, 'jco', 'com.sap.conn.jco_3.1.14.jar'));
+    await rm(join(runtime, 'jco', 'sapjco3.dll'));
+    result = discoverRfcEnvironment(options);
+    assert.equal(result.native?.source, 'bundled');
+    const checked = await checkRfcEnvironment(options);
+    assert.equal(checked.healthy, false);
+    assert.equal(checked.managed, true);
+    assert.ok(checked.checks.some(c => c.name === 'native' && !c.passed));
+    for (const invalid of ['{}', 'null', 'broken', JSON.stringify({schema_version:1,architecture:'x64',jar_file:'../../escape.jar'})]) {
+      await writeFile(join(runtime, 'rfc-runtime.json'), invalid);
+      assert.throws(() => discoverRfcEnvironment(options), {code:'RFC_ENVIRONMENT_INVALID'});
+    }
+  } finally {await f.close();}
+});

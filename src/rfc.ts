@@ -15,7 +15,8 @@ export type RfcRole = 'editor' | 'reader' | 'quality';
 export type RfcRuntime = { java: string; jcoJar: string; nativeDirectory: string; classes: string; cwd: string; timeoutMs: number };
 export type RfcLauncher = (runtime: RfcRuntime) => ChildProcessWithoutNullStreams;
 const launchBridge: RfcLauncher = runtime => spawn(runtime.java, [`-Djava.library.path=${runtime.nativeDirectory}`, '-cp',
-  `${runtime.classes}${delimiter}${runtime.jcoJar}`, 'SapLinkRfcBridge'], { cwd: runtime.cwd, windowsHide: true, stdio: 'pipe' });
+  `${runtime.classes}${delimiter}${runtime.jcoJar}`, 'SapLinkRfcBridge'], { cwd: runtime.cwd, windowsHide: true, stdio: 'pipe',
+    env: { ...process.env, JAVA_TOOL_OPTIONS: '', JDK_JAVA_OPTIONS: '', _JAVA_OPTIONS: '' } });
 export interface AdtTransport extends HttpClient {
   lastDiagnostic: BackendDiagnostic;
   lastFailure?: { http_status: number; request_path: string; request_method: string };

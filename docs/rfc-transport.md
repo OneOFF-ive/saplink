@@ -49,15 +49,15 @@ SAP 密码依然保存在 Windows 凭据管理器。Java 启动参数、环境�
 | `SAPLINK_RFC_BRIDGE_CLASSES` | 可选，编译后的自有桥接类目录；默认 `bridge/classes` |
 | `SAPLINK_RFC_TIMEOUT_MS` | 可选，单次桥接启动/请求超时，默认 15000，范围 100～120000 毫秒 |
 
-这些设置只用于运行 SapLink 的本机进程。JVM 和原生库必须匹配架构、版本；Windows ARM64 原生 JCo 尚未验证。
+这些设置适用于源码开发模式。内部完整安装包固定使用随包组件，不读取旧路径设置或环境变量中的 Java/JCo 路径。
 
-x64 安装包自带固定版本的 Eclipse Temurin JRE 17，保留完整法律声明，不安装系统级 Java、不修改 `JAVA_HOME`。Windows ARM64 安装包暂不携带 Java，需使用兼容的本机 JVM/JCo。
+内部完整安装包自带固定版本的 Eclipse Temurin JRE 17、JCo JAR、Windows x64 JCo DLL 及配套 VC++ 运行库。保留 Java 法律声明，不安装系统级 Java、不修改 `JAVA_HOME`。x64 包使用 x64 主程序；ARM64 包使用原生 ARM64 主程序和独立的 x64 JVM/JCo 子进程，需要 Windows 11 的 x64 仿真支持。ARM64 JVM 不能加载 x64 JCo DLL。
 
-在“MCP 服务 → RFC 运行环境”或 RFC 连接表单中的“检查运行环境”打开配置。可以指定 Java 安装目录和包含原始 `sapjco3.jar`、`sapjco3.dll` 的 JCo 目录，留空恢复自动检测。检查会实际启动 JVM 并加载 JCo/JNI，返回 Java/JCo 版本、架构及缺失组件，不登录 SAP。保存路径前需停止 MCP；路径保存在用户配置目录的 `rfc-runtime.json`，不随应用升级或卸载删除。
+在“MCP 服务 → RFC 运行环境”或 RFC 连接表单中的“检查运行环境”检查组件。完整包隐藏路径输入，仅显示健康检查和版本；缺失组件时需修复安装，不会回退到系统组件。源码运行时可打开配置。可以指定 Java 安装目录和包含原始 `sapjco3.jar`、`sapjco3.dll` 的 JCo 目录，留空恢复自动检测。检查会实际启动 JVM 并加载 JCo/JNI，返回 Java/JCo 版本、架构及缺失组件，不登录 SAP。保存路径前需停止 MCP；路径保存在用户配置目录的 `rfc-runtime.json`，不随应用升级或卸载删除。
 
-优先级为界面保存的路径、显式 `SAPLINK_RFC_*` 环境变量、随包 Java、系统 Java。系统检测读取 `JAVA_HOME`、`JRE_HOME`、PATH 和常见 Java 安装目录；JCo 检测读取 `SAPJCO_HOME`、CLASSPATH 以及用户配置目录下的 `jco` 子目录。显式路径无效时会报告错误，不静默换到另一套组件。`doctor` 在配置了 RFC 连接时也会检查本地环境。
+内部完整包根据 `runtime/rfc-runtime.json` 清单固定选择 `runtime/java` 和 `runtime/jco`，忽略路径覆盖及 JVM 全局选项，防止混用组件。源码模式优先级为界面保存的路径、显式 `SAPLINK_RFC_*` 环境变量、随包 Java、系统 Java。系统检测读取 `JAVA_HOME`、`JRE_HOME`、PATH 和常见 Java 安装目录；JCo 检测读取 `SAPJCO_HOME`、CLASSPATH 以及用户配置目录下的 `jco` 子目录。显式路径无效时会报告错误，不静默换到另一套组件。`doctor` 在配置了 RFC 连接时也会检查本地环境。
 
-SAP 官方禁止再分发 JCo，因此安装包不携带或自动下载 JCo。用户需从 [SAP 官方页面](https://support.sap.com/en/product/connectors/jco.html)取得适合其环境的版本，再指定本地目录。完整条款见 [SAP Connectors](https://support.sap.com/en/product/connectors.html)。HTTP 连接不要求 Java/JCo。
+本仓库的完整包面向已确认 JCo 部署授权的企业内部使用。构建者从企业合法取得的 SDK 目录提供原始 JCo JAR 和 x64 `sapjco3.dll`，不自动下载 JCo，不将 SDK 二进制提交到 Git。JCo 的使用范围遵循企业适用的 SAP 协议。HTTP 连接不要求 Java/JCo。
 
 ## 从源码构建和配置
 
@@ -80,7 +80,24 @@ node dist/cli.js connection add rfc_test --transport rfc `
 node dist/cli.js connection test rfc_test --json
 ```
 
-安装包构建通过 `packaging/windows/build.ps1 -Architecture x64 -RfcBuildJavaHome '<JDK 目录>' -RfcBuildJcoJar '<JCo SDK JAR>'` 编译自有桥接类。SDK 只参与编译，不复制进产品。Temurin 下载 URL 和 SHA-256 固定在 `packaging/windows/download-lock.json`，安装清单覆盖随包 Java 及法律声明。构建会拒绝混入 JCo JAR/DLL 的公开安装包。
+内部安装包默认从项目目录的以下位置读取组件：
+
+```text
+local-runtime/
+  windows-x64/
+    java/    # 完整 Java 运行环境，含 bin/java.exe、release、legal/
+    jco/     # 原始 JCo JAR、sapjco3.dll 及其文档/声明
+```
+
+`local-runtime/` 已加入 Git 忽略规则，发布新版本时直接复用这些本地文件。打包脚本不再下载 Java，也不再从已安装的 VS Code 插件或系统环境寻找打包用的 Java/JCo；本地组件缺失时会明确报错。x64 与 ARM64 包共用这套 Windows x64 Java/JCo。
+
+```powershell
+./packaging/windows/build.ps1 -Architecture x64,arm64 -RfcBuildJavaHome '<编译桥接类所需的 JDK 目录>'
+```
+
+编译桥接类的 JDK 与随包 JRE 是不同用途；上面的参数仅用于编译，不改变安装包中的 Java 来源。桥接类已编译且与源码一致时，可省略该参数。需要替换构建输入时，可显式指定 `-RfcJavaDirectory` 和 `-RfcJcoDirectory`；相对默认目录始终以项目根目录为准，不依赖启动命令时的所在目录。
+
+JCo 目录必须包含一份原始 JAR（`sapjco3.jar` 或 `com.sap.conn.jco_3.1.14.jar` 等带版本名称）和 x64 `sapjco3.dll`，保留原文件名；目录内的文档及声明一并保留。构建时校验架构并实际加载随包 Java/JCo，不连接 SAP。回执标记 `distribution: internal`，从本地 Java 的 `release` 文件记录版本，并记录 Java/JCo 关键文件 SHA-256。其他构建依赖（Node.js、NSIS、VC++ 运行库）仍使用原有下载缓存逻辑，版本固定在 `packaging/windows/download-lock.json`。生成的安装包用于内部部署。
 
 新连接默认只读。启用写入仍须用户明确要求并使用现有写入开关。
 不经过 SAProuter 时省略 `--rfc-saprouter`。已有 RFC 连接改回直连使用 `connection edit <name> --clear-rfc-saprouter --password-prompt --json`；修改其他字段时默认保留已有路由。

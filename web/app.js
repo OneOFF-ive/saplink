@@ -343,8 +343,17 @@ function openTokenName(token) {
   $('#token-name-dialog').showModal(); $('#token-name').focus();
 }
 $('#create-token').onclick = () => openTokenName();
-let environmentBusy = false;
+let environmentBusy = false, environmentManaged = false;
 function renderRfcEnvironment(result) {
+  environmentManaged = result.managed === true;
+  for (const name of ['java_home', 'jco_directory']) {
+    const input = $('#rfc-environment-form').elements[name];
+    input.closest('label').hidden = environmentManaged;
+  }
+  $('#save-rfc-environment').hidden = environmentManaged;
+  $('#rfc-environment-hint').textContent = environmentManaged
+    ? 'Java 和 JCo 随安装包提供，无需配置本机环境。检查只加载本地组件，不连接 SAP。'
+    : '源码运行时可指定 Java 和 JCo 目录，留空自动检测。检查不会连接 SAP。';
   const detected = result.detected ?? { java: result.java, jco_jar: result.jar };
   const source = { settings: '已保存', environment: '环境变量', bundled: '安装包自带', system: '本机检测' };
   $('#rfc-java-detected').textContent = detected.java ? `${source[detected.java.source]}：${detected.java.path}` : '尚未找到 Java';
@@ -368,7 +377,7 @@ async function openRfcEnvironment() {
     for (const name of ['java_home', 'jco_directory']) $('#rfc-environment-form').elements[name].value = result.settings[name] ?? '';
     renderRfcEnvironment(result);
     $('#save-rfc-environment').disabled = state.running;
-    if (state.running) $('#rfc-environment-status').textContent = 'MCP 正在运行，可检查环境；更改路径前请先停止 MCP。';
+    if (state.running && !environmentManaged) $('#rfc-environment-status').textContent = 'MCP 正在运行，可检查环境；更改路径前请先停止 MCP。';
   } catch (error) { $('#rfc-environment-error').textContent = error.message; }
 }
 $('#open-rfc-environment').onclick = openRfcEnvironment;

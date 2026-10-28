@@ -1,9 +1,10 @@
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
+const fs = require('node:fs');
 const [modulePath, nativeDirectory] = process.argv.slice(2);
 const { Entry } = require(modulePath);
-const canonical = value => path.toNamespacedPath(value).toLowerCase();
+const canonical = value => path.toNamespacedPath(fs.realpathSync.native(value)).toLowerCase();
 const prefix = canonical(nativeDirectory) + path.sep;
 assert(process.report.getReport().sharedObjects.some(file =>
   canonical(file).startsWith(prefix) && path.basename(file).toLowerCase() === 'vcruntime140.dll'),

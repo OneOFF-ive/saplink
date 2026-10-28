@@ -8,7 +8,7 @@
 - 优先通过 [官网入口](https://saplink.cloud/download.html)读取 COS 版本信息并直接从 COS 获取所需版本；COS 不可用时使用 [GitHub Releases](https://github.com/OneOFF-ive/saplink/releases)。官网不保存安装包。选择架构时：Intel / AMD 电脑选择文件名包含 `win-x64` 的 `.exe`；Windows ARM64 电脑选择包含 `win-arm64` 的 `.exe`。
 - 准备 SAP 的 ADT 地址、Client、用户名和语言；不清楚时向 SAP 管理员获取。密码稍后在本机输入。
 
-安装包包含运行所需组件，无需另装 Node.js 或 npm。安装过程无需联网，连接 SAP 时需要相应网络。管理页面需要可用的默认浏览器。
+内部完整包包含 Node.js、Java 和 JCo，无需另装这些组件或设置环境变量。Windows ARM64 完整包需要 Windows 11，RFC 使用独立 x64 Java/JCo 子进程。安装过程无需联网，连接 SAP 时需要相应网络。管理页面需要可用的默认浏览器。
 
 命令行入口为 `saplink`。安装完成后重新打开终端，确保新的 PATH 生效。
 

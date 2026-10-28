@@ -109,6 +109,17 @@ Function .onInit
       Abort
     ${EndIf}
   !endif
+  ; x64 Java/JCo requires Windows 11 on ARM, including the x64 installer.
+  ReadEnvStr $0 PROCESSOR_ARCHITECTURE
+  ReadEnvStr $1 PROCESSOR_ARCHITEW6432
+  ${If} $0 == "ARM64"
+  ${OrIf} $1 == "ARM64"
+    ReadRegStr $0 HKLM "SOFTWARE\Microsoft\Windows NT\CurrentVersion" "CurrentBuildNumber"
+    ${If} $0 < 22000
+      MessageBox MB_ICONSTOP "The bundled RFC runtime requires Windows 11 on ARM64." /SD IDOK
+      Abort
+    ${EndIf}
+  ${EndIf}
   Call ReadExistingInstallation
   ${If} $ExistingInstallDirectory != ""
     ${If} $INSTDIR != $ExistingInstallDirectory

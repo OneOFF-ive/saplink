@@ -78,11 +78,10 @@
 </dialog>
 <dialog id="rfc-environment-dialog" aria-labelledby="rfc-environment-title">
   <form id="rfc-environment-form">
-    <div class="dialog-heading"><div><h2 id="rfc-environment-title">RFC 运行环境</h2><p class="dialog-subtitle">所有 RFC 连接共用，仅需在本机配置一次</p></div><button type="button" class="icon-button close-dialog" title="关闭"><i data-lucide="x"></i></button></div>
-    <p class="field-hint">优先使用已保存的路径，其次环境变量、随包 Java 和本机环境。检查只加载本地组件，不连接 SAP。</p>
+    <div class="dialog-heading"><div><h2 id="rfc-environment-title">RFC 运行环境</h2><p class="dialog-subtitle">所有 RFC 连接共用，检查本地运行组件</p></div><button type="button" class="icon-button close-dialog" title="关闭"><i data-lucide="x"></i></button></div>
+    <p id="rfc-environment-hint" class="field-hint">检查只加载本地组件，不连接 SAP。</p>
     <label>Java 安装目录（可选）<input name="java_home" autocomplete="off" placeholder="留空自动检测或使用随包 Java"><span id="rfc-java-detected" class="field-hint"></span></label>
     <label>JCo 目录（可选）<input name="jco_directory" autocomplete="off" placeholder="包含 sapjco3.jar 和 sapjco3.dll 的目录"><span id="rfc-jco-detected" class="field-hint"></span></label>
-    <p class="field-hint">JCo 由用户从 <a href="https://support.sap.com/en/product/connectors/jco.html" target="_blank" rel="noopener noreferrer">SAP 官方网站</a>获取，本产品不再分发。JAR 和 DLL 需为配套版本，保留原文件名。</p>
     <p id="rfc-environment-status" class="field-hint" role="status"></p>
     <div id="rfc-environment-checks"></div>
     <p id="rfc-environment-error" class="inline-error" role="alert"></p>

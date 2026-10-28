@@ -38,7 +38,27 @@ function explicitPath(value: string | undefined, label: string): string | undefi
 export function discoverRfcEnvironment(options: RfcEnvironmentOptions = {}) {
   const env = options.env ?? process.env, root = options.appRoot ?? applicationRoot;
   const directory = options.directory ?? env.SAPLINK_CONFIG_DIR ?? defaultConfigDirectory();
-  const platform = options.platform ?? process.platform, settings = readSettings(directory);
+  const platform = options.platform ?? process.platform;
+  // An installed complete runtime is one indivisible unit. Never mix it with
+  // system Java, inherited environment overrides or stale user path settings.
+  const runtimeRoot = resolve(root, '..', 'runtime');
+  const bundledManifest = join(runtimeRoot, 'rfc-runtime.json');
+  if (existsSync(bundledManifest)) {
+    let manifest;
+    try { manifest = JSON.parse(readFileSync(bundledManifest, 'utf8')); }
+    catch { throw new AppError('RFC_ENVIRONMENT_INVALID', '随包 RFC 环境清单损坏，请修复安装。'); }
+    if (!manifest || platform !== 'win32' || manifest.schema_version !== 1 || manifest.architecture !== 'x64')
+      throw new AppError('RFC_ENVIRONMENT_INVALID', '随包 RFC 环境不支持当前平台，请修复安装。');
+    const jarFile = manifest.jar_file ?? 'sapjco3.jar';
+    if (typeof jarFile !== 'string' || !/^(sapjco3|com\.sap\.conn\.jco[-_]\d+\.\d+\.\d+)\.jar$/.test(jarFile))
+      throw new AppError('RFC_ENVIRONMENT_INVALID', '随包 JCo 文件名无效，请修复安装。');
+    const java = { path: join(runtimeRoot, 'java', 'bin', 'java.exe'), source: 'bundled' as const };
+    const jar = { path: join(runtimeRoot, 'jco', jarFile), source: 'bundled' as const };
+    const native = { path: join(runtimeRoot, 'jco'), source: 'bundled' as const };
+    return { settings: {}, managed: true, architecture: 'x64', java, jar, native,
+      nativeFile: join(native.path, 'sapjco3.dll'), classes: join(root, 'bridge', 'classes') };
+  }
+  const settings = readSettings(directory);
   const javaName = platform === 'win32' ? 'java.exe' : 'java';
   const dllName = platform === 'win32' ? 'sapjco3.dll' : platform === 'darwin' ? 'libsapjco3.jnilib' : 'libsapjco3.so';
   let java: Candidate | undefined, jar: Candidate | undefined, native: Candidate | undefined;
@@ -76,7 +96,7 @@ export function discoverRfcEnvironment(options: RfcEnvironmentOptions = {}) {
     }
   }
   const classes = explicitPath(env.SAPLINK_RFC_BRIDGE_CLASSES, 'SAPLINK_RFC_BRIDGE_CLASSES') ?? join(root, 'bridge', 'classes');
-  return { settings, java, jar, native, nativeFile: native ? join(native.path, dllName) : undefined, classes };
+  return { settings, managed: false, architecture: undefined, java, jar, native, nativeFile: native ? join(native.path, dllName) : undefined, classes };
 }
 
 export async function saveRfcEnvironment(directory: string, value: unknown) {
@@ -118,6 +138,6 @@ export async function checkRfcEnvironment(options: RfcEnvironmentOptions = {}) {
       add('load', false, '加载失败：请检查 Java/JCo 支持的版本、32/64 位架构、原生库版本及 Windows VC++ 运行库是否匹配。');
     }
   }
-  return { healthy: checks.every(check => check.passed), checks, versions, settings: found.settings,
+  return { healthy: checks.every(check => check.passed), checks, versions, managed: found.managed, settings: found.settings,
     detected: { java: found.java, jco_jar: found.jar, native_directory: found.native, bridge_classes: found.classes }, sap_connected: false };
 }
