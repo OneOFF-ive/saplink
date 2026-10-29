@@ -1071,3 +1071,46 @@ test('source edits preserve stale-revision and existing-draft protection', async
     } finally {await f.cleanup();}
   }
 });
+
+
+test('cached RFC reader context loss recovers once even when closing the failed bridge throws', async () => {
+  const f = await fixture(); let created = 0;
+  const ops = new Operations(f.store, credentials, new AuditLog(f.logDirectory), () => {
+    const b = new FakeBackend(f.connection.connection_id);
+    if (++created === 1) {
+      let reads = 0; const read = b.read.bind(b);
+      b.read = async (...args) => { if (++reads > 1) throw new AppError('RFC_CONTEXT_LOST', 'RFC call timed out'); return read(...args); };
+      b.close = async () => { throw new AppError('RFC_CONTEXT_LOST', 'Failed bridge cleanup'); };
+    }
+    return b;
+  });
+  try {
+    const args = { connection_id: f.connection.connection_id, object_uri: object, version: 'active' as const };
+    assert.equal((await ops.run('read_source', args)).status, 'success');
+    const result = await ops.run('read_source', args);
+    assert.equal(result.status, 'success'); assert.ok(result.completed_steps.includes('session_recreated'));
+    assert.equal(created, 2);
+  } finally { await ops.close(); await f.cleanup(); }
+});
+
+test('RFC read recovery is bounded and never replays a write or bypasses an uncertain lock', async () => {
+  const f = await fixture(); let created = 0;
+  const ops = new Operations(f.store, credentials, new AuditLog(f.logDirectory), () => { created++; return f.backend; });
+  try {
+    const args = { connection_id: f.connection.connection_id, object_uri: object, version: 'active' as const };
+    await ops.run('read_source', args);
+    let reads = 0;
+    f.backend.read = async () => { reads++; throw new AppError('RFC_CONTEXT_LOST', 'RFC call timed out'); };
+    const result = await ops.run('read_source', args);
+    assert.equal(result.error?.code, 'RFC_CONTEXT_LOST'); assert.equal(reads, 2); assert.equal(created, 2);
+    let creates = 0;
+    f.backend.create = async () => { creates++; throw new AppError('RFC_CONTEXT_LOST', 'RFC call timed out'); };
+    assert.equal((await ops.run('create_program', { connection_id: args.connection_id, name: 'ZTEST',
+      description: 'Test', package_name: '$TMP', request_id: 'rfc-write-no-replay' })).error?.code, 'RFC_CONTEXT_LOST');
+    assert.equal(creates, 1);
+    (ops as any).poisoned.add(f.backend);
+    const before = created; reads = 0;
+    assert.equal((await ops.run('read_source', args)).error?.code, 'RFC_CONTEXT_LOST');
+    assert.equal(reads, 1); assert.equal(created, before);
+  } finally { await ops.close(); await f.cleanup(); }
+});

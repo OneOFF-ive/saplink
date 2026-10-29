@@ -346,3 +346,8 @@ Web 管理接口测试覆盖独立认证、跨站请求拒绝、密码与配置�
 `syntax_check` 先读取并确认请求的 active/inactive 版本，再按源码 URI 和版本调用 ADT checkruns，不使用依赖库的 inline Base64 源码请求。检查后重新读取同一版本，revision 变化则返回 VERSION_CONFLICT，不能据旧结果报告通过。返回 checked_version、source_revision、request_mode=saved_version。XML 结构不符、HTML 或不完整诊断返回 INVALID_BACKEND_RESPONSE；保留原始诊断中的错误及警告，不自动保存或激活。
 
 网络失败另附 request_body_bytes、request_content_type、request_finished、socket_reused、response_started。request_finished 仅表示本机请求流完成，不证明 SAP 已收到或保存；write_dispatched=true 后的连接重置仍按未知结果处理。上述字段以白名单落日志，不记录请求内容或凭据。
+
+
+### RFC 只读会话恢复
+
+缓存 RFC 会话返回 `RFC_CONTEXT_LOST` 时，无异常锁标记的只读操作会关闭旧后端、建立新会话并重试一次，恢复阶段返回 `session_recreated`。重建后仍失败会直接返回错误，不循环重试；新建会话首次失败也不立即重试。保存、创建、激活及其他执行工具不走该恢复逻辑，异常锁会话仍要求先核实 SAP 状态。重复收到同一超时错误可能是复用已失效的桥接通道，不能仅凭错误文本断定每次查询都在 SAP 超时。

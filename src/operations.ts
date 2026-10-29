@@ -98,7 +98,7 @@ function auditFailureDetails(details: unknown): Record<string, unknown> {
   return safeDetails;
 }
 
-const recoverableSessionErrors = new Set(['AUTH_FAILED', 'CSRF_FAILED', 'HTTP_FORBIDDEN', 'ADT_ERROR', 'OUTCOME_UNKNOWN']);
+const recoverableSessionErrors = new Set(['AUTH_FAILED', 'CSRF_FAILED', 'HTTP_FORBIDDEN', 'ADT_ERROR', 'OUTCOME_UNKNOWN', 'RFC_CONTEXT_LOST']);
 
 const cachedResultLimit = 32 * 1024;
 
