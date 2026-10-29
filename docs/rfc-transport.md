@@ -47,6 +47,7 @@ SAP 密码依然保存在 Windows 凭据管理器。Java 启动参数、环境�
 | `SAPLINK_RFC_JCO_JAR` | 用户合法取得的 JCo JAR |
 | `SAPLINK_RFC_NATIVE_DIR` | 包含匹配架构 `sapjco3.dll` 的目录 |
 | `SAPLINK_RFC_BRIDGE_CLASSES` | 可选，编译后的自有桥接类目录；默认 `bridge/classes` |
+| `SAPLINK_RFC_CTS_TIMEOUT_MS` | 可选，RFC 传输请求列表/详情及 CTS 只读检查的独立请求预算，默认 60000，范围 100～120000 毫秒；实际预算不低于通用超时。创建请求、保存、激活不适用 |
 | `SAPLINK_RFC_TIMEOUT_MS` | 可选，单次桥接启动/请求超时，默认 15000，范围 100～120000 毫秒 |
 
 这些设置适用于源码开发模式。内部完整安装包固定使用随包组件，不读取旧路径设置或环境变量中的 Java/JCo 路径。

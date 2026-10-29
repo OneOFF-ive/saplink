@@ -12,7 +12,7 @@ import { defaultLogDirectory } from './paths.js';
 import { discoverRfcEnvironment, javaProcessEnvironment } from './rfc-environment.js';
 
 export type RfcRole = 'editor' | 'reader' | 'quality';
-export type RfcRuntime = { java: string; jcoJar: string; nativeDirectory: string; classes: string; cwd: string; timeoutMs: number };
+export type RfcRuntime = { java: string; jcoJar: string; nativeDirectory: string; classes: string; cwd: string; timeoutMs: number; ctsTimeoutMs?: number };
 export type RfcLauncher = (runtime: RfcRuntime) => ChildProcessWithoutNullStreams;
 const launchBridge: RfcLauncher = runtime => spawn(runtime.java, [`-Djava.library.path=${runtime.nativeDirectory}`, '-cp',
   `${runtime.classes}${delimiter}${runtime.jcoJar}`, 'SapLinkRfcBridge'], { cwd: runtime.cwd, windowsHide: true, stdio: 'pipe',
@@ -32,9 +32,18 @@ export function rfcRuntime(env: NodeJS.ProcessEnv = process.env): RfcRuntime {
   const timeout = env.SAPLINK_RFC_TIMEOUT_MS ?? '15000';
   if (!/^\d+$/.test(timeout) || Number(timeout) < 100 || Number(timeout) > 120000)
     throw new AppError('INVALID_CONFIG', 'SAPLINK_RFC_TIMEOUT_MS must be between 100 and 120000.');
+  const ctsTimeout = env.SAPLINK_RFC_CTS_TIMEOUT_MS ?? '60000';
+  if (!/^\d+$/.test(ctsTimeout) || Number(ctsTimeout) < 100 || Number(ctsTimeout) > 120000)
+    throw new AppError('INVALID_CONFIG', 'SAPLINK_RFC_CTS_TIMEOUT_MS must be between 100 and 120000.');
   return { java: found.java.path, jcoJar: found.jar.path,
     nativeDirectory: found.native.path, classes: found.classes,
-    cwd: join(defaultLogDirectory(), 'rfc'), timeoutMs: Number(timeout) };
+    cwd: join(defaultLogDirectory(), 'rfc'), timeoutMs: Number(timeout), ctsTimeoutMs: Number(ctsTimeout) };
+}
+
+export function rfcRequestTimeoutMs(runtime: RfcRuntime, method: string, path: string): number {
+  const ctsRead = (method === 'GET' && /^\/sap\/bc\/adt\/cts\/transportrequests(?:\/|$)/.test(path))
+    || (method === 'POST' && path === '/sap/bc/adt/cts/transportchecks');
+  return ctsRead ? Math.max(runtime.timeoutMs, runtime.ctsTimeoutMs ?? 60000) : runtime.timeoutMs;
 }
 
 const b64 = (value: string) => Buffer.from(value, 'utf8').toString('base64');
@@ -218,7 +227,11 @@ export class RfcTransport implements AdtTransport {
       if (this.terminalError) throw this.terminalError;
       const response = await new Promise<HttpClientResponse>((resolve, reject) => {
         const id = String(++this.sequence);
-        const timer = setTimeout(() => this.fail(new AppError('RFC_CONTEXT_LOST', 'RFC call timed out; verify SAP state before continuing.')), this.runtime!.timeoutMs);
+        const timeoutMs = rfcRequestTimeoutMs(this.runtime!, request.method, request.path);
+        const timer = setTimeout(() => this.fail(new AppError('RFC_CONTEXT_LOST', 'RFC call timed out; verify SAP state before continuing.', {
+          request_path: request.path, request_method: request.method, timeout_ms: timeoutMs,
+          elapsed_ms: Math.round(performance.now() - started)
+        })), timeoutMs);
         this.pending = { id, resolve, reject, timer };
         this.lastDiagnostic.request_finished = true;
         this.child!.stdin.write([id, ...[request.method, request.uri, request.headers, request.body].map(b64)].join('\t') + '\n');
@@ -263,7 +276,23 @@ export class RfcTransport implements AdtTransport {
     await this.tail;
     await this.startup?.catch(() => {});
     if (!this.child) return;
-    if (this.terminalError) throw this.terminalError;
+    if (this.terminalError) {
+      // A read-only bridge owns no editor locks. Discard it only after its local
+      // process has actually exited; this does not claim SAP execution was cancelled.
+      if (this.role !== 'reader') throw this.terminalError;
+      const child = this.child;
+      if (child.exitCode === null && child.signalCode === null) {
+        await new Promise<void>((resolve, reject) => {
+          const onExit = () => { clearTimeout(timer); resolve(); };
+          const timer = setTimeout(() => {
+            child.removeListener('exit', onExit);
+            reject(new AppError('RFC_CONTEXT_LOST', 'Failed RFC reader process has not exited; cache cleanup was not confirmed.'));
+          }, 3000);
+          child.once('exit', onExit);
+        });
+      }
+      return;
+    }
     const child = this.child;
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => { child.kill(); reject(new AppError('RFC_CONTEXT_LOST', 'RFC context cleanup timed out.')); }, 3000);

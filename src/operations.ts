@@ -80,7 +80,7 @@ export type CacheClearResult = { cleared_sessions: number; retained_write_reques
 function auditFailureDetails(details: unknown): Record<string, unknown> {
   const diagnostic = details as Record<string, unknown> | undefined;
   const safeDetails: Record<string, unknown> = {};
-  for (const key of ['http_status', 'elapsed_ms', 'attempts', 'reader_recreated', 'request_body_bytes', 'request_finished', 'socket_reused', 'response_started', 'request_content_length', 'request_chunked', 'request_connection_close']) {
+  for (const key of ['http_status', 'elapsed_ms', 'timeout_ms', 'attempts', 'reader_recreated', 'request_body_bytes', 'request_finished', 'socket_reused', 'response_started', 'request_content_length', 'request_chunked', 'request_connection_close']) {
     const value = diagnostic?.[key];
     if (typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) safeDetails[key] = value;
   }
@@ -381,9 +381,10 @@ export class Operations {
       requirement = await backend.transportRequirement(object, pkg, operation);
     }
     catch (error) {
+      const failure = safeError(error);
       throw new AppError('TRANSPORT_CHECK_UNAVAILABLE', 'SAP transport check failed; no write was sent. Provide an explicit task or verify CTS settings.', {
-        ...details,
-        cause: safeError(error)
+        ...details, ...auditFailureDetails(failure.details), cause_code: failure.code,
+        cause: failure
       });
     }
     if (requirement === 'not_required')

@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { ADTClient } from 'abap-adt-api';
-import { RfcTransport, rfcRequest, rfcResponse, rfcRuntime, type RfcRuntime, type RfcRole } from '../src/rfc.js';
+import { RfcTransport, rfcRequestTimeoutMs, rfcRequest, rfcResponse, rfcRuntime, type RfcRuntime, type RfcRole } from '../src/rfc.js';
 import { ConfigStore, connectionSchema, connectionIdentityChanged, sapRouterSchema } from '../src/config.js';
 import { AdtBackend } from '../src/adt.js';
 import { Operations } from '../src/operations.js';
@@ -226,4 +226,41 @@ test('a dispatched RFC save followed by bridge exit stays unknown, is never repl
     const next = await ops.run('update_source', { ...input, request_id: randomUUID() });
     assert.equal(next.error?.code, 'SESSION_NEEDS_REVIEW');
   } finally { await ops.close().catch(() => {}); await f.close(); }
+});
+
+
+for (const mode of ['hang', 'crash']) test('cache cleanup discards an exited failed RFC reader: ' + mode, async () => {
+  const f = await fixture(mode); const store = new ConfigStore(f.directory);
+  await store.save({ schema_version: 1, connections: [f.connection], tokens: [] });
+  const ops = new Operations(store, { get: async () => 'synthetic-secret', set: async () => {}, remove: async () => {} },
+    new AuditLog(join(f.directory, 'logs')), () => new AdtBackend(f.connection, '', { transportFactory: f.create }));
+  try {
+    const failed = await ops.run('read_source', { connection_id: f.connection.connection_id, object_uri: object, version: 'active' });
+    assert.equal(failed.error?.code, 'RFC_CONTEXT_LOST');
+    const cleared = await ops.clearCache(); assert.equal(cleared.cleared_sessions, 1);
+    assert.equal((await ops.clearCache()).cleared_sessions, 0);
+  } finally { await ops.close(); await f.close(); }
+});
+
+test('failed RFC editor and quality contexts still require confirmed cleanup', async () => {
+  const f = await fixture('crash');
+  try {
+    for (const role of ['editor', 'quality'] as const) {
+      const channel = f.create(role);
+      await assert.rejects(channel.request({ url: '/sap/bc/adt/discovery' }));
+      await assert.rejects(channel.close(), error => safeError(error).code === 'RFC_CONTEXT_LOST');
+    }
+  } finally { await f.close(); }
+});
+
+
+test('RFC CTS timeout budget is scoped to transport reads and preflight, never mutations', () => {
+  const runtime = {timeoutMs:15000} as RfcRuntime;
+  for (const path of ['/sap/bc/adt/cts/transportrequests', '/sap/bc/adt/cts/transportrequests/DEVK904228'])
+    assert.equal(rfcRequestTimeoutMs(runtime, 'GET', path), 60000);
+  assert.equal(rfcRequestTimeoutMs(runtime, 'POST', '/sap/bc/adt/cts/transportchecks'), 60000);
+  for (const [method, path] of [['POST', '/sap/bc/adt/cts/transportrequests'], ['PUT', object+'/source/main'], ['POST', '/sap/bc/adt/activation'], ['GET', object], ['GET', '/sap/bc/adt/cts/transportrequestsevil']])
+    assert.equal(rfcRequestTimeoutMs(runtime, method, path), 15000);
+  assert.equal(rfcRequestTimeoutMs({...runtime,ctsTimeoutMs:90000}, 'GET', '/sap/bc/adt/cts/transportrequests'),90000);
+  assert.equal(rfcRequestTimeoutMs({...runtime,timeoutMs:120000}, 'GET', '/sap/bc/adt/cts/transportrequests'),120000);
 });
