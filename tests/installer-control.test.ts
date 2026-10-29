@@ -17,13 +17,18 @@ test('NSIS waits for PowerShell process exit and retains Unicode diagnostics wit
     const result = join(directory, 'result.txt');
     const executable = join(directory, 'probe.exe');
     await writeFile(helper, "\uFEFFparam($Action,$InstallDirectory,$ReportPath,[int]$Code)\n[IO.File]::WriteAllText($ReportPath, ('中文诊断 code=' + $Code), [Text.Encoding]::Unicode)\nWrite-Output 'console output is not used for completion'\nexit $Code\n", 'utf8');
+    const controlHost = join(directory, 'installer-host.exe');
+    const csc = join(process.env.SystemRoot ?? 'C:\\Windows', 'Microsoft.NET/Framework/v4.0.30319/csc.exe');
+    await exec(csc, ['/nologo', '/target:winexe', '/platform:anycpu', '/define:GUI', '/out:' + controlHost,
+      resolve('packaging/windows/Launcher.cs'), resolve('packaging/windows/InstallerControlHost.cs')], {windowsHide:true});
     const macro = resolve('packaging/windows/installer-control.nsh');
     const script = [
       'Unicode true', 'RequestExecutionLevel user', 'SilentInstall silent',
       'OutFile "' + executable + '"',
       '!include "LogicLib.nsh"', '!include "FileFunc.nsh"',
       '!include "' + macro + '"',
-      'Section', 'InitPluginsDir',
+      'Section', 'InitPluginsDir', 'SetOutPath "$PLUGINSDIR"',
+      'File /oname=installer-host.exe "' + controlHost + '"',
       '${GetParameters} $R0', '${GetOptions} $R0 "/CASE=" $R1',
       '!insertmacro RunInstallerControl "' + helper + '" \'-Action Check -InstallDirectory "' + directory + '" -Code $R1\'',
       'FileOpen $3 "' + result + '" w',

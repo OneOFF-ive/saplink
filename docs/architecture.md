@@ -314,3 +314,5 @@ JSONL 用于排查问题和人工核实操作阶段，不作为 SAP 状态的权
 - [SAP ADT 后端配置指南](https://help.sap.com/doc/2e65ad9a26c84878b1413009f8ac07c3/201909.001/en-US/config_guide_system_backend_abap_development_tools.pdf)
 
 上述参考用于接口和协议依据，不表示本应用具有 SAP 官方支持，也不替代目标系统上的兼容性验证。
+
+大程序小改动可用 update_source 的 edits 模式：src/source-edit.ts 在已校验 revision 的原文上执行唯一、非重叠的精确片段替换；服务器仍完整保存并读回核对。片段响应默认不回传源码，显式 inactive 版本可省去 active 读取。

@@ -27,7 +27,7 @@
 | 创建空函数模块 | create_function_module(name, description, function_group_uri, transport_task?, request_id) |
 | 函数组成员 | list_function_group_members(function_group_uri, limit?) |
 | 函数组激活快照 | get_function_group(function_group_uri) |
-| 保存源码 | update_source(object_uri? 或 source_uri?, source, expected_revision, transport_task?, request_id) |
+| 保存源码 | update_source(object_uri? 或 source_uri?, source 或 edits, expected_revision, version?, include_source?, transport_task?, request_id) |
 | 语法检查 | syntax_check(object_uri, version)，一般检查 inactive |
 | 激活 | activate_objects(objects: [{object_uri, expected_revision}], request_id) |
 | 查询传输请求及任务 | list_transport_requests |
@@ -47,8 +47,8 @@ search_enhancements 用 `*` 名称模式，type 为 all 或实时 schema 的 SMO
 
 1. 明确对象、包、变更范围及是否激活。write_enabled=false 时不因查询自动开启；需要开发变更时说明开关影响，在用户要求开启后由本地管理流程修改。
 2. object_uri 从搜索、包浏览或真实先前结果获取；source_uri 和 revision 从 read_source 获取，不拼接 /source/main，不猜任务号或 revision。先读取并审阅确切版本。
-3. update_source 携带审阅过的 expected_revision。每个明确意图的写操作用独立 request_id，创建、保存、激活分别用不同 ID。同 ID 和参数只返回当前进程缓存，不是重新执行或实时查询。
-4. 保存与激活分开，检查 source_save，读取/检查 inactive，处理诊断。VERSION_UNAVAILABLE 时按 next_action 显式读 active，不静默假定两个版本相同。
+3. 小范围修改优先使用 `update_source` 的 `edits: [{old_text, new_text}]`，不要重发整个大程序；old_text 必须逐字复制已审阅原文并包含足够的唯一上下文，各片段互不重叠，均以同一份原源码为基准。插入时保留一段原文作为锚点，删除可令 new_text 为空；不做模糊匹配。source 与 edits 二选一。传入读取时的 version 和审阅过的 expected_revision，inactive 可避免多读活动源码。片段模式默认返回已校验的 inactive revision 等元数据，不返回完整源码；确需全文时指定 include_source=true。旧安装版没有这些字段时使用其实际 schema 支持的整份保存方式。每个明确意图的写操作用独立 request_id，创建、保存、激活分别用不同 ID。同 ID 和参数只返回当前进程缓存，不是重新执行或实时查询。
+4. 保存与激活分开，检查 source_save：verification=passed 表示服务已读回核对未激活源码；使用返回的 inactive revision 继续语法检查或已授权激活，无需仅为拿 revision 再读取全文。需要审阅实际源码或校验失败时显式读取 inactive，处理诊断。VERSION_UNAVAILABLE 时按 next_action 显式读 active，不静默假定两个版本相同。
 5. 用户要求激活时，以当前 inactive revision 调用 activate_objects，再读 active 验证。同一授权变更涉及互相依赖的对象时，将它们及各自 revision 放在一次 objects 请求中联合激活，避免逐个激活造成依赖错误。函数组整体激活用 get_function_group 的快照 revision，并核实全部成员属于用户变更范围；组没有可直接保存的主源码。后端返回额外依赖时先核实变更范围，不自动扩展激活对象或反复重试。
 
 创建工具只生成壳，不生成完整接口或自动激活。按返回 next_action 获取真实源码/组快照，继续完成已授权工作。program_kind 为 report/include/module_pool/subroutine_pool；屏幕与 GUI 状态不由本服务生成。函数模块使用 ADT 支持的源码式接口声明，先看运行时工具帮助，不将调用语法或 Local Interface 注释当接口定义。

@@ -1009,3 +1009,65 @@ test('save HTTP diagnostics are correlated and sanitized on success and unknown 
     } finally { await f.cleanup(); }
   }
 });
+
+test('small source edits on a large program preserve save verification without echoing the whole program', async () => {
+  const f = await fixture();
+  try {
+    f.backend.active = 'REPORT ztest.\n' + '* unchanged line\n'.repeat(15000) + 'WRITE 1.\n';
+    const before = await f.backend.read(object,'active');
+    const args = {connection_id:f.connection.connection_id,object_uri:object,version:'active' as const,
+      expected_revision:before.revision,edits:[{old_text:'WRITE 1.',new_text:'WRITE 2.'}],request_id:'small-edit-large-program'};
+    const result = await f.operations.run('update_source',args);
+    assert.equal(result.status,'success'); assert.equal(result.source_save?.verification,'passed');
+    assert.equal(f.backend.inactive,before.source.replace('WRITE 1.','WRITE 2.'));
+    assert.equal(f.backend.active,before.source,'save never activates');
+    assert.equal((result.data as any).source,undefined); assert.equal((result.data as any).applied_edits,1);
+    assert.ok(JSON.stringify(args).length < before.source.length/100);
+    assert.ok(JSON.stringify(result).length < before.source.length/100);
+    assert.equal((await f.operations.run('update_source',args)).operation_id,result.operation_id);
+    assert.equal(f.backend.saves,1,'request replay protection also applies to fragment edits');
+  } finally {await f.cleanup();}
+});
+
+test('inactive source edits avoid an active read and may explicitly return full source', async () => {
+  const f=await fixture();
+  try {
+    f.backend.inactive='REPORT ztest.\nWRITE 1.';
+    const before=await f.backend.read(object,'inactive');
+    const read=f.backend.read.bind(f.backend);const versions:Version[]=[];
+    f.backend.read=async(uri,version)=>{versions.push(version);return read(uri,version);};
+    const result=await f.operations.run('update_source',{connection_id:f.connection.connection_id,object_uri:object,
+      version:'inactive',expected_revision:before.revision,edits:[{old_text:'WRITE 1.',new_text:'WRITE 2.'}],include_source:true,request_id:'inactive-patch'});
+    assert.equal(result.status,'success');assert.equal((result.data as any).source,'REPORT ztest.\nWRITE 2.');
+    assert.deepEqual(versions,['inactive','inactive']);
+  } finally {await f.cleanup();}
+});
+
+test('invalid source edit sets never write and still release the object lock', async () => {
+  for(const edits of [[{old_text:'missing',new_text:'new'}],[{old_text:'WRITE',new_text:'WRITE 3'}],
+    [{old_text:'WRITE 1.',new_text:'x'},{old_text:'1.',new_text:'y'}]]) {
+    const f=await fixture();
+    try {
+      f.backend.active='REPORT ztest.\nWRITE 1.\nWRITE 2.';
+      const before=await f.backend.read(object,'active');
+      const result=await f.operations.run('update_source',{connection_id:f.connection.connection_id,object_uri:object,
+        expected_revision:before.revision,edits,request_id:'invalid-patch'});
+      assert.equal(result.status,'error');assert.match(result.error!.code,/SOURCE_EDIT_/);
+      assert.equal(result.write_dispatched,false);assert.equal(f.backend.saves,0);assert.equal(f.backend.locks,f.backend.unlocks);
+    } finally {await f.cleanup();}
+  }
+});
+
+test('source edits preserve stale-revision and existing-draft protection', async () => {
+  for(const stale of [false,true]) {
+    const f=await fixture();
+    try {
+      const before=await f.backend.read(object,'active');
+      if(stale) f.backend.active='REPORT ztest.\nWRITE 2.';
+      else f.backend.inactive='REPORT ztest.\nWRITE 1.';
+      const result=await f.operations.run('update_source',{connection_id:f.connection.connection_id,object_uri:object,
+        version:'active',expected_revision:before.revision,edits:[{old_text:'REPORT ztest.',new_text:'REPORT ztest.\nWRITE 3.'}],request_id:'stale-patch'});
+      assert.equal(result.error?.code,'VERSION_CONFLICT');assert.equal(f.backend.saves,0);
+    } finally {await f.cleanup();}
+  }
+});

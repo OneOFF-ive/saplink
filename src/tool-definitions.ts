@@ -1,3 +1,4 @@
+import { sourceUpdateFields } from './source-edit.js';
 import { z } from 'zod';
 import { qualitySchemas, qualityDescriptions } from './quality-tools.js';
 import { repositorySchemas, repositoryDescriptions } from './repository-query.js';
@@ -107,13 +108,15 @@ export const toolSchemas = {
     ...connection,
     object_uri: adtUriSchema.optional(),
     source_uri: adtUriSchema.optional(),
-    source: z.string().max(1024 * 1024),
+    ...sourceUpdateFields,
+    version: version.optional().describe('Version read to obtain expected_revision. Supplying inactive avoids reading active before verifying that inactive revision.'),
     expected_revision: z.string().regex(/^[a-f0-9]{64}$/).describe(("Exact revision from read_source for this source and connection. On conflict reread and merge; do not " +
       "substitute a new revision without reviewing the source.")),
     transport_task: transportTaskSchema,
     request_id: requestIdSchema
   }).strict()
-    .refine(p => Boolean(p.object_uri || p.source_uri), { message: 'Provide object_uri or source_uri' }),
+    .refine(p => Boolean(p.object_uri || p.source_uri), { message: 'Provide object_uri or source_uri' })
+    .refine(p => (p.source === undefined) !== (p.edits === undefined), { message: 'Provide exactly one of source or edits' }),
   syntax_check: z.object({
     ...connection,
     object_uri: adtUriSchema,
@@ -181,7 +184,7 @@ const toolDescriptions: Record<ToolName, string> = {
   list_function_group_members: 'List function modules and Includes of a function group, excluding category nodes.',
   get_function_group: ("Snapshot function group members and source revisions for group activation. Pass the returned revision to " +
     "activate_objects for the group. Rejects groups exceeding 500 members."),
-  update_source: ("Save Program, Include, function module or group Include main source with expected revision. Does not " +
+  update_source: ("Save Program, Include, function module or group Include main source with expected revision. For small changes prefer edits:[{old_text,new_text}] over resending the full source. Each original fragment must match once; all edits target the original, non-overlapping source. Provide source OR edits. Include version from read_source to avoid unnecessary active reads. Edits return compact metadata by default; include_source:true requests full saved source. Full-source calls preserve their existing response by default. Does not " +
     "activate. Inspect source_save even on errors: saved=true means SAP accepted the save, not that content " +
     "verification passed; unknown requires reading backend state. Read inactive before retrying VERIFY_FAILED, " +
     "and do not use its revision to blindly overwrite. Function modules use their own lock and ADT " +

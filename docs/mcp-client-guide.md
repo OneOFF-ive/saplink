@@ -63,7 +63,7 @@
 | 创建空函数模块 | `create_function_module` | name、description、function_group_uri、可选 transport_task、request_id |
 | 查看组成员 | `list_function_group_members` | function_group_uri、limit |
 | 读取组快照 | `get_function_group` | function_group_uri |
-| 保存主源码 | `update_source` | object_uri 或 source_uri、source、expected_revision、可选 transport_task、request_id |
+| 保存主源码 | `update_source` | object_uri 或 source_uri、source 或 edits、expected_revision、可选 version/include_source/transport_task、request_id |
 | 检查源码 | `syntax_check` | object_uri、version |
 | 激活源码或函数组 | `activate_objects` | objects 中各 object_uri/expected_revision、request_id |
 | 查看请求和任务 | `list_transport_requests` | 连接，可选 transport_number 定向查询；无状态过滤参数 |
@@ -125,7 +125,7 @@ flowchart TD
 
 先确认用户已授权具体修改和激活；`write_enabled` 是服务开关，不等于用户已授权任意变更。需要传输任务时先按第 9 节选定，任务不从上次操作继承。
 
-调用 `update_source`，source 为审阅原文后生成的完整主源码，不是补丁：
+调用 `update_source`：小改动优先使用文末的 edits 片段模式。也兼容 source 整份模式，此时 source 为审阅原文后生成的完整主源码，示例：
 
 ```json
 {
@@ -317,3 +317,13 @@ request_id 在同一连接跨写工具共享；一次保存与一次激活必须
 ```
 
 服务不提供任意程序执行、业务数据写入、删除对象或释放传输请求。不向 tools 传入密码/令牌；遇到工具范围外需求，应明确说明能力边界。
+
+## 大程序的小范围修改
+
+小改动优先使用 `update_source` 的 `edits: [{old_text, new_text}]`，不要在请求和响应中重复生成整份程序。保留原 object_uri、expected_revision、transport_task 和独立 request_id，并传入读取时的 version（active 或 inactive）。明确为 inactive 时服务省去 active 读取；active 保存仍检查是否已有不同的 inactive 草稿。省略 version 保持旧的版本查找行为。
+
+source 与 edits 二选一。最多 50 个片段，old_text 不得为空，须在原文中恰好出现一次；重复时扩大上下文，各片段不能重叠。全部替换定位在同一份原文，不对替换生成的文字继续匹配。大小写、换行和空白均严格匹配，不做模糊定位。添加内容需带原文锚点，删除可使用空 new_text；合成后的源码受原有 1 MiB 字符上限约束。
+
+片段模式在持有锁、核实 revision 后合成完整源码，经原有 SAP 保存通道提交，再读回 inactive 核对。它减少 AI 输入输出量，不是 SAP 局部写入，也不跳过校验。成功默认仅返回源码 URI、hash、inactive revision、applied_edits 和 activated=false；include_source=true 返回全文。整份 source 模式默认保留原来的全文响应，也可用 include_source=false 缩小结果。
+
+SOURCE_EDIT_NOT_FOUND、SOURCE_EDIT_AMBIGUOUS、SOURCE_EDIT_OVERLAP 在发出保存前终止；重新读取并审阅原文后再修改，不直接重放。版本冲突、传输任务、写入开关、锁清理、去重和激活要求与整份保存相同。校验通过后直接用返回的 revision 继续下一步，不必仅为取得 revision 额外读取全文。

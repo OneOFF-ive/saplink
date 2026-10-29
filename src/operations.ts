@@ -1,3 +1,4 @@
+import { applySourceEdits, sourceUpdateSchema, type SourceEdit } from './source-edit.js';
 import { randomUUID } from 'node:crypto';
 import { qualitySchemas, qualityObject, type QualityInput, type QualityTool } from './quality-tools.js';
 import { repositorySchemas, type RepositoryInput, type RepositoryTool } from './repository-query.js';
@@ -20,6 +21,8 @@ export type Input = RepositoryInput & QualityInput & {
   source_uri?: string;
   version?: Version;
   source?: string;
+  edits?: SourceEdit[];
+  include_source?: boolean;
   expected_revision?: string;
   name?: string;
   description?: string;
@@ -618,6 +621,8 @@ export class Operations {
         };
       }
       case 'update_source': {
+        const update = sourceUpdateSchema.safeParse(input);
+        if (!update.success) throw new AppError('INVALID_INPUT', 'Provide exactly one of source or edits; edits require non-empty old_text and new_text strings.');
         if (!input.object_uri && !input.source_uri)
           throw new AppError('INVALID_URI', 'Provide object_uri or the source_uri returned by read_source');
         const object = programUri(input.object_uri ?? input.source_uri!);
@@ -639,13 +644,13 @@ export class Operations {
         return this.locked(backend, object, context, async (handle) => {
           context.steps.push('locked');
           // Revisions from either version are accepted, but that exact version is re-read under lock.
-          const active = await backend.read(object, 'active').catch(error => {
+          const active = input.version === 'inactive' ? undefined : await backend.read(object, 'active').catch(error => {
             if (safeError(error).code === 'OBJECT_NOT_FOUND' || safeError(error).code === 'VERSION_UNAVAILABLE')
               return undefined;
             throw error;
           });
           let current = active;
-          if (!active || active.revision !== input.expected_revision)
+          if (input.version !== 'active' && (!active || active.revision !== input.expected_revision))
             current = await backend.read(object, 'inactive').catch(error => {
               if (['OBJECT_NOT_FOUND', 'VERSION_UNAVAILABLE'].includes(safeError(error).code))
                 return undefined;
@@ -680,6 +685,7 @@ export class Operations {
             if (draft && draft.hash !== current.hash)
               throw conflict('An inactive draft exists; read inactive before editing', draft);
           }
+          const code = update.data.edits ? applySourceEdits(current.source, update.data.edits) : update.data.source!;
           await context.event('version_checked');
           const markSaveDispatched = () => {
             context.dispatched = true;
@@ -687,7 +693,7 @@ export class Operations {
             saveState.next_action = 'Read inactive and active source to establish backend state before any new write; do not blindly retry.';
           };
           if (!backend.saveDispatchTracking) markSaveDispatched();
-          try { await backend.save(current.source_uri, input.source!, handle, input.transport_task, markSaveDispatched); }
+          try { await backend.save(current.source_uri, code, handle, input.transport_task, markSaveDispatched); }
           finally {
             for (const diagnostic of backend.takeSaveDiagnostics?.() ?? []) await context.diagnostic(diagnostic);
           }
@@ -704,7 +710,7 @@ export class Operations {
             throw error;
           }
           saveState.inactive_revision = saved.revision;
-          const comparison = compareSavedSource(input.source!, saved.source, object);
+          const comparison = compareSavedSource(code, saved.source, object);
           saveState.normalization_applied = comparison.normalization_applied;
           context.warnings.push(...comparison.warnings);
           if (!comparison.equivalent) {
@@ -715,8 +721,11 @@ export class Operations {
           saveState.verification = 'passed';
           delete saveState.next_action;
           await context.event('verified');
+          const { source: savedCode, ...metadata } = saved;
           return {
-            ...saved,
+            ...metadata,
+            ...((update.data.include_source ?? !update.data.edits) ? {source:savedCode} : {}),
+            ...(update.data.edits ? {applied_edits:update.data.edits.length} : {}),
             activated: false
           };
         });
