@@ -14,6 +14,7 @@ import { activationBody, scopedActivationBody, activationResponse, type Activati
 import { probeEnhancementActivation, type EnhancementActivation } from './enhancements.js';
 import { tableQuery, readOnlySql, queryResult, queryCapabilities, type TableQuery, type SqlQuery } from './data-query.js';
 import { RfcTransport, type AdtTransport, type RfcRuntime, type RfcRole } from './rfc.js';
+import { validateRequestTimeout } from './request-timeout.js';
 
 export type Version = 'active' | 'inactive';
 export type ProgramKind = 'report' | 'include' | 'module_pool' | 'subroutine_pool';
@@ -106,6 +107,7 @@ export function sourceResult(connectionId: string, object: string, uri: string, 
     revision: digest(JSON.stringify([connectionId, uri, version, hash])) };
 }
 export interface Backend {
+  setRequestTimeout?(timeoutMs?: number): void;
   quality?(tool: QualityTool, input: QualityInput): Promise<unknown>;
   inspectRepository?(tool: RepositoryTool, input: RepositoryInput): Promise<unknown>;
   enhancementActivation?(object: string, name: string, type: string): Promise<EnhancementActivation>;
@@ -141,6 +143,8 @@ class BoundedHttp implements HttpClient {
   lastDiagnostic: BackendDiagnostic = {};
   lastFailure?: { http_status: number; request_path: string; request_method: string };
   constructor(private base: string, private onActivity?: () => void) {}
+  private requestTimeoutMs?: number;
+  setRequestTimeout(timeoutMs?: number) { this.requestTimeoutMs = validateRequestTimeout(timeoutMs); }
   async request(o: HttpClientOptions) {
     this.lastFailure = undefined;
     const url = new URL(o.url, this.base);
@@ -148,7 +152,7 @@ class BoundedHttp implements HttpClient {
     const started = performance.now();
     this.lastDiagnostic = { request_path: url.pathname, request_method: (o.method ?? 'GET').toUpperCase(),
       request_body_bytes: typeof o.body === 'string' ? Buffer.byteLength(o.body, 'utf8') : 0,
-      transport: 'axios_node_http' };
+      transport: 'axios_node_http', timeout_ms: this.requestTimeoutMs ?? 15000 };
     const requestContentType = Object.entries(o.headers ?? {}).find(([key]) => key.toLowerCase() === 'content-type')?.[1];
     if (typeof requestContentType === 'string' && /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/i.test(requestContentType.split(';')[0]))
       this.lastDiagnostic.request_content_type = requestContentType.split(';')[0].slice(0, 100);
@@ -173,7 +177,7 @@ class BoundedHttp implements HttpClient {
     };
     try {
     const r = await axios.request<string>({ url: url.href, method: o.method ?? 'GET', headers: o.headers,
-      params: o.qs, auth: o.auth, data: o.body, timeout: 15000, maxRedirects: 0,
+      params: o.qs, auth: o.auth, data: o.body, timeout: this.requestTimeoutMs ?? 15000, maxRedirects: 0,
       maxContentLength: /^\/sap\/bc\/adt\/cts\/transportrequests(?:\/[A-Z0-9]{3}K[0-9]{6})?$/.test(url.pathname) ? 16 * 1024 * 1024 : 4 * 1024 * 1024, maxBodyLength: 2 * 1024 * 1024, responseType: 'text', proxy: false,
       validateStatus: () => true });
     inspectRequest(r.request, r.request?.res);
@@ -233,6 +237,11 @@ function queryIdleTimeoutMs() {
 }
 
 export class AdtBackend implements Backend {
+  private requestTimeoutMs?: number;
+  setRequestTimeout(timeoutMs?: number) {
+    this.requestTimeoutMs = validateRequestTimeout(timeoutMs);
+    for (const channel of this.channels) channel.setRequestTimeout?.(this.requestTimeoutMs);
+  }
   readonly saveDispatchTracking = true;
   private client: ADTClient;
   private saveDiagnostics: BackendDiagnostic[] = [];
@@ -255,6 +264,7 @@ export class AdtBackend implements Backend {
       const result = options.transportFactory?.(role, onActivity) ?? (connection.rfc
         ? new RfcTransport(connection, password, role, options.rfcRuntime, onActivity)
         : new BoundedHttp(connection.base_url, onActivity));
+      result.setRequestTimeout?.(this.requestTimeoutMs);
       if (role === 'editor') {
         const request = result.request.bind(result);
         result.request = async options => {

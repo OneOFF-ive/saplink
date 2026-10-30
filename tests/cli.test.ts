@@ -53,6 +53,54 @@ async function freePort() {
   return address.port;
 }
 
+test('app and MCP have independent lifecycles while preserving the UI, configuration and standalone CLI', async () => {
+  const f = await fixture();
+  try {
+    const uiPort = await freePort(); const mcpPort = await freePort();
+    const host = await f.run('app', 'start', '--port', String(uiPort));
+    assert.equal(host.code, 0, JSON.stringify(host));
+    assert.equal(host.result.data.mcp_running, false); assert.equal(host.result.data.ui_port, uiPort);
+    const pid = host.result.data.pid;
+    assert.equal((await f.run('mcp', 'status')).result.data.state, 'stopped');
+    assert.equal((await f.run('mcp', 'start', '--port', String(mcpPort))).result.error.code, 'TOKEN_REQUIRED');
+    assert.equal((await f.run('app', 'status')).result.data.pid, pid);
+    await f.store.createToken('lifecycle-test');
+    const enabled = await f.run('mcp', 'start', '--port', String(mcpPort));
+    assert.equal(enabled.code, 0, JSON.stringify(enabled));
+    assert.equal(enabled.result.data.pid, pid); assert.equal(enabled.result.data.state, 'running');
+    const session = new URL((await openServiceUi(f.directory, uiPort)).url);
+    const headers = { Origin: session.origin, 'X-Admin-Token': session.hash.slice(1) };
+    const state = async () => (await fetch(`${session.origin}/api/state`, { headers })).json();
+    assert.equal((await state()).running, true);
+    const stopped = await f.run('mcp', 'stop');
+    assert.equal(stopped.result.data.state, 'stopped'); assert.equal(stopped.result.data.pid, pid);
+    assert.equal(stopped.result.data.app_state, 'running'); assert.equal((await state()).running, false);
+    assert.equal((await f.run('sap', 'list_connections')).code, 0);
+    const restarted = await f.run('mcp', 'restart');
+    assert.equal(restarted.code, 0); assert.equal(restarted.result.data.pid, pid); assert.equal(restarted.result.data.port, mcpPort);
+    const occupied = createServer();
+    await new Promise<void>(resolve => occupied.listen(0, '127.0.0.1', resolve));
+    try {
+      const failed = await f.run('mcp', 'restart', '--port', String((occupied.address() as { port: number }).port));
+      assert.equal(failed.result.error.code, 'EADDRINUSE'); assert.equal((await state()).running, true);
+      assert.equal((await f.run('mcp', 'status')).result.data.port, mcpPort);
+    } finally { await new Promise<void>(resolve => occupied.close(() => resolve())); }
+    const hostRestart = await f.run('app', 'restart');
+    assert.equal(hostRestart.code, 0, JSON.stringify(hostRestart));
+    assert.notEqual(hostRestart.result.data.pid, pid); assert.equal(hostRestart.result.data.mcp_running, true);
+    assert.equal(hostRestart.result.data.ui_port, uiPort); assert.equal(hostRestart.result.data.port, mcpPort);
+    await f.run('mcp', 'stop');
+    const withoutMcp = await f.run('app', 'restart');
+    assert.equal(withoutMcp.code, 0); assert.equal(withoutMcp.result.data.mcp_running, false);
+    assert.equal((await f.run('mcp', 'start', '--port', String(mcpPort))).result.data.state, 'running');
+    assert.equal((await f.run('app', 'stop')).result.data.state, 'stopped');
+    assert.equal((await f.run('mcp', 'status')).result.data.state, 'stopped');
+    assert.equal((await f.run('mcp', 'stop')).result.data.state, 'stopped');
+    assert.equal((await f.run('sap', 'list_connections')).code, 0);
+    assert.equal((await f.store.load()).tokens.length, 1);
+  } finally { await f.cleanup(); }
+});
+
 test('background MCP and graphical management share one host and preserve it across repeated opens and MCP restarts', async () => {
   const f = await fixture();
   let relay: ReturnType<typeof spawn> | undefined;
@@ -121,7 +169,8 @@ test('JSON diagnostics and argument errors are structured; tokens are not printe
     assert.equal(logsPreview.code, 0); assert.equal(logsPreview.result.data.dry_run, true);
     assert.equal((await f.run('logs', 'clear', '--older-than-days', '-1')).result.error.code, 'INVALID_INPUT');
     const diagnosis = await f.run('doctor');
-    assert.equal(diagnosis.code, 1); assert.equal(diagnosis.result.data.healthy, false);
+    assert.equal(diagnosis.code, 0); assert.equal(diagnosis.result.data.healthy, true);
+    assert.equal(diagnosis.result.data.checks.find((check: { name: string }) => check.name === 'tokens').status, 'warning');
     assert.equal(diagnosis.result.data.sap_probe_performed, false);
     assert.equal((await f.run('service', 'start')).result.error.code, 'TOKEN_REQUIRED');
     assert.equal((await f.run('token', 'create')).result.error.code, 'TOKEN_OUTPUT_REQUIRED');
@@ -254,9 +303,12 @@ test('occupied ports fail without takeover; external owners and orphan guards ar
     release = await acquireLease(f.directory, 'runtime.lock');
     assert.equal((await f.run('status')).result.data.service.state, 'external');
     assert.equal((await f.run('service', 'stop')).result.error.code, 'SERVICE_NOT_MANAGED');
+    assert.equal((await f.run('mcp', 'status')).result.data.state, 'unknown');
+    assert.equal((await f.run('mcp', 'stop')).result.error.code, 'SERVICE_NOT_MANAGED');
     assert.equal((await inspectLease(f.directory)).state, 'running');
     await release(); release = undefined;
     await writeFile(join(f.directory, 'runtime.lock.guard'), '');
+    assert.equal((await f.run('mcp', 'status')).result.data.state, 'unknown');
     assert.equal((await f.run('service', 'start', '--port', String(address.port))).result.error.code, 'LEASE_BUSY');
     assert.equal(await readFile(join(f.directory, 'runtime.lock.guard'), 'utf8'), '');
   } finally {

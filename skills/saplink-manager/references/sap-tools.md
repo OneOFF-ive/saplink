@@ -1,16 +1,18 @@
-# SAP 工具使用
+# CLI SAP 操作
 
-开始每项 SAP 查询或 ABAP 开发任务前，先按 [SKILL.md 的服务前置检查](../SKILL.md#访问-sap-前先检查-mcp-服务)核实 MCP 服务；未启动时先正常启动并验证客户端连接、工具发现和 `list_connections`，再访问目标 SAP。只读查询也适用，已有工具名称或历史成功记录不能替代本次服务检查。服务启动失败时先处理并报告阻碍，不直接继续业务请求。同一任务中连接持续可用时不逐工具重复检查。
+开始任务时按 [CLI 接入](cli-setup.md)确认本机命令可用，执行 `saplink tools instructions --json` 和 `saplink sap list_connections --json`。通过 CLI 直接访问目标 SAP，不检查或启动 MCP，不创建令牌或编辑客户端配置。
 
-工具可能带 saplink-mcp、saplink 或其他客户端前缀；以下用协议名称。通过宿主发现真实工具、读取 instructions 和实时 schema，不构造不存在的 CLI 业务命令。
+以下操作名称均对应 `saplink sap <operation>` 子命令。通过 `saplink tools list --json` 和 `saplink tools describe <operation> --json` 获取本机版本的操作目录和参数 schema，输入用 UTF-8 JSON 文件或 `--input -` 管道传入，不依赖客户端工具前缀。
 
 ## 选择系统与理解结果
 
-先调用 `list_connections`，核对 `connection_id`、传输方式、目标服务器、三位 Client、用户名及 `write_enabled`；RFC 还需核对系统号和路由，不用兼容 URL 判断真实 HTTP 主机或端口。不凭 dev/prod 名称推断用途；系统或 Client 不明确时确认。除 list_connections 外，其他工具都需要真实 connection_id。
+先执行 `saplink sap list_connections --json`，核对 `connection_id`、传输方式、目标服务器、三位 Client、用户名及 `write_enabled`；RFC 还需核对系统号和路由，不用兼容 URL 判断真实 HTTP 主机或端口。不凭 dev/prod 名称推断用途；系统或 Client 不明确时确认。除 list_connections 外，其他工具都需要真实 connection_id。
 
 选定目标后可用 `get_capabilities` 探测 ADT discovery；它不授予权限，未声明也不证明绝对不支持。配置接入不需要随意查询业务表。
 
-优先检查 MCP `isError`、`structuredContent`，其次文本 JSON。结果常含 operation_id、status、completed_steps、data 或 error、warnings；参数校验和执行前错误不保证有 operation_id。写操作还看 outcome、write_dispatched、source_save，不能只看 status。保留操作 ID 用于排障，但没有通用“按操作 ID 查询”工具。
+检查退出码及外层 `status`。JSON 成功或 SAP 操作失败时，外层 `data` 是完整操作结果：其中包含 operation_id、status、completed_steps、data 或 error、warnings；参数或本地失败在外层 `error`。写操作还检查完整结果中的 outcome、write_dispatched、source_save，不能只看状态。保留操作 ID 便于查日志，没有通用按操作 ID 查询结果的命令。
+
+慢操作在本次命令添加 `--timeout-ms 60000`，或在输入中传数值型 `timeout_ms`（100～600000 毫秒）。两处都提供时值须一致。它设置每个后端请求的超时，不是整次操作的总时限；不改变连接设置，也不保证 SAP 在客户端超时后停止。
 
 ## 工具选择
 
@@ -47,7 +49,7 @@ search_enhancements 用 `*` 名称模式，type 为 all 或实时 schema 的 SMO
 
 1. 明确对象、包、变更范围及是否激活。write_enabled=false 时不因查询自动开启；需要开发变更时说明开关影响，在用户要求开启后由本地管理流程修改。
 2. object_uri 从搜索、包浏览或真实先前结果获取；source_uri 和 revision 从 read_source 获取，不拼接 /source/main，不猜任务号或 revision。先读取并审阅确切版本。
-3. 小范围修改优先使用 `update_source` 的 `edits: [{old_text, new_text}]`，不要重发整个大程序；old_text 必须逐字复制已审阅原文并包含足够的唯一上下文，各片段互不重叠，均以同一份原源码为基准。插入时保留一段原文作为锚点，删除可令 new_text 为空；不做模糊匹配。source 与 edits 二选一。传入读取时的 version 和审阅过的 expected_revision，inactive 可避免多读活动源码。片段模式默认返回已校验的 inactive revision 等元数据，不返回完整源码；确需全文时指定 include_source=true。旧安装版没有这些字段时使用其实际 schema 支持的整份保存方式。每个明确意图的写操作用独立 request_id，创建、保存、激活分别用不同 ID。同 ID 和参数只返回当前进程缓存，不是重新执行或实时查询。
+3. 小范围修改优先使用 `update_source` 的 `edits: [{old_text, new_text}]`，不要重发整个大程序；old_text 必须逐字复制已审阅原文并包含足够的唯一上下文，各片段互不重叠，均以同一份原源码为基准。插入时保留一段原文作为锚点，删除可令 new_text 为空；不做模糊匹配。source 与 edits 二选一。传入读取时的 version 和审阅过的 expected_revision，inactive 可避免多读活动源码。片段模式默认返回已校验的 inactive revision 等元数据，不返回完整源码；确需全文时指定 include_source=true。旧安装版没有这些字段时使用其实际 schema 支持的整份保存方式。每个明确意图的写操作用独立 request_id，创建、保存、激活分别用不同 ID。CLI 在发出前持久保留连接/request_id；重复调用返回 REQUEST_ALREADY_USED，不会返回旧结果，进程退出和失败后仍然有效。先核实 SAP 实际状态及日志，再考虑新的已授权写入，不删除标记或盲目换 ID。
 4. 保存与激活分开，检查 source_save：verification=passed 表示服务已读回核对未激活源码；使用返回的 inactive revision 继续语法检查或已授权激活，无需仅为拿 revision 再读取全文。需要审阅实际源码或校验失败时显式读取 inactive，处理诊断。VERSION_UNAVAILABLE 时按 next_action 显式读 active，不静默假定两个版本相同。
 5. 用户要求激活时，以当前 inactive revision 调用 activate_objects，再读 active 验证。同一授权变更涉及互相依赖的对象时，将它们及各自 revision 放在一次 objects 请求中联合激活，避免逐个激活造成依赖错误。函数组整体激活用 get_function_group 的快照 revision，并核实全部成员属于用户变更范围；组没有可直接保存的主源码。后端返回额外依赖时先核实变更范围，不自动扩展激活对象或反复重试。
 
@@ -61,6 +63,6 @@ SAP 要求变更记录时，每次 create/update 显式传确认过的 transport
 - partial、unknown、VERIFY_FAILED 或已 write_dispatched 后出错：核实实际保存、创建、传输或激活状态，不自动换 request_id 重放。
 - OBJECT_LOCKED、SESSION_NEEDS_REVIEW、LOCK_CLEANUP_FAILED：报告锁/会话问题及完成阶段，不强制解锁或换连接绕过。
 - WRITE_DISABLED、登录或授权错误：区分本地开关、凭据、SAP 权限与 CSRF，在用户授权范围内处理，不反复尝试失败密码。
-- REQUEST_LIMIT：当前进程去重容量有限，先核实在途及未知操作，再按维护任务正常重启。重启清空索引，不保证跨重启恰好执行一次。
+- REQUEST_ALREADY_USED：该 CLI 写意图已被保留，可能已经到达 SAP。先查实际状态及日志；重启、更改超时或清理缓存不会解除防重复保护。
 
-取消请求或终止客户端不保证 SAP 停止写入；日志不提供事务回滚或源码备份。不支持任意 ABAP 执行、业务数据写入、对象删除、调试或传输释放。只报告已确认结果，能力之外明确说明，不用终端绕过工具限制。
+取消请求或终止客户端不保证 SAP 停止写入；日志不提供事务回滚或源码备份。`syntax_check` 是语法检查，ATC 需另用 `get_atc_configuration/run_atc/get_atc_results`，不能将二者混称。ATC 提交和 ABAP Unit 执行仍要求写开关、执行确认与独立请求 ID，按实时 schema 和用户授权执行。不支持任意 ABAP 执行、业务数据写入、对象删除、调试或传输释放。只报告已确认结果，能力之外明确说明，不用终端绕过工具限制。

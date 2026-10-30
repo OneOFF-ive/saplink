@@ -15,7 +15,7 @@
 <p align="center">
   <a href="https://github.com/OneOFF-ive/saplink/releases">⬇️ 下载与发布说明</a> ·
   <a href="docs/windows-installer.md">📦 安装指南</a> ·
-  <a href="docs/mcp-client-guide.md">📖 客户端手册</a> ·
+  <a href="docs/cli-client-guide.md">📖 CLI 使用指南</a> ·
   <a href="docs/README.md">📚 全部文档</a>
 </p>
 
@@ -23,9 +23,9 @@
 
 ## 🔗 让 SAP 能力进入 AI 工作流
 
-SapLink 将 SAP 中的源码、开发对象和数据查询能力，通过 MCP 提供给 AI 客户端。你可以在熟悉的 AI 工作环境中阅读和分析 ABAP、创建与修改程序，并完成语法检查和激活。
+SapLink 将 SAP 中的源码、开发对象和数据查询能力，默认通过 CLI 提供给支持本机命令的 AI 客户端，配合 SapLink 技能即可使用。MCP 保留为供愿意研究接入方式的用户自行配置的额外功能。你可以在熟悉的 AI 工作环境中阅读和分析 ABAP、创建与修改程序，并完成语法检查和激活。
 
-应用独立运行，不依赖 VS Code 或 SAP GUI。通过本地管理界面配置 SAP 连接后，支持 Streamable HTTP 的 MCP 客户端即可接入。
+应用独立运行，不依赖 VS Code 或 SAP GUI。通过本地管理界面配置 SAP 连接后，AI 可执行 `saplink tools instructions --json` 和 `saplink sap list_connections --json` 开始使用 CLI，默认无需启动 MCP 或创建访问令牌。详见 [CLI 客户端指南](docs/cli-client-guide.md)。
 
 添加连接时可选择 HTTP/HTTPS 或 RFC/JCo。RFC 支持直连及不带路由密码的 SAProuter 路由，复用现有 ADT 工具与写入保护。内部完整安装包自带 Java 和 JCo，固定使用随包环境，无需用户安装或配置；Windows ARM64 包需要 Windows 11，通过独立 x64 Java/JCo 子进程运行 RFC。配置方法见 [ADT over RFC](docs/rfc-transport.md)。旧连接继续使用 HTTP/HTTPS。
 
@@ -51,15 +51,15 @@ SapLink 的图标由三个相扣的圆环构成：左右两个大圆环代表 **
 ## 🚀 四步开始
 
 ```text
-AI 客户端 → SapLink 本地 MCP 服务 → SAP ADT → SAP ABAP 系统
+AI 客户端 + SapLink 技能 → SapLink CLI → SAP ADT（HTTP 或 RFC）→ SAP ABAP 系统
 ```
 
 1. **下载并安装**：通过 [官网下载入口](https://saplink.cloud/download.html)从 COS 获取适合本机架构的 Windows 安装包，或使用 [GitHub Releases](https://github.com/OneOFF-ive/saplink/releases)，安装后通过快捷方式打开管理页面。安装包内置运行环境，无需另装 Node.js。
 2. **添加 SAP 连接**：默认选择 RFC，填写应用服务器、系统号、Client、用户名和语言，可从本机 SAP Logon 导入服务器信息；选择 HTTP 时填写 ADT 地址。密码在本机输入，再测试连接。
-3. **接入 AI 客户端**：创建访问令牌、启动 MCP，将服务地址与令牌配置到客户端。
+3. **添加 SapLink 技能**：将 [saplink-manager 技能包](skills/saplink-manager/SKILL.md)导入支持本机命令的 AI 客户端，由 AI 通过 CLI 使用已保存的连接。无需配置 MCP 或创建令牌。
 4. **开始操作**：让 agent 先确认目标系统，再按任务读取、查询或执行已授权的开发变更。
 
-x64 安装包支持 Windows 10 1809+ / Windows 11；包含 RFC 运行环境的 ARM64 安装包需要 Windows 11。HTTP 连接要求 SAP ADT HTTP 服务可达；RFC 连接要求系统支持并允许调用 ADT over RFC 接口，无需提供 HTTP 端口。AI 客户端仍使用 Streamable HTTP 和 Bearer 认证头接入本地 SapLink。
+x64 安装包支持 Windows 10 1809+ / Windows 11；包含 RFC 运行环境的 ARM64 安装包需要 Windows 11。HTTP 连接要求 SAP ADT HTTP 服务可达；RFC 连接要求系统支持并允许调用 ADT over RFC 接口，无需提供 HTTP 端口。默认 CLI 入口直接使用本机保存的连接及凭据。需要研究 MCP 时再配置 Streamable HTTP 与 Bearer 认证，见 [可选 MCP 接入](docs/operations.md#6-客户端配置)。
 
 | 你的电脑 | 选择安装包 |
 | --- | --- |
@@ -84,8 +84,9 @@ SapLink 是开发与查询工具，不是完整 IDE。目前不提供调试、�
 | 配置连接、接入客户端与排查故障 | [部署与运维手册](docs/operations.md) |
 | 检查代码质量、运行测试与比较版本 | [ATC、Unit 与版本差异](docs/quality-tools.md) |
 | 理解字段、引用影响与类结构 | [仓库语义查询](docs/repository-query.md) |
-| 让 agent 快速学习 SAP 操作 | [MCP 客户端 SAP 操作手册](docs/mcp-client-guide.md) |
-| 让终端型 AI 客户端管理本地服务 | [AI 终端管理](docs/ai-management.md) |
+| 自行研究可选 MCP 接入与操作 | [MCP 客户端 SAP 操作手册](docs/mcp-client-guide.md) |
+| 让 AI 直接用 CLI 连接 SAP，无需配置 MCP | [CLI 客户端指南](docs/cli-client-guide.md) |
+| 让 AI 配置连接、管理宿主/MCP/令牌并使用 SAP | [AI 终端管理](docs/ai-management.md) |
 | 运行源码、测试与制作安装包 | [开发与构建指南](docs/development.md) |
 | 发布版本、配置 GitHub Actions 与下载同步 | [发布与 Actions 手册](docs/releases-and-actions.md) |
 | 理解架构与模块职责 | [架构文档](docs/architecture.md) |

@@ -2,7 +2,7 @@
 
 本指南面向修改源码、运行测试和制作安装包的开发者。普通用户请阅读 [Windows 安装指南](windows-installer.md)；已安装应用的日常操作统一使用 [运维手册](operations.md) 中的 `saplink` 命令。
 
-GitHub Release 附件要求、COS 同步 Action 的触发条件、secrets 和恢复步骤集中见 [发布与 GitHub Actions](releases-and-actions.md)。当前 Actions 只同步已构建的正式版附件，不承担源码构建或 push/PR 自动测试。
+GitHub Release 附件要求、COS 同步 Action 的触发条件、secrets 和恢复步骤集中见 [发布与 GitHub Actions](releases-and-actions.md)。当前 GitHub Actions 已暂停，工作流定义以 `.yml.disabled` 保留，相关脚本及本地发布流程均保留；恢复方式见发布手册。
 
 ## 从源码运行
 
@@ -20,12 +20,14 @@ node dist/cli.js --help
 
 ```powershell
 node dist/cli.js ui
+node dist/cli.js tools instructions --json
+node dist/cli.js sap list_connections --json
 node dist/cli.js status --json
 node dist/cli.js doctor --json
 node dist/cli.js update check --json
 ```
 
-`node dist/cli.js ui` 在前台运行，保持终端开启，用 Ctrl+C 正常退出；关闭浏览器不会结束进程。`start-ui.cmd` 是源码目录的便捷入口。源码与已安装应用默认共用用户配置目录，不要同时启动；需要隔离测试时使用专用 `SAPLINK_CONFIG_DIR` 和 `SAPLINK_LOG_DIR`。
+`node dist/cli.js ui` 打开或复用托管宿主，并作为前台附着命令供桌面托盘使用；Ctrl+C 仅结束附着命令，关闭浏览器也不会退出宿主。正常退出宿主使用 `node dist/cli.js app stop --json`，会同时关闭其 MCP；仅停 MCP 使用 `node dist/cli.js mcp stop --json`。`start-ui.cmd` 是源码目录的便捷入口。源码与已安装应用默认共用用户配置目录，不要同时启动独立的管理/服务宿主；CLI SAP 操作可以并存，但须遵守配置锁。需要隔离测试时使用专用 `SAPLINK_CONFIG_DIR` 和 `SAPLINK_LOG_DIR`。
 
 运维手册中的 `saplink <参数>` 对应项目目录内的 `node dist/cli.js <参数>`。`npm start -- <参数>` 也是项目脚本入口，但不用于用户运维示例；自动化优先直接运行 Node CLI，避免 npm 附加输出影响 JSON 解析。
 
@@ -152,7 +154,7 @@ node scripts/create-update-manifest.mjs --version 0.1.0 --architectures x64
 
 ### GitHub Release 自动同步到 COS
 
-工作流为 `.github/workflows/sync-cos-downloads.yml`，与官网同步独立运行。将工作流及脚本推送到 `main` 后生效；GitHub 发布正式 Release 自动触发，跳过预发布。先将两个架构安装包作为附件上传到 Release 草稿，再发布。脚本允许等待附件和 GitHub SHA-256 元数据就绪，超时失败，不发布半套更新。
+工作流当前以 `.github/workflows/sync-cos-downloads.yml.disabled` 暂停保存，与官网同步独立。以下自动触发、手动 dispatch 和 reusable workflow 步骤均需先按[发布手册](releases-and-actions.md#当前状态github-actions-已暂停)恢复工作流。恢复后的文件名为 `sync-cos-downloads.yml`。将工作流及脚本推送到 `main` 后生效；GitHub 发布正式 Release 自动触发，跳过预发布。先将两个架构安装包作为附件上传到 Release 草稿，再发布。脚本允许等待附件和 GitHub SHA-256 元数据就绪，超时失败，不发布半套更新。
 
 仓库 Actions secrets 使用 `COS_SECRET_ID`、`COS_SECRET_KEY`。固定目标为桶 `saplink-1302377695`、地域 `ap-shanghai`，对象前缀 `saplink/`。使用专用子账号，保留 `cos:GetObject`、`cos:HeadObject`、`cos:PutObject`，并为断点续传增加 `cos:InitiateMultipartUpload`、`cos:UploadPart`、`cos:CompleteMultipartUpload`、`cos:ListMultipartUploads`、`cos:ListParts`。对象操作限制为该前缀；列举上传任务按腾讯云对应桶资源授权。若之前按单次 PUT 的最小策略授权，需要先补齐这些权限，无需重新生成密钥，也不需要授予整个账号的管理权限、修改桶 ACL 或删除已发布对象的权限。[腾讯云分块上传权限说明](https://cloud.tencent.com/document/product/436/65820)。密钥仅在 COS 上传步骤的环境中读取，不传命令参数，不展示 SDK 错误正文或请求上下文。桶的公开读权限需已配置，工作流不会改变它。
 

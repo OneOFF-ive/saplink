@@ -9,7 +9,7 @@ import { appVersion } from './version.js';
 import { checkForUpdate, isNewerVersion, type UpdateResult } from './updates.js';
 
 export type InstalledApplication = { root: string; architecture: 'x64' | 'arm64'; launcher: string };
-export type RestartPlan = { mode: 'ui' | 'service' | 'stopped'; mcp_port?: number; ui_port?: number };
+export type RestartPlan = { mode: 'ui' | 'app' | 'service' | 'stopped'; mcp_port?: number; ui_port?: number };
 export type InstallProgress = {
   phase: 'idle' | 'checking' | 'downloading' | 'verifying' | 'preparing' | 'installing' | 'failed';
   message: string; downloaded_bytes: number; total_bytes: number | null; version?: string; error_code?: string;

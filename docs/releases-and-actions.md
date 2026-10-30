@@ -2,23 +2,31 @@
 
 面向项目维护者。用户安装与升级见 [安装指南](windows-installer.md)，本地构建见 [开发与构建指南](development.md)。
 
+## 当前状态：GitHub Actions 已暂停
+
+工作流保存在 `.github/workflows/sync-cos-downloads.yml.disabled`，原始定义和 `.github/scripts` 中的脚本全部保留。该后缀不会作为活动工作流加载；此变更提交并推送到远端相应分支后，正式 Release、手动 dispatch 和 reusable workflow 调用均不再使用这份定义。已经排队或正在运行的远端任务不会因本地改名自动取消。
+
+暂停期间，发布 GitHub Release 不会自动同步 COS，也不会自动刷新 COS 的安装包和技能清单。需要同步时按本文提供的本地同步命令执行；本地构建、打包和发布脚本保持可用。
+
+恢复时，将文件名改回 `sync-cos-downloads.yml`，提交并推送到 `main`；确认所需 secrets 仍有效，再手动补同步需要的最新正式版本。恢复不会补发暂停期间的旧事件。以下工作流配置、触发及 Actions 操作说明供恢复后使用。
+
 ## 1. 发布链路与职责
 
 ```mermaid
 flowchart TD
     Build[Windows 本地构建与验收] --> Draft[GitHub Release 草稿及两个架构附件]
     Draft --> Release[发布最新正式 Release]
-    Release --> COS[Sync COS downloads]
+    Release --> COS[Sync COS downloads（当前暂停）]
     COS --> Manifest[COS 安装包与 latest.json]
     COS --> CosSkill[同版本 skill ZIP]
     Manifest --> Client[SapLink 检查版本与用户确认更新]
 ```
 
-当前 `.github/workflows` 仅保留 COS 下载同步工作流，没有 push/PR 自动测试、Windows 安装包构建或自动创建 Release 的工作流。本地 `release.ps1` 更新版本并打包，不提交 Git、不创建标签、不上传发布。上传 Git 标签本身也不会触发该工作流。
+当前 `.github/workflows` 仅归档暂停的 COS 下载同步定义，没有活动工作流，没有 push/PR 自动测试、Windows 安装包构建或自动创建 Release 的工作流。本地 `release.ps1` 更新版本并打包，不提交 Git、不创建标签、不上传发布。上传 Git 标签本身也不会触发该工作流。
 
 | 工作流 | 文件 | 目标 | Actions secret | 超时 |
 | --- | --- | --- | --- | --- |
-| Sync COS downloads | [sync-cos-downloads.yml](../.github/workflows/sync-cos-downloads.yml) | 国内更新源和下载文件 | COS_SECRET_ID、COS_SECRET_KEY | 90 分钟 |
+| Sync COS downloads | [sync-cos-downloads.yml.disabled](../.github/workflows/sync-cos-downloads.yml.disabled) | 国内更新源和下载文件 | COS_SECRET_ID、COS_SECRET_KEY | 90 分钟 |
 
 工作流运行在 ubuntu-latest，仓库权限为 contents: read，只允许 `OneOFF-ive/saplink` 执行。使用 concurrency group 串行同步，cancel-in-progress=false，避免发布任务相互覆盖。
 

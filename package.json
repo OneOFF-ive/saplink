@@ -1,9 +1,9 @@
 {
   "name": "saplink",
-  "version": "2.0.5",
+  "version": "2.1.0",
   "private": true,
   "type": "module",
-  "description": "Local HTTP MCP server for SAP ABAP development",
+  "description": "Local SAP CLI for AI clients with optional HTTP MCP access",
   "bin": {
     "saplink": "dist/cli.js"
   },

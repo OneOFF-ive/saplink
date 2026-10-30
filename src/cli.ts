@@ -10,24 +10,25 @@ import { ConfigStore, WindowsCredentials, connectionSchema, connectionBaseUrl, c
 import { AdtBackend } from './adt.js';
 import { AppError } from './errors.js';
 import { acquireLease } from './lease.js';
-import { startAdmin } from './admin.js';
 import { printSuccess, printFailure, parsePort } from './cli-output.js';
 import { installationStatus, doctor } from './diagnostics.js';
-import { startService, stopService, restartService, serviceStatus, clearServiceCache, runManagedService, reportStartupFailure, openServiceUi } from './service.js';
+import { startService, stopService, restartService, serviceStatus, clearServiceCache, runManagedService, reportStartupFailure, openServiceUi,
+  startApplication, restartApplication, startMcp, stopMcp, restartMcp, mcpStatus } from './service.js';
 import { promptLocalPassword } from './password-prompt.js';
 import { cleanupLogs, retentionDays } from './log-cleanup.js';
 import { checkForUpdate, startRuntimeUpdateChecks } from './updates.js';
 import { SelfUpdater } from './self-update.js';
+import { registerSapCli } from './sap-cli.js';
 
 const store = new ConfigStore();
 const credentials = new WindowsCredentials();
 const jsonOutput = process.argv.includes('--json');
-const cli = new Command().name('saplink').description('SapLink: local SAP ADT MCP server and lifecycle manager')
+const cli = new Command().name('saplink').description('SapLink: direct SAP CLI, local MCP server and lifecycle manager')
   .version(appVersion).option('--json', 'Return one JSON result; never prompt in the terminal')
   .exitOverride().configureOutput({ writeErr: text => { if (!jsonOutput) process.stderr.write(text); } });
 
 cli.hook('postAction', (_command, action) => {
-  if (!['ui', 'serve', '_run'].includes(action.name())) return;
+  if (!['serve', '_run'].includes(action.name())) return;
   const updates = startRuntimeUpdateChecks(store.directory);
   process.once('SIGINT', updates.stop);
   process.once('SIGTERM', updates.stop);
@@ -152,7 +153,10 @@ updates.command('install').option('--yes', 'Confirm download, graceful stop and 
     }
     const release = await updater.check();
     if (!release.update_available || !release.latest_version) { printSuccess(release, jsonOutput); return; }
-    await updater.install(release.latest_version, before.managed ? { mode: 'service', mcp_port: before.port } : { mode: 'stopped' },
+    await updater.install(release.latest_version, before.managed
+      ? before.ui_port ? { mode: 'app', ui_port: before.ui_port, ...(before.mcp_running ? { mcp_port: before.port } : {}) }
+        : { mode: 'service', mcp_port: before.port }
+      : { mode: 'stopped' },
       async () => { if (before.managed) await stopService(store.directory); });
     const result = await updater.wait();
     if (result.phase === 'failed') throw new AppError(result.error_code ?? 'UPDATE_FAILED', result.message);
@@ -182,7 +186,29 @@ cli.command('logs').description('Manage historical audit logs; always preserve t
     if (result.failed_files) process.exitCode = 1;
   });
 
-const service = cli.command('service').description('Manage only background instances created by this CLI');
+const app = cli.command('app').description('Manage the persistent SapLink host independently of MCP and standalone SAP CLI calls');
+app.command('status').action(async () => printSuccess(await serviceStatus(store.directory), jsonOutput));
+app.command('start').option('--port <port>', 'Management UI port; default 8766 when not running').action(async options => {
+  printSuccess(await startApplication(store.directory, options.port ? parsePort(options.port) : undefined), jsonOutput);
+});
+app.command('stop').action(async () => printSuccess(await stopService(store.directory), jsonOutput));
+app.command('restart').option('--port <port>', 'Management UI port; omitted preserves its port and MCP enabled state').action(async options => {
+  printSuccess(await restartApplication(store.directory, options.port ? parsePort(options.port) : undefined), jsonOutput);
+});
+
+const mcp = cli.command('mcp').description('Manage only the optional MCP listener; stopping it preserves the host and management UI');
+mcp.command('status').action(async () => printSuccess(await mcpStatus(store.directory), jsonOutput));
+mcp.command('start').option('--port <port>', 'MCP port; omitted preserves the host setting or defaults to 8765').action(async options => {
+  if (!(await store.load()).tokens.length) throw new AppError('TOKEN_REQUIRED', 'Create an MCP access token before enabling MCP.');
+  printSuccess(await startMcp(store.directory, options.port ? parsePort(options.port) : undefined), jsonOutput);
+});
+mcp.command('stop').action(async () => printSuccess(await stopMcp(store.directory), jsonOutput));
+mcp.command('restart').option('--port <port>', 'MCP port; omitted preserves the current port').action(async options => {
+  if (!(await store.load()).tokens.length) throw new AppError('TOKEN_REQUIRED', 'Create an MCP access token before enabling MCP.');
+  printSuccess(await restartMcp(store.directory, options.port ? parsePort(options.port) : undefined), jsonOutput);
+});
+
+const service = cli.command('service').description('Compatibility commands: start/restart host with MCP, stop the whole host; prefer app/mcp');
 service.command('status').action(async () => printSuccess(await serviceStatus(store.directory), jsonOutput));
 service.command('start').option('--port <port>', 'MCP port', '8765').action(async options => {
   if (!(await store.load()).tokens.length) throw new AppError('TOKEN_REQUIRED', 'Create a token with token create --out <file> --json before starting.');
@@ -337,61 +363,48 @@ cli.command('client-config').description('Export portable connection parameters,
 cli.command('ui').description('Open the interactive local management interface')
   .option('--port <port>', 'Management port', process.env.SAPLINK_UI_PORT ?? '8766').option('--no-open', 'Do not launch a browser')
   .action(async options => {
-    if (jsonOutput) throw new AppError('INTERACTION_REQUIRED', 'ui is an interactive foreground command. Use status/doctor/service commands with --json for automation.');
+    if (jsonOutput) throw new AppError('INTERACTION_REQUIRED', 'ui opens an interactive management session. Use app start/status/stop --json for automation.');
     const port = parsePort(options.port);
     const existing = await serviceStatus(store.directory);
-    if (existing.state === 'running' && existing.managed) {
-      const session = await openServiceUi(store.directory, port);
-      if (options.open && process.platform === 'win32') {
-        const browser = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-          "$ErrorActionPreference = 'Stop'; Start-Process -FilePath $env:SAPLINK_BROWSER_URL"],
-          { windowsHide: true, stdio: 'ignore', env: { ...process.env, SAPLINK_BROWSER_URL: session.url } });
-        browser.on('error', () => console.error('Browser launch failed; use the local session URL.'));
-      }
-      console.log(`Management session URL: ${session.url}`);
-      // The desktop launcher is only a tray client; the existing host owns MCP and UI.
-      let checking = false;
-      const timer = setInterval(() => {
-        if (checking) return;
-        checking = true;
-        void serviceStatus(store.directory).then(state => {
-          if (state.pid !== session.pid || state.state !== 'running') clearInterval(timer);
-        }).catch(() => clearInterval(timer)).finally(() => { checking = false; });
-      }, 1000);
-      process.once('SIGINT', () => clearInterval(timer));
-      process.once('SIGTERM', () => clearInterval(timer));
-      return;
+    await startApplication(store.directory, existing.ui_port ?? port);
+    const restartMcpPort = process.env.SAPLINK_RESTART_MCP_PORT;
+    delete process.env.SAPLINK_RESTART_MCP_PORT;
+    delete process.env.SAPLINK_UI_PORT;
+    if (restartMcpPort) await startMcp(store.directory, parsePort(restartMcpPort));
+    const session = await openServiceUi(store.directory, existing.ui_port ?? port);
+    if (options.open && process.platform === 'win32') {
+      const browser = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+        "$ErrorActionPreference = 'Stop'; Start-Process -FilePath $env:SAPLINK_BROWSER_URL"],
+        { windowsHide: true, stdio: 'ignore', env: { ...process.env, SAPLINK_BROWSER_URL: session.url } });
+      browser.on('error', () => console.error('Browser launch failed; use the local session URL.'));
     }
-    const release = await acquireLease(store.directory, 'runtime.lock');
-    let runtime: Awaited<ReturnType<typeof startAdmin>> | undefined;
-    let closing = false;
-    const stop = async () => { if (closing) return; closing = true; try { await runtime?.close(); } finally { await release(); } };
-    try {
-      const restartMcpPort = process.env.SAPLINK_RESTART_MCP_PORT;
-      delete process.env.SAPLINK_RESTART_MCP_PORT;
-      delete process.env.SAPLINK_UI_PORT;
-      runtime = await startAdmin(store, credentials, port, undefined, stop, { initialMcpPort: restartMcpPort ? parsePort(restartMcpPort) : undefined });
-      console.log(`SapLink management: http://127.0.0.1:${port}/`);
-      if (options.open && process.platform === 'win32') {
-        const browser = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-          "$ErrorActionPreference = 'Stop'; Start-Process -FilePath $env:SAPLINK_BROWSER_URL"],
-          { windowsHide: true, cwd: process.env.SystemRoot ?? 'C:\\Windows', stdio: 'ignore', env: { ...process.env, SAPLINK_BROWSER_URL: runtime.url } });
-        browser.on('error', () => console.error('Browser launch failed; use the local session URL.'));
-      }
-      process.once('SIGINT', () => { void stop(); });
-      process.once('SIGTERM', () => { void stop(); });
-      console.log(`Management session URL: ${runtime.url}`);
-    } catch (error) { await release(); throw error; }
+    console.log(`Management session URL: ${session.url}`);
+    // The desktop launcher is a tray client; the managed host owns UI and MCP.
+    let checking = false;
+    const timer = setInterval(() => {
+      if (checking) return;
+      checking = true;
+      void serviceStatus(store.directory).then(state => {
+        if (state.pid !== session.pid || state.state !== 'running') clearInterval(timer);
+      }).catch(() => clearInterval(timer)).finally(() => { checking = false; });
+    }, 1000);
+    process.once('SIGINT', () => clearInterval(timer));
+    process.once('SIGTERM', () => clearInterval(timer));
+
   });
-cli.command('serve').description('Run MCP in the foreground; use service start for background automation')
+cli.command('serve').description('Run MCP in the foreground; use mcp start for background automation')
   .option('--port <port>', 'MCP port', '8765').action(async options => {
-    if (jsonOutput) throw new AppError('INTERACTION_REQUIRED', 'serve stays attached to the terminal. Use service start --json for background startup.');
+    if (jsonOutput) throw new AppError('INTERACTION_REQUIRED', 'serve stays attached to the terminal. Use mcp start --json for background startup.');
     const port = parsePort(options.port);
     if (!(await store.load()).tokens.length) throw new AppError('TOKEN_REQUIRED', 'Create a token before starting.');
     process.env.SAPLINK_STARTUP_ID = randomUUID();
+    process.env.SAPLINK_HOST_MODE = 'mcp';
+    delete process.env.SAPLINK_HOST_UI_PORT;
     await runManagedService(store, credentials, port);
     console.log(`SapLink listening at http://127.0.0.1:${port}/mcp`);
   });
+
+registerSapCli(cli, store, credentials, jsonOutput);
 
 try { await cli.parseAsync(); }
 catch (error) {

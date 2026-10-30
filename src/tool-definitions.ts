@@ -5,10 +5,12 @@ import { repositorySchemas, repositoryDescriptions } from './repository-query.js
 import { enhancementTypes } from './enhancements.js';
 import { tableQuerySchema, sqlQuerySchema } from './data-query.js';
 import { functionModuleSyntaxHelp } from './function-help.js';
+import { requestTimeoutSchema } from './request-timeout.js';
 
 const connectionIdSchema = z.string().uuid();
 
-const connection = { connection_id: connectionIdSchema.describe('Stable UUID returned by list_connections. Select the intended SAP system and Client; do not use the connection name here.') };
+const connection = { connection_id: connectionIdSchema.describe('Stable UUID returned by list_connections. Select the intended SAP system and Client; do not use the connection name here.'),
+  timeout_ms: requestTimeoutSchema };
 
 const adtUriSchema = z.string().min(1).max(2048).describe('Relative /sap/bc/adt/... URI returned by SAP discovery or a prior tool. No full URLs, query strings or fragments. Never invent source paths.');
 

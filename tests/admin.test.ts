@@ -28,7 +28,7 @@ test('local web management protects APIs and manages connections, credentials, t
     return { status: response.status, body: await response.json() };
   };
   try {
-    const home = await fetch(origin); assert.equal(home.status, 200); assert.ok((await home.text()).includes('系统连接'));
+    const home = await fetch(origin); assert.equal(home.status, 200); assert.ok((await home.text()).includes('连接配置'));
     assert.ok(home.headers.get('content-security-policy')?.includes("frame-ancestors 'none'"));
     assert.equal((await fetch(`${origin}/icons.js`)).status, 200);
     assert.equal((await fetch(`${origin}/api/state`)).status, 401);

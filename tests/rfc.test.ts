@@ -130,6 +130,7 @@ test('idle data preview replaces only the RFC reader and preserves the live edit
   const f = await fixture(); let now = 0;
   const backend = new AdtBackend(f.connection, 'synthetic-secret', { transportFactory: f.create, queryIdleTimeoutMs: 10, now: () => now });
   try {
+    backend.setRequestTimeout(60000);
     const lock = await backend.lock(object);
     assert.equal((await backend.queryTable({ table_name: 'MARA', limit: 1 })).row_count, 1);
     now = 20;
@@ -139,6 +140,10 @@ test('idle data preview replaces only the RFC reader and preserves the live edit
     await backend.unlock(object, lock);
     assert.equal(f.channels.filter(channel => channel.role === 'editor').length, 1);
     assert.equal(f.channels.filter(channel => channel.role === 'reader').length, 2);
+    assert.equal(f.channels.filter(channel => channel.role === 'reader').at(-1)?.lastDiagnostic.timeout_ms, 60000);
+    backend.setRequestTimeout();
+    await backend.queryTable({ table_name: 'MARA', limit: 1 });
+    assert.equal(f.channels.filter(channel => channel.role === 'reader').at(-1)?.lastDiagnostic.timeout_ms, 2000);
   } finally { await backend.close(); await f.close(); }
 });
 
@@ -263,4 +268,39 @@ test('RFC CTS timeout budget is scoped to transport reads and preflight, never m
     assert.equal(rfcRequestTimeoutMs(runtime, method, path), 15000);
   assert.equal(rfcRequestTimeoutMs({...runtime,ctsTimeoutMs:90000}, 'GET', '/sap/bc/adt/cts/transportrequests'),90000);
   assert.equal(rfcRequestTimeoutMs({...runtime,timeoutMs:120000}, 'GET', '/sap/bc/adt/cts/transportrequests'),120000);
+});
+
+test('RFC per-call timeout overrides CTS defaults and resets without mutating the runtime', async () => {
+  const f = await fixture();
+  try {
+    const channel = f.create('reader');
+    channel.setRequestTimeout(1000);
+    await channel.request({ url: '/sap/bc/adt/cts/transportrequests' });
+    assert.equal(channel.lastDiagnostic.timeout_ms, 1000);
+    assert.equal(f.runtime.timeoutMs, 2000);
+    channel.setRequestTimeout();
+    await channel.request({ url: '/sap/bc/adt/cts/transportrequests' });
+    assert.equal(channel.lastDiagnostic.timeout_ms, 60000);
+    await channel.request({ url: '/sap/bc/adt/discovery' });
+    assert.equal(channel.lastDiagnostic.timeout_ms, 2000);
+    assert.throws(() => channel.setRequestTimeout(0), /timeout_ms/);
+  } finally { await f.close(); }
+});
+
+test('RFC request timer uses the dynamic override on an already-running bridge', async () => {
+  const f = await fixture('slow');
+  try {
+    const channel = f.create('reader');
+    channel.setRequestTimeout(2000);
+    await channel.request({ url: '/sap/bc/adt/discovery' });
+    channel.setRequestTimeout(100);
+    await assert.rejects(channel.request({ url: '/sap/bc/adt/discovery' }), error => {
+      const result = safeError(error);
+      assert.equal(result.code, 'RFC_CONTEXT_LOST');
+      assert.equal((result.details as any).timeout_ms, 100);
+      assert.equal(channel.lastDiagnostic.timeout_ms, 100);
+      return true;
+    });
+    assert.equal(f.runtime.timeoutMs, 2000);
+  } finally { await f.close(); }
 });

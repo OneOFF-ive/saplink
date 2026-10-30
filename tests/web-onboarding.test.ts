@@ -13,7 +13,7 @@ function screen(latest: unknown) {
   const breadcrumb = {textContent: 'MCP 服务'};
   let focused = false, confirm: (() => void) | undefined;
   const requests: string[] = [];
-  const context = vm.createContext({state: {connections: []}, labels: {service: 'MCP 服务', connections: '系统连接', tokens: '访问令牌'},
+  const context = vm.createContext({state: {connections: []}, labels: {service: 'MCP 服务', connections: '连接配置', tokens: '访问令牌'},
     document: {querySelectorAll: (selector: string) => selector === '.view' ? views : navigationItems},
     $: (selector: string) => selector === '#breadcrumb' ? breadcrumb : selector === '#port' ? {value: '8765'} : {focus: () => {focused = true;}},
     api: async (path: string) => {requests.push(path); return latest;},
@@ -33,7 +33,7 @@ test('empty connections require confirmation before navigating and never submit 
   page.confirm();
   assert.equal(page.views.find(view => view.id === 'connections-view')!.hidden, false);
   assert.equal(page.navigationItems.find(item => item.dataset.view === 'connections')!.active, true);
-  assert.equal(page.breadcrumb.textContent, '系统连接');
+  assert.equal(page.breadcrumb.textContent, '连接配置');
   assert.equal(page.focused(), true);
   assert.deepEqual(page.requests, ['state']);
 });

@@ -10,6 +10,7 @@ import { AppError, type BackendDiagnostic } from './errors.js';
 import type { Connection } from './config.js';
 import { defaultLogDirectory } from './paths.js';
 import { discoverRfcEnvironment, javaProcessEnvironment } from './rfc-environment.js';
+import { validateRequestTimeout } from './request-timeout.js';
 
 export type RfcRole = 'editor' | 'reader' | 'quality';
 export type RfcRuntime = { java: string; jcoJar: string; nativeDirectory: string; classes: string; cwd: string; timeoutMs: number; ctsTimeoutMs?: number };
@@ -23,6 +24,7 @@ export interface AdtTransport extends HttpClient {
   terminalError?: AppError;
   bindSession?(http: AdtHTTP): void;
   close?(): Promise<void>;
+  setRequestTimeout?(timeoutMs?: number): void;
 }
 
 export function rfcRuntime(env: NodeJS.ProcessEnv = process.env): RfcRuntime {
@@ -141,6 +143,8 @@ export class RfcTransport implements AdtTransport {
   private closing = false;
   private clean = false;
   private closePromise?: Promise<void>;
+  private requestTimeoutMs?: number;
+  setRequestTimeout(timeoutMs?: number) { this.requestTimeoutMs = validateRequestTimeout(timeoutMs); }
   constructor(private connection: Connection, private password: string, readonly role: RfcRole,
     private runtime?: RfcRuntime, private onActivity?: () => void, private launcher: RfcLauncher = launchBridge) { }
 
@@ -167,7 +171,8 @@ export class RfcTransport implements AdtTransport {
       await mkdir(runtime.cwd, { recursive: true });
       if (this.closing) throw new AppError('RFC_CONTEXT_LOST', 'RFC context is closed.');
       const ready = new Promise<void>((resolve, reject) => { this.readyResolve = resolve; this.readyReject = reject; });
-      this.startupTimer = setTimeout(() => this.fail(new AppError('RFC_RUNTIME_UNAVAILABLE', 'RFC bridge startup timed out.')), runtime.timeoutMs);
+      this.startupTimer = setTimeout(() => this.fail(new AppError('RFC_RUNTIME_UNAVAILABLE', 'RFC bridge startup timed out.')),
+        this.requestTimeoutMs ?? runtime.timeoutMs);
       this.child = this.launcher(runtime);
       let buffered = '';
       const decoder = new StringDecoder('utf8');
@@ -227,7 +232,8 @@ export class RfcTransport implements AdtTransport {
       if (this.terminalError) throw this.terminalError;
       const response = await new Promise<HttpClientResponse>((resolve, reject) => {
         const id = String(++this.sequence);
-        const timeoutMs = rfcRequestTimeoutMs(this.runtime!, request.method, request.path);
+        const timeoutMs = this.requestTimeoutMs ?? rfcRequestTimeoutMs(this.runtime!, request.method, request.path);
+        this.lastDiagnostic.timeout_ms = timeoutMs;
         const timer = setTimeout(() => this.fail(new AppError('RFC_CONTEXT_LOST', 'RFC call timed out; verify SAP state before continuing.', {
           request_path: request.path, request_method: request.method, timeout_ms: timeoutMs,
           elapsed_ms: Math.round(performance.now() - started)

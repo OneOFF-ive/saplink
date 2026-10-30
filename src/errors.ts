@@ -1,6 +1,6 @@
 import { isAdtError } from 'abap-adt-api';
 
-export type BackendDiagnostic = { request_path?: string; request_method?: string; http_status?: number;
+export type BackendDiagnostic = { request_path?: string; request_method?: string; http_status?: number; timeout_ms?: number;
   network_code?: string; cause_code?: string; elapsed_ms?: number; response_content_type?: string; error_kind?: string; request_body_bytes?: number; request_content_type?: string;
   request_finished?: boolean; socket_reused?: boolean; response_started?: boolean;
   request_content_length?: number; request_chunked?: boolean; request_connection_close?: boolean;

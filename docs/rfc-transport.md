@@ -1,6 +1,6 @@
 # ADT over RFC / JCo
 
-SapLink 提供可选 RFC 传输。MCP 协议、工具名、对象 URI、revision、写入开关和审计仍由现有实现管理。
+SapLink 的默认 CLI 入口和可选 MCP 入口均支持 RFC 传输。两入口共用操作定义、对象 URI、revision、写入开关和审计；RFC 是 SapLink 到 SAP 的传输方式，与 AI 选择 CLI 或 MCP 无关。
 `AdtBackend` 将同一套 ADT 请求通过 Java/JCo 调用 `SADT_REST_RFC_ENDPOINT`，不开放通用 RFC/BAPI 执行工具。
 
 RFC 运行环境需要兼容的 Java、JCo JAR 和原生库；后端能力与兼容性由目标 SAP 版本、架构及权限决定。
@@ -54,7 +54,7 @@ SAP 密码依然保存在 Windows 凭据管理器。Java 启动参数、环境�
 
 内部完整安装包自带固定版本的 Eclipse Temurin JRE 17、JCo JAR、Windows x64 JCo DLL 及配套 VC++ 运行库。保留 Java 法律声明，不安装系统级 Java、不修改 `JAVA_HOME`。x64 包使用 x64 主程序；ARM64 包使用原生 ARM64 主程序和独立的 x64 JVM/JCo 子进程，需要 Windows 11 的 x64 仿真支持。ARM64 JVM 不能加载 x64 JCo DLL。
 
-在“MCP 服务 → RFC 运行环境”或 RFC 连接表单中的“检查运行环境”检查组件。完整包隐藏路径输入，仅显示健康检查和版本；缺失组件时需修复安装，不会回退到系统组件。源码运行时可打开配置。可以指定 Java 安装目录和包含原始 `sapjco3.jar`、`sapjco3.dll` 的 JCo 目录，留空恢复自动检测。检查会实际启动 JVM 并加载 JCo/JNI，返回 Java/JCo 版本、架构及缺失组件，不登录 SAP。保存路径前需停止 MCP；路径保存在用户配置目录的 `rfc-runtime.json`，不随应用升级或卸载删除。
+优先在“连接配置”的 RFC 连接表单中点击“检查运行环境”；MCP 服务页也保留同一检查入口。完整包隐藏路径输入，仅显示健康检查和版本；缺失组件时需修复安装，不会回退到系统组件。源码运行时可打开配置。可以指定 Java 安装目录和包含原始 `sapjco3.jar`、`sapjco3.dll` 的 JCo 目录，留空恢复自动检测。检查会实际启动 JVM 并加载 JCo/JNI，返回 Java/JCo 版本、架构及缺失组件，不登录 SAP。保存路径前需停止 MCP；路径保存在用户配置目录的 `rfc-runtime.json`，不随应用升级或卸载删除。
 
 内部完整包根据 `runtime/rfc-runtime.json` 清单固定选择 `runtime/java` 和 `runtime/jco`，忽略路径覆盖及 JVM 全局选项，防止混用组件。源码模式优先级为界面保存的路径、显式 `SAPLINK_RFC_*` 环境变量、随包 Java、系统 Java。系统检测读取 `JAVA_HOME`、`JRE_HOME`、PATH 和常见 Java 安装目录；JCo 检测读取 `SAPJCO_HOME`、CLASSPATH 以及用户配置目录下的 `jco` 子目录。显式路径无效时会报告错误，不静默换到另一套组件。`doctor` 在配置了 RFC 连接时也会检查本地环境。
 

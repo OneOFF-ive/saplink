@@ -1,6 +1,6 @@
 # SapLink 架构
 
-本文说明 SapLink 当前源码的模块、接口和操作流程，核对时 package.json 版本为 1.0.1，不表示该版本已公开发布。产品介绍见 [README](../README.md)，安装与使用步骤见 [部署与运维手册](operations.md)。CLI 入口和包名为 saplink；配置目录、凭据服务名、环境变量和安装登记标识见[命名与本地数据](local-data.md)。
+本文说明 SapLink 当前源码的模块、接口和操作流程；安装版能力以对应版本的实际命令和运行时定义为准。产品介绍见 [README](../README.md)，安装与使用步骤见 [部署与运维手册](operations.md)。CLI 入口和包名为 saplink；配置目录、凭据服务名、环境变量和安装登记标识见[命名与本地数据](local-data.md)。
 
 客户端操作见 [MCP 客户端手册](mcp-client-guide.md)，部署与排障见 [运维手册](operations.md)，外部分发链路见 [发布与 Actions](releases-and-actions.md)。本文描述实现，不表示所有功能已在每个 SAP 版本验证。
 
@@ -12,7 +12,7 @@
 
 用户确认后的更新安装由 `src/self-update.ts` 与独立原生助手 `packaging/windows/update-runner.ps1` 完成：重新核对版本和架构、下载并校验安装包，再正常关闭当前应用、等待在途操作收尾，在原目录安装并尝试恢复原运行方式。仅支持包含助手的 Windows 安装版，不提供强杀、自动回滚或未经确认的静默升级。详见 [开发验证](development.md#自动更新实现与验证) 和 [运维流程](operations.md#用户确认的自动安装)。
 
-提供不依赖 VS Code 的本地 Web 管理界面与 CLI，通过 HTTP/HTTPS ADT 访问 SAP ABAP 系统，并向 agent 提供 Streamable HTTP MCP tools。后端 HTTPS 沿用默认 TLS 校验，不自动降级；本机管理与 MCP 监听仍使用 loopback HTTP。
+提供不依赖 VS Code 的本地 Web 管理界面，以 CLI 作为 AI 默认接入方式，经 HTTP/HTTPS 或 RFC/JCo 访问 SAP ADT。Streamable HTTP MCP 作为用户可自行配置的额外入口保留。管理页面默认显示连接配置，导航随后是 MCP 服务和访问令牌。后端 HTTPS 沿用默认 TLS 校验，不自动降级；本机管理与 MCP 监听仍使用 loopback HTTP。
 
 当前功能包括：
 
@@ -33,13 +33,14 @@
 
 ```mermaid
 flowchart LR
-    CLI[CLI 配置与启停] --> Config[连接配置与凭据管理]
+    CLI[CLI 配置、启停与 SAP 操作] --> Config[连接配置与凭据管理]
     Browser[本机浏览器] --> Admin[Web 管理服务]
     Admin --> Config
     Admin --> Server
     CLI --> Server[HTTP MCP 服务]
     Agent[Agent MCP 客户端] --> Server
     Server --> Operations[ABAP 操作层]
+    CLI --> Operations
     Operations --> Config
     Operations --> Sessions[连接会话与操作调度]
     Sessions --> Adapter[HTTP ADT 适配器]
@@ -49,11 +50,17 @@ flowchart LR
 
 主体采用单进程模块化结构，不拆分微服务。可选 RFC 模式由主体管理各通道的 Java/JCo 子进程，通过私有管道通信。CLI 启动服务后，各连接按需建立独立 SAP 会话。MCP 会话不等于 SAP 会话，不向 agent 暴露 SAP cookie、CSRF token 或锁句柄。
 
+`src/sap-cli.ts` 提供独立的 `saplink sap <operation>` 入口，以及 `tools list/describe/instructions` 能力发现。它直接调用 `Operations`，不经过 MCP，也不要求服务运行或配置令牌；与 MCP 共用 `toolSchemas`、描述和写操作分类。每次调用持有配置锁并在结束时关闭 SAP 会话，可与 MCP 进程并存。CLI 写入在发出前以独占文件持久保留请求 ID，阻止跨进程重复调用；不会缓存或重放写结果。两入口不共享会话或写请求缓存，不能跨入口重试写入。接口、限制与恢复说明见 [CLI 客户端指南](cli-client-guide.md)。
+
+`src/request-timeout.ts` 定义两入口共用的 `timeout_ms` 范围与说明。`Operations` 在每连接队列中将本次超时传入后端，并在结束（包括失败）后恢复默认值；后端为 editor、reader、quality 及重建 reader 通道传递设置。HTTP 请求、RFC 桥启动和 RFC 请求计时器均应用该设置，显式值覆盖 RFC CTS 默认值，不修改环境变量或连接配置。超时参数在进入各领域严格校验前剥离，不作为写意图哈希的一部分；仅改变超时时间不会导致同一写请求重新发出。此参数控制单次后端请求，不是整次操作的总时限。
+
 技术栈：TypeScript、Node.js、官方 MCP TypeScript SDK、Express、Zod、`abap-adt-api` 和 Axios。Windows 凭据使用 `@napi-rs/keyring`，依赖版本记录在 package.json 与 package-lock.json。业务层通过 Backend 接口调用 ADT 适配器。
+
+常驻生命周期由 `app` 与 `mcp` 两组 CLI 独立控制。`app start` 创建后台宿主及管理监听，不启用 MCP；`mcp start` 可按需创建宿主，`mcp stop/restart` 只控制 MCP；`app stop` 同时关闭 MCP 和管理监听，不终止独立 SAP CLI 进程。`ui` 和桌面托盘附着到同一已验证宿主，不再创建无法通过 CLI 控制的独立 UI 宿主。管理页面与本机控制 API 共用互斥调度及运行状态；宿主状态和 MCP 状态分别报告。`app restart` 与后台更新恢复保留 MCP 原启用状态及各端口；旧 `service` 命令保持原语义。
 
 | 模块 | 职责 |
 | --- | --- |
-| CLI | 交互输入、隐藏密码、配置管理、连通性测试、服务生命周期 |
+| CLI | 默认 AI 入口、SAP 操作发现与调用、连接配置、凭据录入、诊断及本地生命周期管理 |
 | Web 管理 | 静态 HTML/CSS/JS、独立管理认证、配置 API、MCP 启停 |
 | 配置与凭据 | 持久化非敏感配置，按连接 ID 访问 Windows 凭据管理器 |
 | MCP 层 | 协议协商、认证、参数验证、tools 注册、统一结果转换 |
@@ -100,7 +107,7 @@ SAP 连接支持 HTTP/HTTPS ADT。`base_url` 不含用户名、密码、查询�
 
 配置存放在 `%APPDATA%\saplink\config.json`，含 `schema_version=1`，可由 `SAPLINK_CONFIG_DIR` 覆盖。连接没有 credential_ref 字段，直接按 connection_id 访问 Windows 凭据管理器。配置更新采用临时文件加 rename；删除连接时清理凭据。CLI 使用 runtime.lock 禁止服务运行期间添加、编辑或删除连接，config.lock 串行化配置变更；服务运行时可管理令牌。
 
-UI 进程同样持有 runtime.lock，避免另一个 CLI 服务同时操作该配置目录。Web 管理操作串行化并使用 config.lock；MCP 已停止时可在 UI 内变更连接。编辑时变更 URL、Client 或用户名必须重新输入密码，保存失败时尽力恢复原凭据。
+常驻管理宿主持有 runtime.lock，避免另一个独立宿主同时操作该配置目录；UI 启动器仅附着到该宿主，不另持运行锁。独立 SAP CLI 调用使用 config.lock，可与宿主并存。Web 管理操作串行化并使用 config.lock；MCP 已停止时可在 UI 内变更连接。编辑时变更 URL、Client 或用户名必须重新输入密码，保存失败时尽力恢复原凭据。
 
 HTTP Basic 凭据和代码流量没有 TLS 加密，应在可信网络内使用。HTTP 客户端不向其他 origin 转发认证信息。
 
@@ -117,10 +124,12 @@ HTTP Basic 凭据和代码流量没有 TLS 加密，应在可信网络内使用�
 | `saplink connection edit <连接名称>` | 修改配置或更新凭据 |
 | `saplink connection remove <连接名称>` | 删除配置和关联凭据 |
 | `saplink connection test <连接名称>` | 验证网络、登录、discovery 和后端能力 |
-| `saplink token create` | 生成高熵 MCP 令牌，明文仅输出一次 |
+| `saplink token create --out <新文件> --json` | 创建可选 MCP 令牌，将秘密写入新文件，JSON 不返回明文 |
 | `saplink token revoke <令牌ID>` | 撤销指定令牌 |
 | `saplink serve --port 8765` | 前台启动服务，固定监听 127.0.0.1 |
-| `saplink ui --port 8766` | 启动管理界面并打开默认浏览器，MCP 由页面控制启停 |
+| `saplink ui --port 8766` | 启动或复用托管宿主并打开管理页面，结束附着命令不关闭宿主 |
+| `saplink app start/stop/status/restart --json` | 管理宿主；stop 同时关闭 UI 与 MCP，restart 保留 MCP 原状态 |
+| `saplink mcp start/stop/status/restart --json` | 仅管理可选 MCP，stop 保留宿主与管理页面 |
 
 连接测试按唯一名称选取配置，登录并输出 discovery 和探测时间，结束后退出会话。它是只读操作，不通过创建程序测试权限。错误分类以当前 errors.ts 为准，不把所有 HTTP 403 都解释为权限不足。成功读取不代表具有写入权限。
 
@@ -137,7 +146,7 @@ Web 管理端口独立于 MCP，默认监听 127.0.0.1:8766。启动生成随机
 - 会话：MCP 使用无状态传输，每个 POST 建立 SDK server/transport，响应结束后关闭；每个请求仍需认证。SAP 会话按连接保留。
 - HTTP 行为：POST /mcp 由 SDK 处理，GET、DELETE 及其他方法返回 405，没有 GET 事件流。
 - 限制：JSON 请求体 2 MiB；source 字符串最多 1,048,576 个 JavaScript 字符；列表 limit 默认 100、最大 500；激活列表最多 20；HTTP 在途请求（包含认证阶段）最多 16，操作队列最多 100，内存写请求索引最多 512 条。认证失败、连接断开和响应结束都释放请求名额。
-- 超时：SAP 单请求 15 秒，请求/响应大小分别限制为 2/4 MiB；本地 HTTP requestTimeout 30 秒、headersTimeout 10 秒。requestTimeout 不等于完整 SAP 操作的执行期限。
+- 超时：HTTP 单请求默认 15 秒，RFC 使用运行环境默认值及 CTS 特殊值；两入口可用本次调用的 `timeout_ms`（100～600000 毫秒）覆盖。请求/响应大小通常分别限制为 2/4 MiB；本地 HTTP requestTimeout 30 秒、headersTimeout 10 秒。requestTimeout 不等于完整 SAP 操作的执行期限。
 
 令牌授予访问此服务中已配置连接的能力，当前不提供逐令牌的连接授权。连接不限定包，实际读写权限由 SAP 用户权限决定，连接写入开关仍由服务端执行，SAP 要求记录变更时需提供传输任务。连接配置拒绝未知字段，不兼容旧版包限制配置。agent 不能用 tools 修改连接、凭据、令牌或写入策略。
 

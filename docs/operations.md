@@ -8,7 +8,7 @@
 
 先按 [Windows 安装指南](windows-installer.md) 安装，再从桌面或开始菜单打开应用。关闭浏览器只关闭页面；正常退出使用托盘菜单。
 
-页面操作顺序：添加连接 → 测试连接 → 按需要启用写入 → 创建 MCP 令牌 → 启动 MCP。编辑连接前先在页面停止 MCP。管理页面不提供程序编辑或 SAP 业务执行。
+管理页面默认进入“连接配置”，导航顺序为连接配置 → MCP 服务 → 访问令牌 → 软件更新。默认使用流程：添加连接 → 测试连接 → 在 AI 客户端导入 SapLink 技能 → 由 AI 通过 CLI 操作 SAP。按需启用写入。MCP 服务与令牌是可选进阶功能，不是使用 CLI 的前提；已启用 MCP 时，编辑连接前先停止它。管理页面不提供程序编辑或 SAP 业务执行。
 
 管理页面默认端口 8766，MCP 默认端口 8765，两者认证不同。通过快捷方式或托盘重新打开管理页面，不要分享含管理会话凭据的地址，也不要仅输入裸地址替代管理会话。
 
@@ -22,15 +22,15 @@
 saplink connection add dev
 saplink connection test dev
 saplink connection list
-saplink token create
-saplink serve --port 8765
+saplink tools instructions --json
+saplink sap list_connections --json
 ```
 
 新建连接的界面和交互式 CLI 默认选择 RFC：填写应用服务器、两位系统号、三位 Client、用户名、语言及可选 SAProuter。RFC 不要求 HTTP 地址或端口，也不会改走 HTTP。界面的“导入本地连接”可选择本机 SAP Logon 配置，填充服务器信息；连接名称、用户名和密码保持手动填写。完整安装包使用自带 Java/JCo，“MCP 服务 → RFC 运行环境”可进行本地加载检查，无需配置系统环境变量。
 
 选择 HTTP 时填写 HTTP/HTTPS ADT 地址；HTTPS 使用默认 TLS 校验，不接受忽略证书开关，不自动降级。HTTP 明文传输凭据和数据，只在合适的受保护网络使用。已有 HTTP 连接保持原方式。SAP 密码由交互提示输入并保存到当前 Windows 用户的凭据管理器。详细参数和路由限制见 [RFC 传输说明](rfc-transport.md)。
 
-`serve` 前台运行，Ctrl+C 正常退出。UI 与 CLI 服务不能同时占用同一配置目录的运行锁。CLI 变更连接前停止占用配置目录的 UI/服务；在 UI 内变更时只需先停止其 MCP 子服务。
+CLI 直接操作 SAP 的命令为 `saplink sap <operation>`，参数通过 JSON 文件或标准输入传入；详见 [CLI 指南](cli-client-guide.md)。不要求服务常驻，可与管理 UI 并存。CLI 变更连接配置前需正常退出持有 runtime 锁的 UI/宿主；在 UI 内变更时只需先停止其 MCP 子服务。
 
 ```powershell
 saplink connection edit dev
@@ -40,14 +40,15 @@ saplink token revoke REPLACE_WITH_TOKEN_ID
 
 撤销使用创建时返回的令牌 ID，不是令牌明文。令牌可在服务运行时创建或撤销，撤销对后续请求生效。配置改动后客户端应重新列出连接。
 
-## 3. 服务启停与诊断
+## 3. 可选服务启停与诊断
 
-选择一种运行方式；同一配置目录不能同时由图形管理、后台服务和前台服务占用。
+默认 CLI 直接访问 SAP，无需启动服务。下表用于管理页面或用户自行启用的 MCP；图形管理与托管服务可复用同一宿主，独立宿主不能重复占用运行锁。
 
 | 运行方式 | 启动 | 正常停止 |
 | --- | --- | --- |
 | 图形管理 | 桌面或开始菜单快捷方式 | 仅停 MCP 用页面按钮；退出整个应用用托盘菜单 |
-| 后台服务 | `saplink service start --port 8765 --json` | `saplink service stop --json` |
+| 管理宿主（不启用 MCP） | `saplink app start --port 8766 --json` | `saplink app stop --json`，同时关闭 MCP |
+| 可选 MCP | `saplink mcp start --port 8765 --json` | `saplink mcp stop --json`，宿主与管理页面保留 |
 | 前台服务 | `saplink serve --port 8765` | 原终端 Ctrl+C |
 
 查看状态、排查本地环境和重启自身管理的后台服务：
@@ -55,10 +56,12 @@ saplink token revoke REPLACE_WITH_TOKEN_ID
 ```powershell
 saplink status --json
 saplink doctor --json
-saplink service restart --json
+saplink app status --json
+saplink mcp status --json
+saplink app restart --json
 ```
 
-后台命令只管理自己创建的实例，不会结束前台 UI 或其他进程。切换方式前先正常退出原所有者。更多机器可读参数见 [AI 终端管理](ai-management.md)。
+后台命令只管理已验证身份的托管实例，不强制结束未知进程。`ui` 和桌面程序现在启动或复用托管宿主；关闭浏览器或结束 UI 附着命令不等于退出宿主。`app restart` 保留 MCP 原启用状态和端口，`mcp restart` 仅重启 MCP。兼容命令 `service start/restart` 仍启动带 MCP 的宿主，`service stop` 仍关闭整个宿主。打开管理页面时可复用支持共享的宿主；只有确需切换独立宿主时才正常退出原所有者。更多机器可读参数见 [AI 终端管理](ai-management.md)。
 
 ## 检查新版本
 
@@ -94,6 +97,8 @@ saplink logs clear --older-than-days 30 --yes --json
 结果包含 `dry_run`、`eligible_files` / `eligible_bytes`、`deleted_files` / `deleted_bytes` 和 `failed_files`。`failed_files` 大于 0 表示存在未能检查或删除的文件，CLI 同时返回非零退出码；不能仅根据顶层 `status=success` 判断全部清理成功。新用户默认目录为 `%LOCALAPPDATA%\saplink\logs`，自定义 `SAPLINK_LOG_DIR` 继续生效。删除前请备份需要保留的审计记录。
 
 ## 6. 客户端配置
+
+默认使用 [CLI 与 SapLink 技能](cli-client-guide.md)，不需要本节的令牌、URL 或客户端 MCP 配置。以下仅供自行选择 MCP 的用户参考。
 
 
 

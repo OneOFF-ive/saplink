@@ -2,7 +2,7 @@
 
 本文说明项目接口和实现细节，面向开发者，不是用户安装或运维入口。文中的 npm 命令用于源码目录；安装包用户统一使用 [运维手册](operations.md) 的 saplink 命令。源码运行与打包见 [开发与构建指南](development.md)，产品介绍见 [SapLink](../README.md)。产品与 CLI 统一为 SapLink / saplink；配置、凭据及安装标识见[命名与本地数据](local-data.md)。
 
-Windows 本地 Web 管理界面 + Streamable HTTP MCP 服务，通过 HTTP ADT 访问 SAP ABAP，不依赖 VS Code、SAP GUI 或数据库；同时保留 CLI。
+Windows 本地 Web 管理界面用于配置连接；AI 默认经独立 CLI 访问 SAP，Streamable HTTP MCP 服务保留为可选进阶功能。两入口复用 SAP 操作层，支持 HTTP ADT 或 RFC/JCo，不依赖 VS Code、SAP GUI 或数据库。
 
 支持多连接管理、对象搜索、源码读取、Program、Include、Function Group 与 Function Module 创建，以及主源码修改、语法检查和激活。写入默认关闭，可按连接启用。
 
@@ -19,7 +19,8 @@ Windows 本地 Web 管理界面 + Streamable HTTP MCP 服务，通过 HTTP ADT �
 本地版本查询使用 `saplink version`；远程更新检查使用 `saplink update check`，只提示正式版和下载页面。命令及错误语义见 [AI 管理说明](ai-management.md#检查新版本)，缓存位置见 [本地数据](local-data.md)，模块实现与离线验证见 [开发指南](development.md#测试与接口维护)。它不是 SAP MCP tool，不需要连接目标 SAP。
 
 - [文档导航](README.md)：按使用者和任务选择阅读入口。
-- [MCP 客户端 SAP 操作手册](mcp-client-guide.md)：供 agent 和客户端开发者快速学习 tools、SAP 概念、操作步骤和错误恢复。
+- [CLI 客户端指南](cli-client-guide.md)：默认 AI 接入、能力发现、超时和结果处理。
+- [MCP 客户端 SAP 操作手册](mcp-client-guide.md)：可选 MCP 入口的协议、SAP 概念、操作步骤和错误恢复。
 - [部署与运维手册](operations.md)：安装、连接、认证、启停、升级和故障排查。
 - [架构文档](architecture.md)：模块职责、协议和实现边界。
 - [安全说明](security.md)：认证边界、锁文件恢复和依赖审计说明。
@@ -56,7 +57,7 @@ npm start -- --help
 
 启动时浏览器自动获得独立的管理会话凭据；只输入裸地址会显示未授权。管理会话保存在当前标签页的 sessionStorage，页面 URL 中的会话片段会立即移除。令牌明文仅在创建窗口中显示，关闭窗口后清空；管理凭据和 MCP Bearer 令牌互不通用。
 
-先添加系统连接并测试，再创建 MCP 令牌，然后在 MCP 服务页启动服务。停止 MCP 后可编辑连接，管理界面仍可使用。管理界面不提供程序编辑或 SAP 业务执行。
+默认首页为“连接配置”，导航随后是 MCP 服务、访问令牌。添加并测试 SAP 连接后，AI 通过 CLI 和 SapLink 技能使用 SAP；仅在自行选择 MCP 时再创建令牌、启动服务并配置客户端。停止 MCP 后可编辑连接，管理界面仍可使用。管理界面不提供程序编辑或 SAP 业务执行。
 
 也可通过命令启动：
 
@@ -64,13 +65,13 @@ npm start -- --help
 npm start -- ui
 ```
 
-已有 CLI 服务运行时，请先停止它再启动图形界面。UI 与 CLI 共用连接配置和凭据，不能同时拥有同一配置目录的运行锁。关闭浏览器不会自动停止 MCP；通过页面停止 MCP，或在启动窗口按 Ctrl+C 退出整个管理进程。
+已有托管宿主运行时，图形界面可复用该宿主。独立 CLI SAP 操作与 UI 共用连接配置和凭据，可并存；连接配置修改仍须遵守 runtime/config 锁。关闭浏览器或结束 `ui` 附着命令不会退出宿主；`app stop` 或托盘退出会正常关闭宿主、管理页面及 MCP。`mcp stop` 或页面停止按钮只停 MCP，`serve` 则由原终端 Ctrl+C 退出。
 
 高级选项：`ui --port <管理端口>` 修改管理端口；`ui --no-open` 不自动打开浏览器，并在终端输出含会话凭据的管理地址，请勿分享该地址。
 
 ## CLI 配置与启动
 
-支持具备本机终端能力的 AI 客户端管理服务：`node dist/cli.js status --json`、`doctor --json`、`service start/stop/restart --json`。连接命令提供非交互参数与本机密码窗口，令牌可通过 `--out` 写入本地文件；配套管理 skill 和完整说明见 [AI 终端管理](ai-management.md)。后台模式只管理自身创建的实例，不强杀前台 UI 或其他进程。
+支持具备本机终端能力的 AI 客户端管理服务：`node dist/cli.js status --json`、`doctor --json`、`app start/stop/restart --json`、`mcp start/stop/restart --json`（旧 `service` 命令保留兼容语义）。连接命令提供非交互参数与本机密码窗口，令牌可通过 `--out` 写入本地文件；配套管理 skill 和完整说明见 [AI 终端管理](ai-management.md)。后台模式只管理自身创建的实例，不强杀前台 UI 或其他进程。
 
 ```powershell
 npm start -- connection add <连接名称>
@@ -86,7 +87,7 @@ npm start -- serve --port 8765
 
 `<连接名称>` 是占位符，执行前替换为自定义名称，不要输入尖括号。实际名称支持中文、英文字母、数字、下划线和连字符，例如 `开发系统_DEV` 或 `sap_system_01`；不允许空格、点号、斜杠等特殊字符；添加与测试时使用同一个名称。支持多个连接，各名称必须唯一。
 
-`connection add <连接名称>` 仅保存配置与凭据；`connection test <连接名称>` 按名称选取对应配置，登录并获取 ADT discovery，结束后退出测试会话，不建立永久连接。测试成功不代表具有所有对象的读写权限。MCP 操作使用 `list_connections` 返回的 `connection_id` 选择系统，不按名称自动判断系统用途。
+`connection add <连接名称>` 仅保存配置与凭据；`connection test <连接名称>` 按名称选取对应配置，登录并获取 ADT discovery，结束后退出测试会话，不建立永久连接。测试成功不代表具有所有对象的读写权限。CLI 与 MCP 的 SAP 操作均使用 `list_connections` 返回的 `connection_id` 选择系统，不按名称自动判断系统用途。
 
 服务地址为 `http://127.0.0.1:8765/mcp`。MCP 客户端选择 Streamable HTTP，并配置 `Authorization: Bearer <token>`。`token create` 返回令牌 ID 和一次性显示的令牌明文；配置文件只存校验哈希。客户端的凭据应按客户端支持的方式管理，不放进项目源码。
 
@@ -94,7 +95,7 @@ npm start -- serve --port 8765
 
 缓存的 SAP 会话发生认证、CSRF、网络或其他 ADT 错误时，只读操作会重建会话并重试一次；首次新会话失败不会循环重试。写操作和锁状态不确定的会话不会自动重放或重建。
 
-每个新写请求在加锁或提交业务变更前建立新会话，通过 ADT discovery 验证登录后才继续。预检失败不加锁、不写入，并丢弃该会话。锁状态异常的连接仍禁止写入，不通过重建会话绕过保护。结果中的 `write_dispatched` 表示是否已尝试提交业务变更，不代表提交成功；为 true 且结果不确定时，应查询 SAP 核实。预检之后仍可能断线，写入不自动重试；相同 request_id 返回原结果，显式重新尝试需新 ID。
+每个新写请求在加锁或提交业务变更前建立新会话，通过 ADT discovery 验证登录后才继续。预检失败不加锁、不写入，并丢弃该会话。锁状态异常的连接仍禁止写入，不通过重建会话绕过保护。结果中的 `write_dispatched` 表示是否已尝试提交业务变更，不代表提交成功；为 true 且结果不确定时，应查询 SAP 核实。预检之后仍可能断线，写入不自动重试。MCP 在同一运行实例内对相同写请求返回缓存结果；CLI 在请求发出前持久保留连接/request_id，后续重复请求返回 `REQUEST_ALREADY_USED`，不返回旧结果。新的写意图也必须先核实未知或部分完成的 SAP 状态。
 
 客户端 URL 必须使用 `127.0.0.1`，不能替换为 `localhost`：当前 Host 校验会拒绝后者。未提供有效令牌返回 401，Host 不匹配或携带 Origin 返回 403。
 
@@ -164,7 +165,7 @@ MCP 初始化响应通过 `instructions` 提供工具选择、结果解释、版
 
 SQL 必须以 SELECT 开始并包含 FROM。不接受注释、语句结束符（分号或结尾句点）、INTO、写语句、Client 切换、外部连接或 privileged access；引号内的这些文本可作为普通数据。校验采用保守规则，部分合法 ABAP SQL 也可能被拒绝；最终语法及权限仍由 SAP 检查。
 
-两个工具默认最多返回 100 行，上限 500；后端多取一行判断 `truncated`。返回 `columns`、`rows`、`row_count`、`limit`、`truncated` 和 `pagination_supported=false`。数值、日期、编号保留为字符串，不转换为 JavaScript 数字或日期，避免前导零及大数精度丢失。结果不缓存到请求去重表，不记录查询文本、筛选值或结果到操作日志。没有稳定排序或分页承诺，limit 只限制返回行数，不限制数据库扫描成本。沿用 HTTP 请求 15 秒超时和 4 MiB 响应上限；客户端超时不保证后端立即取消执行。
+两个工具默认最多返回 100 行，上限 500；后端多取一行判断 `truncated`。返回 `columns`、`rows`、`row_count`、`limit`、`truncated` 和 `pagination_supported=false`。数值、日期、编号保留为字符串，不转换为 JavaScript 数字或日期，避免前导零及大数精度丢失。结果不缓存到请求去重表，不记录查询文本、筛选值或结果到操作日志。没有稳定排序或分页承诺，limit 只限制返回行数，不限制数据库扫描成本。HTTP 请求默认 15 秒超时和 4 MiB 响应上限；每次调用可用 `timeout_ms` 覆盖单次 SAP 请求的等待时间，范围 100～600000 毫秒。CLI 也支持 `--timeout-ms`。这是单请求等待时间，不是整个操作的总时限；客户端超时不保证后端立即取消执行。
 
 查询不需要开启 `write_enabled`，使用连接配置中的 Client 和 SAP 用户权限。`get_capabilities.data_query` 分别提供两个接口的 discovery `advertised` 标记；未声明不等于不支持，实际查询验证可用性。数据预览请求本身返回 HTTP 404 时，只重建独立的无状态 reader 并重试一次，保留编辑会话和锁；恢复成功返回 `data.session_recovery`，操作阶段包含 `query_reader_recreated`。持续 404 或 HTTP 405/501 返回 `DATA_PREVIEW_FAILED`，保留脱敏 SAP 错误、实际失败请求路径、尝试次数和 reader 重建标记，不根据 HTTP 状态断言版本不支持。登录路径上的 404 单独保留为 `OBJECT_NOT_FOUND`，不会伪装成数据预览失败。401/403 保留认证或权限错误。查询完成和失败追加审计事件，可以用 operation_id 检索；仅记录状态、行数及恢复摘要，不记录 SQL、筛选值、返回行或原始 HTTP 数据。支持的 CDS 类型、字段语法和具体接口兼容性仍需在目标 SAP 验证。
 
@@ -208,7 +209,7 @@ SQL 必须以 SELECT 开始并包含 FROM。不接受注释、语句结束符（
 }
 ```
 
-重复 `request_id` 在本次服务运行期间返回原操作的精简结果，不重复执行；源码不保留在重复请求缓存中，需要时使用 `read_source` 获取。缓存最多 512 条，每条序列化结果不超过 32 KiB，超大的附加详情省略并返回 `CACHED_DETAILS_OMITTED`。缓存满时拒绝新的写请求，不淘汰旧 ID；确认在途操作后可重启服务。修改参数需使用新 ID。结果 `unknown` 时必须查询 SAP，不直接重试。锁清理失败后，该连接的后续写入会被阻止，需核实 SAP 锁状态后再重启。
+以下缓存规则适用于 MCP：重复 `request_id` 在本次 MCP 实例运行期间返回原操作的精简结果，不重复执行；源码不保留在重复请求缓存中，需要时使用 `read_source` 获取。缓存最多 512 条，每条序列化结果不超过 32 KiB，超大的附加详情省略并返回 `CACHED_DETAILS_OMITTED`。缓存满时拒绝新的写请求，不淘汰旧 ID；确认在途操作后可重启服务。同 ID 仅修改 `timeout_ms` 不改变写意图，也不重新执行；其他业务参数变化会报冲突。结果 `unknown` 时必须查询 SAP，不直接换 ID 重试。独立 CLI 采用持久请求标记，重启宿主、MCP 或 CLI 均不会解除其防重复保护，见 [CLI 指南](cli-client-guide.md#写入进程与并存)。锁清理失败后，该连接的后续写入会被阻止，需核实 SAP 锁状态后再重启。
 
 保存和激活后的源码读回比较忽略纯空行与 CRLF/LF 差异，但保留多行字面量内的空行；非空行的内容、顺序、缩进、注释和字符串仍参与比较。函数模块定义另有下述等价校验。revision 和 hash 始终使用后端实际返回文本计算，不使用校验归一化后的文本。激活列表最多 20 个顶层对象，统一校验后以一个集合提交给 SAP，不逐个激活；可能部分成功，不回滚已完成对象。参见[多对象联合激活](mcp-client-guide.md#多对象依赖与联合激活)。
 
@@ -254,7 +255,7 @@ SQL 必须以 SELECT 开始并包含 FROM。不接受注释、语句结束符（
 
 返回的 `transport_number` 是 SAP 创建接口返回的编号，可能是请求号或任务号；`request_number` 是读回确认的可修改 Workbench 父请求号，`tasks` 列出当前用户的任务号、所有者及 SAP 状态（最多 20 条，另有 `tasks_truncated`）。先确认任务可修改，再把任务号传入后续创建或更新的 `transport_task`；不自动选择任务，也不保证 SAP 一定创建了当前用户的任务。工具不会创建程序、修改源码或释放请求。
 
-`TRANSPORT_VERIFY_FAILED` 表示创建已获 SAP 接受，但读回未能确认；错误详情保留已返回编号及查询指引。网络结果未知或 `TRANSPORT_RESPONSE_INVALID` 时，可能已产生请求，必须先查询再决定后续操作，不能直接换 `request_id` 重建。同一个 `request_id` 仅在本次服务进程内防止重复创建；重启后须重新核实实际状态。本功能已通过模拟 SAP 测试，实际后端兼容性需在目标系统验证。
+`TRANSPORT_VERIFY_FAILED` 表示创建已获 SAP 接受，但读回未能确认；错误详情保留已返回编号及查询指引。网络结果未知或 `TRANSPORT_RESPONSE_INVALID` 时，可能已产生请求，必须先查询再决定后续操作，不能直接换 `request_id` 重建。MCP 对同一个 `request_id` 的缓存限于当前 MCP 实例，重启后须重新核实实际状态；CLI 的请求标记跨进程保留，不因重启解除。本功能已通过模拟 SAP 测试，实际后端兼容性需在目标系统验证。
 
 是否需要 `transport_task` 由 SAP 的变更记录要求决定，不能仅看包名。`$TMP` 可省略；其他包在省略任务时，会先调用只读 ADT CTS 检查：成功且明确无需记录变更时允许继续，明确需要时返回 `TRANSPORT_REQUIRED`，失败、字段缺失或结果不明确时返回 `TRANSPORT_CHECK_UNAVAILABLE`，均不会试写。已显式提供任务时直接交由 SAP 校验。服务不自动选择、记忆或继承任务；需要记录时每次创建和 `update_source` 都应显式提交。先用 `list_transport_requests` 查询任务，有歧义时询问用户，不把父请求号直接当成任务号。
 
@@ -268,7 +269,7 @@ SQL 必须以 SELECT 开始并包含 FROM。不接受注释、语句结束符（
 
 - `saved=false`：尚未发出源码保存请求；`saved="unknown"`：已发出，但未确认 SAP 接受；`saved=true`：SAP 已接受保存，不代表内容校验通过，也不代表已激活。
 - `verification` 为 `not_run`、`pending`、`passed`、`failed` 或 `unavailable`，分别表示未运行、待完成、通过、不一致或读回失败。
-- 成功读回时提供 `inactive_revision`，并附对象与源码 URI。该 revision 不是自动重试令牌；遇到 `VERIFY_FAILED` 或未知结果，应先用 `read_source(version="inactive")` 核实草稿，必要时对比 active，再决定编辑或激活。重复原 `request_id` 仅返回已记录的结果，不代表当前实时状态。
+- 成功读回时提供 `inactive_revision`，并附对象与源码 URI。该 revision 不是自动重试令牌；遇到 `VERIFY_FAILED` 或未知结果，应先用 `read_source(version="inactive")` 核实草稿，必要时对比 active，再决定编辑或激活。MCP 重复原 `request_id` 仅返回已记录结果，CLI 则拒绝已保留的请求 ID；两者均不是实时状态查询。
 
 函数定义区的 `EXCEPTIONS` 只列异常名，例如 `INVALID_INPUT.`，不能写 `INVALID_INPUT = 1`；返回码映射属于 `CALL FUNCTION` 调用语法。定义区注释可能被 SAP 重建或删除，实现区自定义注释不要使用保留前缀 `*"` 或 `*"---`。函数模块遇到 HTTP 400 的接口扫描错误时，响应附 `error.details.hints` 列出排查建议，保留 SAP 错误码和脱敏消息，不自动修改源码，也不将通用错误固定解释为某一原因。
 
@@ -287,7 +288,7 @@ ENDFUNCTION.
 
 当定义区经等价比较通过时，`source_save.normalization_applied=true`。定义区注释变化返回 `FUNCTION_DEFINITION_COMMENTS_CHANGED` 警告，不承诺保留注释。无法解析的语法退回原有校验，不猜测等价；校验失败的 `source_save.difference` 区分 `interface`、`implementation`、`unsupported_definition` 或其他对象的 `source`。复杂表类型、组件路径、pragma、字符串模板默认值等暂不做等价解析；返回的源码和 revision 始终来自实际回读，不使用规范化源码替代。
 
-后端操作失败时，`error.details` 按可用信息返回 `http_status`、脱敏的 `sap_message`、`sap_error_type`、`sap_message_id` 和 `sap_message_number`。不返回原始响应、请求头或认证信息，消息中的锁句柄等敏感值被替换。`get_capabilities` 的 `source_lock_policy.function_module` 应为 `module`，可用于确认服务已加载函数模块自身锁的实现。重试写操作需使用新的 request_id；旧 ID 返回缓存结果。
+后端操作失败时，`error.details` 按可用信息返回 `http_status`、脱敏的 `sap_message`、`sap_error_type`、`sap_message_id` 和 `sap_message_number`。不返回原始响应、请求头或认证信息，消息中的锁句柄等敏感值被替换。`get_capabilities` 的 `source_lock_policy.function_module` 应为 `module`，可用于确认服务已加载函数模块自身锁的实现。未知写入先读回 SAP 实际状态；MCP 的旧 ID 只返回当前实例缓存，CLI 的旧 ID 则返回 `REQUEST_ALREADY_USED`，都不能用来重新发出写入。
 
 
 数据查询前会检查独立只读会话的空闲时间，默认 **300 秒（5 分钟）**。空闲时间从该 reader 最近一次 HTTP 请求结束时计算，读源码等使用同一 reader 的请求也会刷新活动时间。达到阈值后，下次 `query_table` 或 `query_sql` 发出前先尝试注销旧 reader，再创建新 reader，由库正常登录；注销失败不阻止丢弃仅用于无状态读取的本地会话。首次查询不额外重建，持续使用时复用原会话，没有后台清理定时器。此机制不清理编辑会话或其锁，也不删除连接配置、凭据和写入防重复记录。

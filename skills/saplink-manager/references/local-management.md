@@ -1,6 +1,6 @@
 # 运行与配置管理
 
-使用已核实的安装版 `saplink`；PATH 未刷新时用其绝对路径。不要通过 npm 包装命令或直接改写 SapLink 配置 JSON、连接 UUID。
+使用已核实的安装版 `saplink`；PATH 未刷新时用启动器绝对路径。不直接改写连接 JSON 或 UUID。
 
 ## 状态与诊断
 
@@ -8,78 +8,48 @@
 saplink version --json
 saplink status --json
 saplink doctor --json
-saplink connection list --json
-saplink token list --json
+saplink sap list_connections --json
 ```
 
-CLI 返回 `schema_version`、`status`、`data` 或 `error`；同时检查退出码。doctor 的 `status=success` 只说明报告已生成；退出 1、`data.healthy=false` 表示诊断未通过。默认不访问 SAP；`doctor --connection <实际名称> --json` 或 `connection test <名称> --json` 才测试该 SAP 登录和 ADT discovery，成功不等于拥有所有业务权限。
-
-| 服务状态 | 如何处理 |
-| --- | --- |
-| `stopped` | 用户要求接入、启动或通过 SapLink 访问 SAP 时，先确保有令牌，再正常启动后台 MCP；纯状态查询保持停止 |
-| `running` 且 `managed=true` | 控制接口已确认宿主；还须检查 `mcp_running`，为 false 时仅管理界面可用，不能报告 MCP 已启动 |
-| `external` | 独立 UI、旧版 serve 或其他未提供控制接口的实例持有运行锁，尚不能断定 MCP 是否运行 |
-| `unknown` / `unresponsive` | 核实权限、实例身份及诊断，不覆盖或强制重启 |
-
-还要检查 `lease.guard_present`，存在 guard 时先调查，不删除锁。受限执行环境引起的访问失败，应通过允许的权限机制核实，而非改写权限或重新录入凭据。
-
-### UI 与 MCP 是两种状态
-
-UI 默认 `127.0.0.1:8766`；MCP 默认 `127.0.0.1:8765/mcp`。UI 即使尚未启动 MCP，也会持有 runtime 锁，CLI 因而返回 `external`。进程监听的端口可能只有管理端口。
-
-新版 `service start` 和 `serve` 提供共享宿主：服务运行后打开桌面软件或 `ui`，会复用同一后台 Node 进程并显示实际 MCP 状态，不要求先停止服务。重复打开不重启 MCP、不清空请求防重复记录。页面停止 MCP 后宿主保持运行，CLI 状态为 `running,mcp_running=false`；用户要求启动时可用 `service start` 在原 PID 恢复。`service stop` 或托盘退出会正常关闭整个共享宿主；关闭浏览器页面不会停止服务。管理会话 URL 含认证信息，不输出到聊天或普通日志。
-
-有浏览器操作能力时，在已有且已授权的管理页面查看“MCP 服务”页的实际状态、端口，用页面的“启动服务”/“停止服务”正常操作。停止页面内 MCP 不等于退出整个管理进程；退出应用用托盘菜单。不读取浏览器私有数据库或泄露管理会话 URL，不将管理认证用于 MCP。
-
-CLI 修改连接或转成后台托管时，先正常退出持锁 UI；可用已有 UI 操作能力完成，没有正常关闭通道时说明需用户退出托盘程序的原因。前台 serve 使用其原有终端正常退出；无控制通道时请用户完成该最小动作。不得用 taskkill、Stop-Process、删锁或结束未经验证的 PID 接管实例。
+JSON 模式同时检查退出码和 `status`。doctor 的 `status=success` 只说明生成了报告；结合 `data.healthy` 及各检查项判断。CLI 访问 SAP 不需要后台服务或访问令牌，不为满足可选服务的诊断项创建令牌或启动服务。默认诊断不访问 SAP；指定 `doctor --connection <真实名称> --json` 或 `connection test <名称> --json` 才测试登录和 discovery。
 
 ## SAP 连接与密码
 
-从 `connection list` 确认真实名称、传输方式、目标服务器、Client 和用户名。RFC 根据应用服务器、系统号及路由识别目标，不将兼容字段 `base_url` 当作真实 HTTP 服务，也不猜测 8000 等端口。已有 HTTP 连接保持原方式；操作前核实本机版本的 `connection add --help`。
-
-新建 RFC 连接使用：
+连接列表确认真实名称、传输方式、目标服务器、Client 和用户名。RFC 使用应用服务器、系统号及路由识别目标，不将兼容字段 `base_url` 当作真实 HTTP 地址。新连接优先 RFC，现有 HTTP 连接保持原方式；按当前版本 `connection add --help` 核实选项。
 
 ```powershell
 saplink connection add dev --transport rfc --rfc-ashost sap-host --rfc-sysnr 00 --client 001 --username SAPUSER --language ZH --password-prompt --json
 ```
 
-需要路由时添加 `--rfc-saprouter /H/router.example/S/3299`，仅填写中转节点，目标服务器仍填 `--rfc-ashost`。支持不带秘密的多跳路由；不支持路由密码、SNC 或 SSO，不把密码写进路由。改回直连用 `connection edit <name> --clear-rfc-saprouter --password-prompt --json`。RFC 不需要 `--url`，不会回退 HTTP；本地 MCP 仍使用 Streamable HTTP。
+需要路由时添加 `--rfc-saprouter /H/router.example/S/3299`。仅填中转节点，目标服务器仍由 `--rfc-ashost` 指定；不支持路由密码、SNC/SSO，不把秘密放入路由。改回直连用 `connection edit <name> --clear-rfc-saprouter --password-prompt --json`。RFC 不要求 HTTP 地址，不回退 HTTP。
 
-用户指定 HTTP 时使用 `--transport http --url https://sap-host:443`。URL 可带 `/sap/bc/adt`，不含其他路径、查询参数、片段或内嵌凭据。当前版本的连接名称支持中文、英文字母、数字、`_`、`-`，例如 `开发系统_DEV` 或 `生产系统-01`；不允许空格、点号、斜杠及其他特殊字符，管理界面最多输入 80 个字符。CLI 中建议给中文名称加引号，例如 `saplink connection test "开发系统_DEV" --json`，后续编辑、测试和删除始终使用实际保存的完整名称，不自动翻译或改成英文。旧安装版可能尚未支持中文，以其校验结果为准；不为绕过校验擅自修改用户指定的名称。系统号为两位数字，Client 恰好三位半角数字并保留前导零。
+用户指定 HTTP 时使用 `--transport http --url https://sap-host:443`。地址可带 `/sap/bc/adt`，不能包含其他路径、查询、fragment 或内嵌凭据，不绕过证书校验。
 
-界面新建 RFC 时可通过“导入本地连接”选择 SAP Logon 条目，填充服务器、系统号、路由，以及条目已有的 Client/语言；连接名称、用户名和密码不会导入。使用产品提供的导入入口，不读取配置中的 Memo 或密码来补齐凭据。消息服务器/负载均衡、自定义端口及 SNC 等不支持条目会给出原因，不静默改成直连。
+连接名称支持中文、字母、数字、下划线和连字符。后续编辑、测试和删除使用实际完整名称，不自动翻译；中文名称在命令中正确引用。系统号为两位数字，Client 为三位数字并保留前导零。管理页面默认打开“连接配置”，可以从“导入本地连接”选择 SAP Logon 条目填入服务器等信息；不读取 Memo 或密码补齐身份。
 
-完整安装包固定使用自带 Java/JCo，用户不必安装 Java、查找 JCo 或设置环境变量。`doctor` 在存在 RFC 连接时检查组件；管理页“MCP 服务 → RFC 运行环境”可实际加载本地 Java/JCo，不连接 SAP。缺失或损坏时报告诊断并按修复流程处理，不修改全局环境变量、不借用其他软件的组件。旧安装版或源码模式以其实际支持的配置和诊断为准，不能仅凭文件存在宣布环境可用。
+完整安装包固定使用随包 Java/JCo，无需用户安装组件或设置环境变量。通过连接表单中的“检查运行环境”检查组件；缺失或损坏时报告诊断并按修复流程处理。源码或旧版本以其实际能力为准，不借用其他软件组件或改全局环境来掩盖产品安装问题。
 
-提前告知会弹出本机密码窗口，由用户录入。密码保存在当前 Windows 用户的凭据管理器，按连接 UUID 索引；不得从聊天、环境变量或 CLI 参数获取密码。JSON 模式缺密码返回 `INTERACTION_REQUIRED`；取消输入后不自动重试。无桌面交互环境时使用可用的本机管理窗口完成凭据录入。
+提前告知会弹出本机密码窗口，由用户输入。密码保存到当前 Windows 用户的凭据管理器，以连接 UUID 索引；不得从聊天、命令参数或环境变量获取。JSON 模式缺密码返回 `INTERACTION_REQUIRED`；取消后不自动重试。
 
-编辑用 `connection edit <name>`。传输方式、RFC 主机/系统号/路由、HTTP 登录地址、Client 或用户名改变时必须重新录入密码；仅改语言或写开关不需要。使用 `--enable-writes` / `--disable-writes` 管理已授权的写开关。
+编辑用 `connection edit <name>`。修改登录身份（传输方式、服务器、路由、Client 或用户名）须重新录入密码，仅改语言和写开关不需要。写开关用 `--enable-writes` / `--disable-writes`，仅按用户意图变更。
 
-CLI 连接增删改要求整个 runtime 停止。记录托管服务原端口，正常停止 → 修改 → 测试目标连接 → 恢复原端口。修改未保存但原服务可恢复时也恢复它，报告错误。外部 UI 必须先正常退出，不把关闭其 MCP 子服务视为已释放锁。
+## 宿主与 MCP 的独立管理
 
-仅在用户意图是删除特定连接及其凭据时，使用 `connection remove <name> --yes --json`，不清空其他连接。
+全部命令见[命令目录](commands.md)。`app start/stop/status/restart` 管理常驻宿主，`mcp start/stop/status/restart` 仅管理 MCP；前者的 `--port` 指管理端口，后者指 MCP 端口。`app start` 默认只启动管理监听，不需要令牌；`mcp stop` 保留宿主和界面，`app stop` 关闭宿主及 MCP，不终止独立 CLI SAP 进程。
 
-## 后台启停
+`ui` 会启动或复用托管宿主，打开默认的连接配置首页；关闭浏览器或 UI 附着命令不会关闭宿主。正常退出用 `app stop` 或托盘退出。重启宿主保留 MCP 原启用状态和端口，不把原本只用 CLI 的环境变为 MCP 模式。用户只要求 SAP 查询时不启动任何宿主。
 
-```powershell
-saplink service start --port 8765 --json
-saplink service status --json
-saplink service restart --json
-saplink service stop --json
-```
+## 配置锁与正常退出
 
-首次启动要求至少一个 MCP 令牌，按客户端接入说明创建。优先复用已有端口；冲突时核实占用，不接管其他程序。改端口用 `service restart --port <新端口> --json`，并同步客户端 URL；restart 不传端口保留当前托管端口。
+独立 CLI 业务操作可与管理 UI、可选后台服务并存；单次操作会占用配置锁，另一个调用或配置修改可能暂时返回忙状态。配置增删改还要求 runtime 空闲：正常退出持锁 UI/宿主后修改，完成后只恢复原本的运行方式，不因使用 SAP 而启动额外服务。
 
-stop 等待请求与 SAP 会话清理，完成后再查 status。`SERVICE_START_UNKNOWN` / `SERVICE_STOP_UNKNOWN` 后先查状态，不盲目重试。`ui`、`serve` 是前台命令，不作为 Agent 回合中的后台启动方式。后台托管不提供开机自启或崩溃自动恢复。
+必要时用 `app status --json` 核实已有宿主；`running` 且 `managed=true` 才通过 `app stop --json` 正常关闭，完成后检查状态。旧版或未知 UI 使用托盘退出，前台 `serve` 由原终端正常退出。关闭浏览器页面不等于退出宿主；无法正常关闭时说明所需用户动作，不强杀、删锁或接管未知 PID。
 
-## 缓存、日志和版本维护
+仅在用户意图是删除特定连接及其凭据时使用 `connection remove <真实名称> --yes --json`，保留其他连接。
 
-- `saplink cache clear --json` 清理托管服务的空闲 SAP 会话，保留配置、凭据、令牌及写请求去重记录。`BUSY` 等待；`SESSION_NEEDS_REVIEW` 核实 SAP 锁；失败或未知不盲目重启。UI 实例使用其缓存按钮。
-- `saplink logs clear --older-than-days 30 --json` 先预览。用户意图包含删除相应历史日志时才加 `--yes`；0 仍保留当天（UTC）日志。检查 `failed_files`，部分失败不能报告全部完成。日志不是源码备份。
-- 查询本地已安装版本用 `saplink version --json`，查询新版本按下节执行。
+## 本地维护
 
-配置目录以 `status.data.config_directory` 为准，默认 `%APPDATA%\saplink`，可由 `SAPLINK_CONFIG_DIR` 覆盖。日志默认 `%LOCALAPPDATA%\saplink\logs`，可由 `SAPLINK_LOG_DIR` 覆盖。配置备份不包含 Windows 凭据，不承诺换用户/机器自动恢复密码。
-
-## 版本检查与升级
-
-版本检查、COS 自动升级、用户确认及安装结果验证统一按[版本检查与自动升级](updates.md)执行。检查到新版后，主动询问用户是否需要立即自动更新；获得同意后才安装。仅检查版本不停止服务、不下载安装包。
+- `saplink logs clear --older-than-days 30 --json` 先预览；用户要求删除这些日志时才加 `--yes`。0 仍保留当天（UTC）日志，检查 `failed_files`，不报告部分失败为全部完成。
+- CLI 调用结束后自行关闭会话。后台缓存清理不是 CLI 接入的前提；用户明确维护已有后台宿主时可用 `cache clear --json`，保留配置、凭据及写请求记录，不为清缓存启动服务。
+- CLI 的 `cli-write-requests` 是持久防重复标记，不删除它来重试写入，不当作可清理连接缓存。
+- 版本检查与升级见[更新说明](updates.md)，安装修复和卸载见[产品安装管理](installation.md)。

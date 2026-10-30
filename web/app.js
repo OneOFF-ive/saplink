@@ -8,7 +8,7 @@ let state = { connections: [], tokens: [], running: false, mcp_port: 8765 };
 let editing;
 let working = false;
 const tests = new Map();
-const labels = { connections: '系统连接', tokens: '访问令牌', service: 'MCP 服务', updates: '软件更新' };
+const labels = { connections: '连接配置', tokens: '访问令牌', service: 'MCP 服务', updates: '软件更新' };
 let toastTimer;
 function toast(message, error = false) { const node = $('#toast'); node.textContent = message; node.className = error ? 'error' : '';
   node.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { node.hidden = true; }, 5000); }
@@ -105,7 +105,7 @@ $('#check-updates').onclick = async () => {
 $('#install-update').onclick = () => {
   const version = state.update?.latest_version;
   if (!version) return;
-  confirmAction('立即自动更新', '将下载并校验版本 ' + version + '，正常关闭当前应用后自动安装。MCP 连接将暂时中断，完成后尝试恢复原端口和运行状态。是否立即更新？', async () => {
+  confirmAction('立即自动更新', '将下载并校验版本 ' + version + '，正常关闭当前应用后自动安装。更新期间请暂停 CLI 操作；如已启用 MCP，其连接也会暂时中断。完成后尝试恢复原运行状态。是否立即更新？', async () => {
     try {
       const result = await api('updates/install', 'POST', { version });
       state.update_install = result.update_install; updateRequested = true; renderUpdate();
@@ -152,7 +152,7 @@ function render() {
   }
   $('#empty-tokens').hidden = state.tokens.length !== 0;
   $('#tokens-view .table-wrap').hidden = state.tokens.length === 0;
-  $('#top-status').textContent = state.running ? 'MCP 运行中' : '服务未启动';
+  $('#top-status').textContent = state.running ? 'CLI · MCP 已启用' : 'CLI 模式';
   $('#top-status').className = `badge ${state.running ? 'success' : 'neutral'}`;
   $('#service-status').textContent = state.running ? '运行中' : '已停止';
   $('#service-status').className = `badge ${state.running ? 'success' : 'neutral'}`;
@@ -425,14 +425,14 @@ async function startService() {
     state = latest;
     if (latest.running) return;
     if (!latest.connections.length) {
-      confirmAction('请先配置系统连接', '尚未配置 SAP 系统连接，请先添加至少一个连接，再启动 MCP 服务。点击确认前往系统连接页面。', () => {
+      confirmAction('请先配置系统连接', '尚未配置 SAP 系统连接，请先添加至少一个连接，再启动 MCP 服务。点击确认前往连接配置页面。', () => {
         showView('connections');
         $('#add-connection').focus();
       }, false);
       return;
     }
     if (!latest.tokens.length) {
-      confirmAction('请先创建访问令牌', '尚未创建访问令牌。AI 客户端需要这张“通行证”才能连接 SapLink，请先创建至少一个令牌，再启动 MCP 服务。点击确认前往访问令牌页面。', () => {
+      confirmAction('请先创建访问令牌', '尚未创建访问令牌。MCP 客户端需要访问令牌才能连接此服务，请先创建至少一个令牌，再启动 MCP 服务。点击确认前往访问令牌页面。', () => {
         showView('tokens');
         $('#create-token').focus();
       }, false);

@@ -45,7 +45,7 @@ export async function doctor(store: ConfigStore, credentials: Credentials, port:
   try {
     config = await store.load();
     add('configuration', 'passed', `Configuration is readable; ${config.connections.length} connection(s).`);
-    add('tokens', config.tokens.length ? 'passed' : 'failed', config.tokens.length ? 'At least one MCP token exists.' : 'Create a token with token create --out <file> --json.');
+    add('tokens', config.tokens.length ? 'passed' : 'warning', config.tokens.length ? 'At least one optional MCP token exists.' : 'No MCP token configured. Direct SAP CLI use does not require one; create a token only when enabling optional MCP access.');
     add('connections', config.connections.length ? 'passed' : 'warning', config.connections.length ? 'Connections are configured.' : 'No connection configured; add one before using SAP tools.');
   } catch (error) { add('configuration', 'failed', cliFailure(error).message); }
 
@@ -66,7 +66,7 @@ export async function doctor(store: ConfigStore, credentials: Credentials, port:
     const uncertain = ['unknown', 'unresponsive'].includes(service.state) || service.lease.guard_present;
     add('service', uncertain ? 'failed' : 'passed', `Service state: ${service.state}. Foreground UI/service instances are never terminated by the manager.`);
     if (service.lease.guard_present) add('runtime_guard', 'failed', 'An orphan or busy runtime guard exists. Do not delete it without checking all running SapLink processes.');
-    if (service.state === 'stopped') add('port', await portAvailable(port) ? 'passed' : 'failed', `Checking local port ${port}; a busy port is never taken over.`);
+    if (service.state === 'stopped') add('port', await portAvailable(port) ? 'passed' : 'warning', `Checking optional MCP port ${port}; a busy port is never taken over and does not prevent direct SAP CLI use.`);
   } catch (error) { add('service', 'failed', cliFailure(error).message); }
 
   if (config && process.platform === 'win32') {

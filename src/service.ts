@@ -24,7 +24,7 @@ const recordSchema = z.object({
 type ManagedRecord = z.infer<typeof recordSchema>;
 export type ServiceStatus = {
   state: 'stopped' | 'running' | 'external' | 'unresponsive' | 'unknown';
-  managed: boolean; lease: LeaseStatus; pid?: number; port?: number; url?: string; mcp_running?: boolean;
+  managed: boolean; lease: LeaseStatus; pid?: number; port?: number; url?: string; mcp_running?: boolean; ui_port?: number;
 };
 
 async function readRecord(directory: string): Promise<ManagedRecord | undefined> {
@@ -39,9 +39,9 @@ async function readRecord(directory: string): Promise<ManagedRecord | undefined>
 }
 
 // Never follow redirects or accept a URL from the metadata file.
-async function control(record: ManagedRecord, action: 'status' | 'stop' | 'cache/clear' | 'ui/session' | 'mcp/start', uiPort?: number) {
-  return new Promise<{ instance_id: string; pid: number; stopping: boolean; mcp_running?: boolean; ui_url?: string; cache?: CacheClearResult }>((resolve, reject) => {
-    const req = request({ hostname: '127.0.0.1', port: record.control_port, path: `/${action}${action === 'ui/session' || action === 'mcp/start' ? `?port=${uiPort}` : ''}`,
+async function control(record: ManagedRecord, action: 'status' | 'stop' | 'cache/clear' | 'ui/session' | 'mcp/start' | 'mcp/stop' | 'mcp/restart', uiPort?: number) {
+  return new Promise<{ instance_id: string; pid: number; stopping: boolean; mcp_running?: boolean; ui_port?: number; ui_url?: string; cache?: CacheClearResult }>((resolve, reject) => {
+    const req = request({ hostname: '127.0.0.1', port: record.control_port, path: `/${action}${action === 'ui/session' || action === 'mcp/start' || action === 'mcp/restart' ? `?port=${uiPort}` : ''}`,
       method: action === 'status' ? 'GET' : 'POST', headers: { Authorization: `Bearer ${record.control_token}` } }, res => {
       let body = '';
       res.setEncoding('utf8');
@@ -60,7 +60,7 @@ async function control(record: ManagedRecord, action: 'status' | 'stop' | 'cache
         } catch (error) { reject(error); }
       });
     });
-    req.setTimeout(['cache/clear', 'ui/session', 'mcp/start'].includes(action) ? 30000 : 1500, () => req.destroy(new Error('Control request timed out')));
+    req.setTimeout(action === 'status' || action === 'stop' ? 1500 : 30000, () => req.destroy(new Error('Control request timed out')));
     req.on('error', reject);
     req.end();
   });
@@ -78,7 +78,7 @@ export async function serviceStatus(directory: string): Promise<ServiceStatus> {
     url: `http://127.0.0.1:${record.mcp_port}/mcp` };
   try {
     const result = await control(record, 'status');
-    return { ...status, state: 'running', mcp_running: result.mcp_running ?? true };
+    return { ...status, state: 'running', mcp_running: result.mcp_running ?? true, ...(result.ui_port ? { ui_port: result.ui_port } : {}) };
   } catch {
     return { ...status, state: 'unresponsive' };
   }
@@ -89,10 +89,17 @@ async function withServiceCommand<T>(directory: string, action: () => Promise<T>
   try { return await action(); } finally { await release(); }
 }
 
-async function start(directory: string, port: number): Promise<ServiceStatus> {
+async function start(directory: string, port: number, options: { mcp?: boolean; uiPort?: number } = {}): Promise<ServiceStatus> {
+  const mcp = options.mcp !== false;
   const before = await serviceStatus(directory);
   if (before.lease.guard_present) throw new AppError('LEASE_BUSY', 'Runtime guard exists. Inspect running processes before any manual recovery.');
   if (before.state === 'running' && before.managed) {
+    if (!mcp) {
+      if (options.uiPort && before.ui_port && options.uiPort !== before.ui_port)
+        throw new AppError('APP_PORT_CONFLICT', 'Management UI is already listening on a different port. Use app status or explicitly restart the application.');
+      await openServiceUi(directory, options.uiPort ?? before.ui_port ?? 8766);
+      return serviceStatus(directory);
+    }
     if (before.mcp_running === false) {
       const record = await readRecord(directory);
       if (!record || record.pid !== before.pid || record.lease_nonce !== before.lease.nonce) throw new AppError('SERVICE_STATE_CHANGED', 'Service instance changed');
@@ -102,7 +109,7 @@ async function start(directory: string, port: number): Promise<ServiceStatus> {
     if (before.port === port) return before;
   }
   if (before.state !== 'stopped') throw new AppError('SERVICE_ALREADY_OWNED', 'A service, UI, or uncertain process already owns this configuration. Run status; it will not be replaced.');
-  if (await localPortInUse(port)) throw new AppError('EADDRINUSE', 'Port is already in use. Choose another port; no existing listener was stopped.');
+  if (mcp && await localPortInUse(port)) throw new AppError('EADDRINUSE', 'Port is already in use. Choose another port; no existing listener was stopped.');
 
   const instanceId = randomUUID();
   const startupFile = join(directory, `service-start-${instanceId}.json`);
@@ -114,7 +121,8 @@ async function start(directory: string, port: number): Promise<ServiceStatus> {
   const child = spawn(launcher ?? process.execPath,
     launcher ? ['--internal-service-run', String(port)] : [cliPath, 'service', '_run', '--port', String(port)], {
     detached: true, windowsHide: true, stdio: 'ignore',
-    env: { ...process.env, SAPLINK_CONFIG_DIR: directory, SAPLINK_STARTUP_ID: instanceId }
+    env: { ...process.env, SAPLINK_CONFIG_DIR: directory, SAPLINK_STARTUP_ID: instanceId,
+      SAPLINK_HOST_MODE: mcp ? 'mcp' : 'app', SAPLINK_HOST_UI_PORT: options.uiPort ? String(options.uiPort) : '' }
   });
   let spawnFailed = false;
   child.once('error', () => { spawnFailed = true; });
@@ -145,6 +153,63 @@ async function start(directory: string, port: number): Promise<ServiceStatus> {
 
 export function startService(directory: string, port: number) {
   return withServiceCommand(directory, () => start(directory, port));
+}
+
+export function startApplication(directory: string, uiPort?: number) {
+  return withServiceCommand(directory, () => start(directory, 8765, { mcp: false, uiPort }));
+}
+
+export function restartApplication(directory: string, uiPort?: number) {
+  return withServiceCommand(directory, async () => {
+    const before = await serviceStatus(directory);
+    if (uiPort && uiPort !== before.ui_port && await localPortInUse(uiPort))
+      throw new AppError('EADDRINUSE', 'Requested management port is occupied; the current host was preserved.');
+    await stop(directory);
+    return start(directory, before.port ?? 8765, { mcp: before.mcp_running === true, uiPort: uiPort ?? before.ui_port ?? 8766 });
+  });
+}
+
+export async function mcpStatus(directory: string) {
+  const host = await serviceStatus(directory);
+  return { state: host.lease.guard_present ? 'unknown' : host.state === 'stopped' ? 'stopped' : host.state === 'running' && host.mcp_running !== undefined
+    ? host.mcp_running ? 'running' : 'stopped' : 'unknown', app_state: host.state, managed: host.managed,
+    ...(host.pid ? { pid: host.pid } : {}), ...(host.port ? { port: host.port, url: host.url } : {}) };
+}
+
+export function startMcp(directory: string, port?: number) {
+  return withServiceCommand(directory, async () => {
+    const before = await serviceStatus(directory);
+    await start(directory, port ?? before.port ?? 8765);
+    return mcpStatus(directory);
+  });
+}
+
+export function stopMcp(directory: string) {
+  return changeMcp(directory, 'mcp/stop');
+}
+
+export function restartMcp(directory: string, port?: number) {
+  return changeMcp(directory, 'mcp/restart', port);
+}
+
+function changeMcp(directory: string, action: 'mcp/stop' | 'mcp/restart', port?: number) {
+  return withServiceCommand(directory, async () => {
+    const before = await serviceStatus(directory);
+    if (before.lease.guard_present) throw new AppError('LEASE_BUSY', 'Runtime guard exists; inspect application status.');
+    if (before.state === 'stopped') {
+      if (action === 'mcp/restart') await start(directory, port ?? 8765);
+      return mcpStatus(directory);
+    }
+    if (before.state !== 'running' || !before.managed) throw new AppError('SERVICE_NOT_MANAGED', 'Cannot control MCP in an unverified application. Inspect app status; no process was killed.');
+    const record = await readRecord(directory);
+    if (!record || record.pid !== before.pid || record.lease_nonce !== before.lease.nonce) throw new AppError('SERVICE_STATE_CHANGED', 'Application changed; inspect status.');
+    try { await control(record, action, port ?? before.port ?? 8765); }
+    catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new AppError('MCP_CONTROL_UNKNOWN', 'MCP control result is unknown. Inspect mcp status before retrying; the application was not force-stopped.');
+    }
+    return mcpStatus(directory);
+  });
 }
 
 export async function openServiceUi(directory: string, port: number): Promise<{ url: string; pid: number }> {
@@ -222,8 +287,26 @@ export async function runManagedService(store: ConfigStore, credentials: Credent
   let controlServer: ReturnType<typeof createServer> | undefined;
   let record: ManagedRecord | undefined;
   let shutdown: Promise<void> | undefined;
+  let busy = false;
+  const exclusive = async <T>(action: () => Promise<T>) => {
+    if (busy || shutdown) throw new AppError('BUSY', 'Another management operation or shutdown is pending.');
+    busy = true;
+    try { return await action(); } finally { busy = false; }
+  };
+  const runtimeChanged = async () => {
+    if (!record) return;
+    record.mcp_port = sharedRuntime.port;
+    const temporary = join(store.directory, `managed-service-${randomUUID()}.tmp`);
+    await writeFile(temporary, JSON.stringify(record), { mode: 0o600, flag: 'wx' });
+    await rename(temporary, join(store.directory, recordName));
+  };
+  const openAdmin = (uiPort: number) => {
+    openingAdmin ??= startAdmin(store, credentials, uiPort, undefined, close, { sharedRuntime, exclusive, runtimeChanged });
+    return openingAdmin.then(instance => { admin = instance; return instance; }).catch(error => { openingAdmin = undefined; throw error; });
+  };
   const close = () => shutdown ??= (async () => {
     try {
+      while (busy) await delay(50);
       await openingAdmin?.catch(() => {});
       await admin?.close();
       await sharedRuntime.current?.close();
@@ -241,8 +324,14 @@ export async function runManagedService(store: ConfigStore, credentials: Credent
   })();
 
   try {
-    if (!(await store.load()).tokens.length) throw new AppError('TOKEN_REQUIRED', 'Create an MCP token before starting the service.');
-    sharedRuntime.current = await startHttp(store, new Operations(store, credentials), port);
+    if (process.env.SAPLINK_HOST_MODE !== 'app') {
+      if (!(await store.load()).tokens.length) throw new AppError('TOKEN_REQUIRED', 'Create an MCP token before starting the service.');
+      sharedRuntime.current = await startHttp(store, new Operations(store, credentials), port);
+    }
+    if (process.env.SAPLINK_HOST_MODE === 'app' || process.env.SAPLINK_HOST_UI_PORT) {
+      const uiPort = z.coerce.number().int().min(1).max(65535).parse(process.env.SAPLINK_HOST_UI_PORT || '8766');
+      await openAdmin(uiPort);
+    }
     const controlToken = randomBytes(32).toString('base64url');
     let controlPort = 0;
     controlServer = createServer((req, res) => {
@@ -254,32 +343,41 @@ export async function runManagedService(store: ConfigStore, credentials: Credent
       const route = new URL(req.url ?? '/', 'http://127.0.0.1');
       const isUi = route.pathname === '/ui/session' && req.method === 'POST';
       const isStart = route.pathname === '/mcp/start' && req.method === 'POST';
+      const isMcpStop = route.pathname === '/mcp/stop' && req.method === 'POST';
+      const isMcpRestart = route.pathname === '/mcp/restart' && req.method === 'POST';
       const isStop = req.url === '/stop' && req.method === 'POST';
       const isClear = req.url === '/cache/clear' && req.method === 'POST';
-      if (!isStop && !isClear && !isUi && !isStart && !(req.url === '/status' && req.method === 'GET')) { res.writeHead(404).end(); return; }
+      if (!isStop && !isClear && !isUi && !isStart && !isMcpStop && !isMcpRestart && !(req.url === '/status' && req.method === 'GET')) { res.writeHead(404).end(); return; }
       req.resume();
       res.setHeader('Content-Type', 'application/json');
-      if (isStart) {
+      if (isStart || isMcpStop || isMcpRestart) {
         const nextPort = z.coerce.number().int().min(1).max(65535).safeParse(route.searchParams.get('port'));
-        if (!nextPort.success || shutdown || !admin) { res.writeHead(400).end(); return; }
-        void admin.startMcp(nextPort.data).then(() => res.end(JSON.stringify({ instance_id: instanceId, pid: process.pid, stopping: false })))
+        if ((!isMcpStop && !nextPort.success) || shutdown) { res.writeHead(400).end(); return; }
+        void exclusive(async () => {
+          if (admin?.isUpdating()) throw new AppError('BUSY', 'Application update is pending; MCP state cannot be changed until it completes.');
+          if (!isMcpStop) {
+            if (!(await store.load()).tokens.length) throw new AppError('TOKEN_REQUIRED', 'Create an MCP token before enabling MCP.');
+            if (sharedRuntime.current && !isMcpRestart) {
+              if (sharedRuntime.port === nextPort.data) return;
+              throw new AppError('MCP_RUNNING', 'MCP is already running on another port. Use mcp restart --port.');
+            }
+            if (sharedRuntime.current && nextPort.data !== sharedRuntime.port && await localPortInUse(nextPort.data!))
+              throw new AppError('EADDRINUSE', 'Requested MCP port is occupied; the current listener was preserved.');
+          }
+          if (sharedRuntime.current) { await sharedRuntime.current.close(); sharedRuntime.current = undefined; }
+          if (!isMcpStop) {
+            sharedRuntime.current = await startHttp(store, new Operations(store, credentials), nextPort.data!);
+            sharedRuntime.port = nextPort.data!;
+          }
+          await runtimeChanged();
+        }).then(() => res.end(JSON.stringify({ instance_id: instanceId, pid: process.pid, stopping: false })))
           .catch(error => res.end(JSON.stringify({ instance_id: instanceId, pid: process.pid, error: cliFailure(error) })));
         return;
       }
       if (isUi) {
         const uiPort = z.coerce.number().int().min(1).max(65535).safeParse(route.searchParams.get('port'));
         if (!uiPort.success || shutdown) { res.writeHead(400).end(); return; }
-        openingAdmin ??= startAdmin(store, credentials, uiPort.data, undefined, close, { sharedRuntime,
-          runtimeChanged: async () => {
-            if (!record) return;
-            record.mcp_port = sharedRuntime.port;
-            const temporary = join(store.directory, `managed-service-${randomUUID()}.tmp`);
-            await writeFile(temporary, JSON.stringify(record), { mode: 0o600, flag: 'wx' });
-            await rename(temporary, join(store.directory, recordName));
-          }
-        });
-        void openingAdmin.then(instance => {
-          admin = instance;
+        void openAdmin(uiPort.data).then(instance => {
           res.end(JSON.stringify({ instance_id: instanceId, pid: process.pid, stopping: false, ui_url: instance.url }));
         }).catch(error => {
           openingAdmin = undefined;
@@ -288,11 +386,13 @@ export async function runManagedService(store: ConfigStore, credentials: Credent
         return;
       }
       if (isClear) {
-        void (sharedRuntime.current ? sharedRuntime.current.clearCache() : Promise.resolve({ cleared_sessions: 0, retained_write_requests: 0 })).then(cache => res.end(JSON.stringify({ instance_id: instanceId, pid: process.pid, stopping: Boolean(shutdown), cache })))
+        void exclusive(() => sharedRuntime.current ? sharedRuntime.current.clearCache() : Promise.resolve({ cleared_sessions: 0, retained_write_requests: 0 })).then(cache => res.end(JSON.stringify({ instance_id: instanceId, pid: process.pid, stopping: Boolean(shutdown), cache })))
           .catch(error => res.end(JSON.stringify({ instance_id: instanceId, pid: process.pid, error: cliFailure(error) })));
         return;
       }
-      res.end(JSON.stringify({ instance_id: instanceId, pid: process.pid, stopping: isStop || Boolean(shutdown), mcp_running: Boolean(sharedRuntime.current) }));
+      const uiAddress = admin?.listener.address();
+      res.end(JSON.stringify({ instance_id: instanceId, pid: process.pid, stopping: isStop || Boolean(shutdown), mcp_running: Boolean(sharedRuntime.current),
+        ...(uiAddress && typeof uiAddress !== 'string' ? { ui_port: uiAddress.port } : {}) }));
       if (isStop) setImmediate(() => { void close().catch(() => { process.exitCode = 1; }); });
     });
     controlServer.requestTimeout = 5000;

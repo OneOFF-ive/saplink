@@ -42,6 +42,23 @@ async function setup(directory: string, overrides: Partial<UpdateDependencies> =
   return new SelfUpdater(directory, dependencies);
 }
 
+test('background application update plans preserve whether MCP was enabled', async () => {
+  for (const mcpPort of [undefined, 9000]) {
+    const directory = await temporary();
+    let stopped = false;
+    try {
+      const updater = await setup(directory, { launch: async (_installation, _script, path) => {
+        const plan = JSON.parse(await readFile(path, 'utf8'));
+        assert.equal(plan.mode, 'app'); assert.equal(plan.ui_port, 8766);
+        assert.equal(plan.mcp_port, mcpPort); assert.equal(plan.show_install_progress, false);
+        await writeFile(join(dirname(path), 'ready.json'), JSON.stringify({ id: plan.id }));
+      } });
+      await updater.install('9.0.0', { mode: 'app', ui_port: 8766, ...(mcpPort ? { mcp_port: mcpPort } : {}) }, async () => { stopped = true; });
+      await updater.wait(); assert.equal(stopped, true);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
 test('installer streaming validates hash, PE header and byte counts before producing an executable', async () => {
   const directory = await temporary();
   try {

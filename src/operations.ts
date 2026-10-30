@@ -10,8 +10,10 @@ import { AppError, safeError } from './errors.js';
 import { functionModuleGuidance } from './function-help.js';
 import { tableQuerySchema, readOnlySql, type TableQuery } from './data-query.js';
 import { writeTools } from './tool-policy.js';
+import { validateRequestTimeout } from './request-timeout.js';
 
 export type Input = RepositoryInput & QualityInput & {
+  timeout_ms?: number;
   connection_id?: string;
   query?: string;
   type?: string;
@@ -135,6 +137,7 @@ export class Operations {
   constructor(private store: ConfigStore, private credentials: Credentials, private audit = new AuditLog(), private factory: BackendFactory = (c, p) => new AdtBackend(c, p), private cacheEntryLimit = 512) { }
 
   async run(tool: string, input: Input): Promise<Result> {
+    validateRequestTimeout(input.timeout_ms);
     if (this.closing)
       throw new AppError('SERVER_STOPPING', 'Server is stopping');
     if (this.maintenance) throw new AppError('BUSY', '正在清理连接缓存，请稍后重试。');
@@ -142,7 +145,10 @@ export class Operations {
       throw new AppError('BUSY', 'Too many pending operations');
     if (writeTools.has(tool)) {
       const key = JSON.stringify([input.connection_id, input.request_id]);
-      const hash = digest(JSON.stringify([tool, input]));
+      // Changing a transport timeout must never turn a repeated write into a
+      // new intent, nor prevent retrieval of its already-dispatched result.
+      const { timeout_ms: _timeout, ...intent } = input;
+      const hash = digest(JSON.stringify([tool, intent]));
       const existing = this.requests.get(key);
       if (existing) {
         if (existing.hash !== hash)
@@ -175,6 +181,8 @@ export class Operations {
   }
 
   private async execute(tool: string, input: Input): Promise<Result> {
+    const { timeout_ms: timeoutMs, ...operationInput } = input;
+    let backend: Backend | undefined;
     const id = randomUUID();
     const context: Context = {
       steps: [],
@@ -230,7 +238,7 @@ export class Operations {
         throw new AppError('CONNECTION_NOT_FOUND', 'Unknown connection ID');
       if (writeTools.has(tool) && !connection.write_enabled)
         throw new AppError('WRITE_DISABLED', 'Enable writes in local connection settings first');
-      let backend = this.sessions.get(connection.connection_id);
+      backend = this.sessions.get(connection.connection_id);
       const cachedSession = Boolean(backend);
       if (!backend) {
         backend = this.factory(connection, await this.credentials.get(connection.connection_id));
@@ -238,6 +246,7 @@ export class Operations {
       }
       if (writeTools.has(tool) && this.poisoned.has(backend))
         throw new AppError('SESSION_NEEDS_REVIEW', 'Previous lock cleanup failed; verify SAP locks before restarting the service');
+      backend.setRequestTimeout?.(timeoutMs);
       if (writeTools.has(tool)) {
         // Connection queues ensure no other operation is using the session during replacement.
         if (cachedSession) {
@@ -245,6 +254,7 @@ export class Operations {
           await backend.close().catch(() => { });
           backend = this.factory(connection, await this.credentials.get(connection.connection_id));
           this.sessions.set(connection.connection_id, backend);
+          backend.setRequestTimeout?.(timeoutMs);
         }
         context.steps.push('write_session_check_started');
         try {
@@ -259,7 +269,7 @@ export class Operations {
       }
       let data: unknown;
       try {
-        data = await this.dispatch(tool, input, connection, backend, context);
+        data = await this.dispatch(tool, operationInput, connection, backend, context);
       }
       catch (error) {
         // Retry only read operations, once, on a previously cached and unlocked session.
@@ -276,8 +286,9 @@ export class Operations {
         this.sessions.delete(connection.connection_id);
         backend = this.factory(connection, await this.credentials.get(connection.connection_id));
         this.sessions.set(connection.connection_id, backend);
+        backend.setRequestTimeout?.(timeoutMs);
         context.steps.push('session_recreated');
-        data = await this.dispatch(tool, input, connection, backend, context);
+        data = await this.dispatch(tool, operationInput, connection, backend, context);
       }
       if (tool === 'query_table' || tool === 'query_sql') {
         const queryData = data as { row_count?: number; session_recovery?: string };
@@ -362,6 +373,7 @@ export class Operations {
         ...(context.warnings.length ? { warnings: context.warnings } : {})
       };
     }
+    finally { backend?.setRequestTimeout?.(); }
   }
 
   private async requireTransport(backend: Backend, object: string, pkg: string, operation: 'I' | 'U', transport?: string) {

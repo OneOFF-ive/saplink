@@ -1,6 +1,6 @@
 # MCP 客户端 SAP 操作手册
 
-供 agent、MCP 客户端开发者和使用者阅读。按当前源码核对，日期：2026-10-24；发布版本的工具范围以运行时列表为准。本文描述本项目实际工具，不是任意 SAP MCP 服务的通用接口。运行时 `instructions` 和 `tools/list` 是当前工具定义的依据；不发送 schema 未定义的字段。
+MCP 是 SapLink 的可选进阶功能；默认通过 [CLI 与 SapLink 技能](cli-client-guide.md)使用 SAP，无需阅读本手册。本文供选择自行配置 MCP 的 agent、客户端开发者和使用者阅读。本文随当前源码维护；发布版本的工具范围以运行时列表为准。本文描述本项目实际工具，不是任意 SAP MCP 服务的通用接口。运行时 `instructions` 和 `tools/list` 是当前工具定义的依据；不发送 schema 未定义的字段。
 
 当前工具定义在 `src/tool-definitions.ts`，写操作分类在 `src/tool-policy.ts`。现有调用流程继续适用；新增仓库语义工具复用同一 MCP 连接及认证方式，客户端可通过 tools/list 发现。
 
@@ -26,6 +26,23 @@
 4. 按用户目的选择下面的工具；先只读了解目标，再执行已获授权的变更。
 
 所有示例中的 `CONNECTION_ID`、`OBJECT_URI`、`SOURCE_URI`、`REVISION_FROM_READ` 等为待替换字符串，不满足实际 UUID/revision 校验。URI 和 revision 必须从真实返回值取得，不计算、不猜测。JSON 中不要保留占位值。
+
+### 本次调用的超时参数
+
+所有访问 SAP 的工具都接受可选 `timeout_ms`，为整数毫秒，范围 100～600000（最多 10 分钟）。例如调用 `syntax_check` 时：
+
+```json
+{
+  "connection_id": "CONNECTION_ID",
+  "object_uri": "OBJECT_URI",
+  "version": "inactive",
+  "timeout_ms": 60000
+}
+```
+
+它设置本次操作内每个 SAP HTTP/RFC 请求的超时时间，包括登录、元数据和校验，不是整次工具调用的总时限。不传时保持现有默认值；显式设置时覆盖传输默认值，包括 RFC CTS 的特殊等待时间。本地 `list_connections` 无此参数。MCP 后续调用和其他连接不继承该值。
+
+客户端自己的工具超时也要足够长，操作可能包含多个 SAP 请求。SapLink 参数不能覆盖客户端取消或 SAP 服务器时限。写操作超时不代表后端停止或回滚；先读取实际状态再决定后续操作。在同一 MCP 服务进程内，相同写请求 ID 仅更换 `timeout_ms` 仍返回已记录结果，不会重新执行；其他业务参数变化仍会报冲突。
 
 ## 2. SAP 概念速查
 

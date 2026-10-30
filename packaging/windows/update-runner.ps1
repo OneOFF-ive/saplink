@@ -22,7 +22,7 @@ try {
   $planData = Get-Content -LiteralPath $Plan -Raw -Encoding UTF8 | ConvertFrom-Json
   if ($planData.schema_version -ne 1 -or $planData.id -notmatch '^[a-f0-9-]{36}$' -or
       $planData.version -notmatch '^\d+\.\d+\.\d+$' -or $planData.sha256 -notmatch '^[a-f0-9]{64}$' -or
-      $planData.architecture -notin @('x64','arm64') -or $planData.mode -notin @('ui','service','stopped')) { throw 'Invalid update plan.' }
+      $planData.architecture -notin @('x64','arm64') -or $planData.mode -notin @('ui','app','service','stopped')) { throw 'Invalid update plan.' }
   $configRoot = [IO.Path]::GetFullPath($planData.config_directory).TrimEnd('\')
   $installRoot = [IO.Path]::GetFullPath($planData.install_directory).TrimEnd('\')
   $updatesRoot = Join-Path $configRoot 'updates'
@@ -46,7 +46,7 @@ try {
   foreach ($port in @($planData.mcp_port, $planData.ui_port)) {
     if ($null -ne $port -and ($port -isnot [int] -or $port -lt 1 -or $port -gt 65535)) { throw 'Invalid restart port.' }
   }
-  if (($planData.mode -eq 'service' -and !$planData.mcp_port) -or ($planData.mode -eq 'ui' -and !$planData.ui_port)) { throw 'Missing restart port.' }
+  if (($planData.mode -eq 'service' -and !$planData.mcp_port) -or ($planData.mode -in @('ui','app') -and !$planData.ui_port)) { throw 'Missing restart port.' }
   if ($null -ne $planData.show_install_progress -and $planData.show_install_progress -isnot [bool]) { throw 'Invalid installation progress option.' }
   $pathsValidated = $true
   Verify-Installer
@@ -107,6 +107,14 @@ try {
     $env:SAPLINK_UI_PORT = [string]$planData.ui_port
     Start-Process -FilePath (Join-Path $installRoot 'bin\saplink-gui.exe') -WindowStyle Hidden | Out-Null
     $restart = 'ui_launched'
+  } elseif ($planData.mode -eq 'app') {
+    $output = & (Join-Path $installRoot 'bin\saplink.exe') app start --port $planData.ui_port --json
+    if ($LASTEXITCODE -ne 0 -or ($output | ConvertFrom-Json).data.state -ne 'running') { throw 'Installed successfully, but application host restart was not confirmed.' }
+    if ($planData.mcp_port) {
+      $output = & (Join-Path $installRoot 'bin\saplink.exe') mcp start --port $planData.mcp_port --json
+      if ($LASTEXITCODE -ne 0 -or ($output | ConvertFrom-Json).data.state -ne 'running') { throw 'Installed successfully, but MCP restart was not confirmed.' }
+    }
+    $restart = 'app_running'
   } elseif ($planData.mode -eq 'service') {
     $output = & (Join-Path $installRoot 'bin\saplink.exe') service start --port $planData.mcp_port --json
     if ($LASTEXITCODE -ne 0 -or ($output | ConvertFrom-Json).data.state -ne 'running') { throw 'Installed successfully, but background service restart was not confirmed.' }

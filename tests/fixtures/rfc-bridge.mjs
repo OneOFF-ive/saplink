@@ -20,6 +20,7 @@ for await (const line of createInterface({ input: process.stdin, crlfDelay: Infi
   appendFileSync(eventPath, JSON.stringify({ role, method, path: uri.pathname,
     credential_headers: /authorization|cookie|x-csrf-token/i.test(headers) }) + '\n');
   if (mode === 'hang') continue;
+  if (mode === 'slow') await new Promise(resolve => setTimeout(resolve, 300));
   if (mode === 'crash') process.exit(9);
   if (mode === 'auth') { console.log(`${id}\tERROR\t103`); continue; }
   if (mode === 'malformed') { console.log(`${id}\tOK\t200\t%%%\t%%%`); continue; }

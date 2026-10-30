@@ -1,4 +1,4 @@
 interface:
   display_name: "SapLink 管理助手"
-  short_description: "确认后安装和升级 SapLink，管理服务与 MCP 接入，完成 SAP 任务；明确要求时才卸载"
-  default_prompt: "使用 $saplink-manager 检查 SapLink；未安装时先询问安装意愿和路径，同意后下载安装，再配置当前客户端的 saplink-mcp 并完成我的 SAP 任务。"
+  short_description: "通过 CLI 使用 SAP，并按需管理连接、宿主、MCP、令牌及安装升级"
+  default_prompt: "使用 $saplink-manager 检查 SapLink；未安装时先询问安装意愿和路径，同意后下载安装，再通过 saplink CLI 连接目标 SAP 并完成我的任务。"

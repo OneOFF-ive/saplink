@@ -42,6 +42,7 @@ export async function startAdmin(store: ConfigStore, credentials: Credentials, p
   factory: BackendFactory = (c, p) => new AdtBackend(c, p), requestExit?: () => Promise<void>,
   options: { updater?: SelfUpdater; initialMcpPort?: number;
     sharedRuntime?: { current?: Awaited<ReturnType<typeof startHttp>>; port: number };
+    exclusive?: <T>(action: () => Promise<T>) => Promise<T>;
     runtimeChanged?: () => Promise<void> } = {}) {
   if (port && await localPortInUse(port)) throw new AppError('EADDRINUSE', '管理端口已被占用，现有进程不会被接管');
   const key = randomBytes(32).toString('base64url');
@@ -57,7 +58,7 @@ export async function startAdmin(store: ConfigStore, credentials: Credentials, p
     state.current = await startHttp(store, new Operations(store, credentials, undefined, factory), options.initialMcpPort);
     state.port = options.initialMcpPort;
   }
-  const exclusive = async <T>(action: () => Promise<T>) => {
+  const exclusive = options.exclusive ?? (async <T>(action: () => Promise<T>) => {
     if (busy)
       throw new AppError('BUSY', '另一项管理操作正在执行');
     busy = true;
@@ -67,7 +68,7 @@ export async function startAdmin(store: ConfigStore, credentials: Credentials, p
     finally {
       busy = false;
     }
-  };
+  });
   const changeConfig = async <T>(action: () => Promise<T>) => {
     const release = await acquireLease(store.directory, 'config.lock');
     try {
@@ -385,6 +386,7 @@ export async function startAdmin(store: ConfigStore, credentials: Credentials, p
   return {
     listener,
     url: `http://127.0.0.1:${actualPort}/#${key}`,
+    isUpdating: () => updater.busy,
     startMcp,
     close
   };

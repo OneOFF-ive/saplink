@@ -1,8 +1,10 @@
 # AI 终端管理
 
-适用于拥有本机终端执行能力的 AI 客户端，以下统一使用安装后的 `saplink` 命令。CLI 负责管理服务本身，MCP tools 负责 SAP 对象和数据操作；服务未启动时仍可调用 CLI。当前管理平台为 Windows，安装包内置运行环境。
+适用于拥有本机终端执行能力的 AI 客户端，以下统一使用安装后的 `saplink` 命令。默认通过 CLI 和 SapLink 技能配置连接、执行 SAP 对象及数据操作，无需后台服务或令牌。MCP 是供用户自行研究的可选进阶功能。当前管理平台为 Windows，安装包内置运行环境。
 
 ## 机器可读入口
+
+MCP 令牌未配置、可选 MCP 端口被占用时，doctor 只给出 warning，不因此判定 CLI 不健康；凭据、配置或必要运行环境失败仍按故障处理。
 
 Windows 安装包用户重新打开终端后，在任意目录使用 `saplink`，无需安装系统 Node.js。源码运行方式单独见 [开发与构建指南](development.md)。机器可读命令示例：
 
@@ -58,36 +60,38 @@ saplink connection remove dev --yes --json
 
 RFC 不需要 `--url`；需要路由时添加 `--rfc-saprouter /H/router.example/S/3299`，仅填写中转节点。已有路由改直连用 `--clear-rfc-saprouter`。改变传输方式、应用服务器、系统号、路由、Client 或用户名时需重新输入密码。HTTP 新连接显式使用 `--transport http --url https://sap-host:443`，已有 HTTP 连接保持原方式。完整包在管理页检查随包 Java/JCo；不修改全局 `JAVA_HOME` 或 PATH 来修复它。
 
-## 后台服务
+## 宿主和可选 MCP 的独立生命周期
+
+默认 SAP 操作使用 `saplink sap ...`，无需启动常驻宿主。宿主承载管理 UI 和可选 MCP；只在需要管理界面或 MCP 接入时启动。
 
 ```powershell
-saplink service start --port 8765 --json
-saplink service status --json
-saplink service restart --json
-saplink service stop --json
+saplink app start --port 8766 --json
+saplink app status --json
+saplink mcp start --port 8765 --json
+saplink mcp status --json
+saplink mcp stop --json
+saplink app stop --json
 ```
 
-start 要求至少一个 MCP 令牌。后台进程隐藏运行，不依赖发起命令的终端保持打开。重复启动相同端口的已管理实例会返回原状态；更改端口使用 restart 的 `--port`。不指定端口的 restart 保留当前已管理端口，停止状态则默认 8765。
+`app start` 后台启动宿主和管理监听，不打开浏览器、不启用 MCP，也不要求令牌。`ui` 打开或复用管理页面；该命令是桌面托盘的附着进程，结束附着命令不等于退出宿主。正常退出使用 `app stop` 或托盘退出。`serve` 继续在前台运行带 MCP 的宿主，用原终端 Ctrl+C 正常退出。交互的 `ui/serve` 不支持 `--json`。
 
-| state | 含义 |
+`mcp start` 要求已有访问令牌，宿主未运行时按需启动；不会自动创建令牌。`mcp stop` 仅关闭 MCP 并收尾其 SAP 会话，管理页面和宿主保持运行。`app stop` 正常关闭整个常驻宿主，包括 MCP 和管理页面，但不强制终止独立 CLI SAP 进程，不删除连接、凭据、令牌、日志或 CLI 持久写请求记录。
+
+`mcp restart [--port <MCP端口>]` 只重启 MCP，宿主 PID 不变；`app restart [--port <管理端口>]` 重启宿主，保留 MCP 原启用状态、MCP 端口和管理端口。宿主原本停止时，`app restart` 按默认只启用管理监听。MCP 不传端口时优先沿用现有宿主设置，冷启动默认 8765；管理端口冷启动默认 8766。指定的新端口被占用时预检会拒绝操作并保留现有监听；实际绑定仍可能因竞争失败，检查实际返回状态。
+
+| 状态入口 | 解释 |
 | --- | --- |
-| `stopped` | 没有确认存活的 runtime；旧的普通租约可能已过期 |
-| `running` | 租约身份匹配，且独立控制接口确认了宿主实例；`mcp_running` 表示 MCP 是否实际运行 |
-| `external` | 旧版或独立 UI 等未提供控制接口的进程持有 runtime；管理器不停止它 |
-| `unresponsive` | 后台进程身份存在，但控制接口未确认响应；不强杀 |
-| `unknown` | 进程身份或锁文件无法确认；先诊断，不自动覆盖 |
+| `app status` | `state` 表示宿主状态，`mcp_running` 表示 MCP 是否运行；`ui_port` 是已开启的管理端口，`port` 是 MCP 端口 |
+| `mcp status` | `state` 仅表示 MCP 的 running/stopped/unknown，`app_state` 单独报告宿主；无法验证的旧实例或 guard 存在时为 unknown |
+| `status` | 汇总配置及宿主状态，不输出认证秘密 |
 
-还必须检查 `lease.guard_present`。门锁存在时不自动回收；人工恢复流程仍见 [安全说明](security.md)。启动前会实际探测本机 TCP 监听，已有端口不会被接管；探测不是原子预留，实际监听失败仍按错误处理。
+两入口共用有身份校验的本机控制接口；不强杀进程、不删锁或接管未知实例。停止等待已有请求及 SAP 会话收尾，超时意味着结果未知，应先查状态，不重复发起控制动作。后台管理不等于 Windows Service、开机自启或崩溃恢复。
 
-stop 通过单独鉴权的 loopback 控制接口请求正常关闭，等待已有请求及 SAP 会话清理。它不调用 taskkill，也不会仅凭 PID 结束其他程序。启动确认最多等待 20 秒，停止确认最多等待 30 秒；返回 `SERVICE_START_UNKNOWN` / `SERVICE_STOP_UNKNOWN` 后必须先查 status，不能盲目重复或强杀。
+`service start/stop/status/restart` 保留兼容行为：start/restart 启动带 MCP 的宿主，stop 关闭整个宿主。新工作流优先使用 `app` 和 `mcp`，不得用 `service stop` 代替仅停止 MCP。已有旧版宿主不支持新控制动作时，应正常退出并更新，不能强制接管。
 
-背景管理不是 Windows Service 安装器，没有承诺开机启动或无人值守崩溃重启。`ui` 与 `serve` 保留前台行为，`--json` 不允许误将它们作为后台命令。
+完整公开命令、参数用途见[技能 CLI 目录](../skills/saplink-manager/references/commands.md)。宿主、页面与 MCP 共享同一个运行锁；各连接配置修改仍使用配置锁，独立 CLI 操作可并存。管理会话 URL 含私密凭据，不输出到聊天或普通日志。
 
-已通过 `service start` 或新版 `serve` 启动时，再打开桌面软件或运行 `ui` 会通过独立认证的本地控制接口复用原宿主。管理 HTTP 与 MCP HTTP 运行在同一个 Node 进程，不重复取得运行锁；桌面托盘及其连接助手不是第二套后端。重复打开复用同一个管理会话，不重启 MCP、不清空请求防重复记录。管理会话 URL 含私密凭据，不写入普通状态输出或日志。
-
-管理页面显示当前共享 MCP 状态，并定期刷新。页面停止 MCP 后保留宿主及管理界面，`service status` 返回 `state=running,mcp_running=false`；可用页面按钮或 `service start` 在原 PID 恢复。`service stop` 和托盘“退出 SapLink 管理”会正常关闭整个宿主及其 MCP、管理监听；关闭浏览器页面不停止服务。旧版本进程不具备接入能力时，不强制接管，应先正常退出并升级。
-
-## 令牌及客户端参数
+## 可选 MCP 令牌及客户端参数
 
 ```powershell
 saplink token create --name "开发助手" --out C:\Users\USER\AppData\Roaming\saplink\client-token.json --json
@@ -99,14 +103,12 @@ saplink token revoke TOKEN_ID --json
 
 client-config 验证令牌属于当前配置且尚未撤销，再导出 `transport`、`url`、`headers.Authorization`。这只是产品无关连接参数，不是保证适用于 Codex、WorkBuddy 等所有客户端的完整设置文件；AI 应核对目标客户端已有配置格式，保留其他服务器，并在本地脚本内读写令牌，不打印或上传文件。创建参数文件不代表客户端已成功连接。令牌撤销不会删除已写入文件的副本。
 
-## 一个 skill 完成配置、接入与 SAP 工作
+## 一个 skill 完成配置与 SAP 工作
 
-项目附带 [saplink-manager](../skills/saplink-manager/SKILL.md)，面向具有本机终端能力的 AI 客户端。用户要使用产品且确认本机未安装时，Agent 先询问安装意愿并确认安装目录，默认 `~\AppData\Local\Programs\SapLink`；得到同意后优先从 COS、其次从 GitHub 获取官方安装包，官网不再托管或提供安装包更新源，核对架构和完整性后安装。随后负责连接与凭据录入引导、令牌管理、服务启停、给当前客户端配置 `saplink-mcp`、验证 MCP，以及按用户意图执行 SAP 查询或 ABAP 开发。不要求 MCP 预先运行，不通过构建源码替代产品安装。下载、安装和卸载细节见[技能中的产品安装管理](../skills/saplink-manager/references/installation.md)。
+项目附带 [saplink-manager](../skills/saplink-manager/SKILL.md)，面向能在用户 Windows 电脑执行本机命令的 AI 客户端。技能默认直接调用 CLI 使用 SAP，同时收录全部公开管理命令。用户要求管理宿主、MCP 或令牌时按需执行；不为普通 SAP 任务自动启用 MCP，不默认修改或移除用户原有客户端配置。
 
-将整个技能目录（包括 `references`、`agents`）导入客户端。Codex 默认个人位置为 `%USERPROFILE%\.codex\skills\saplink-manager`，自定义 `CODEX_HOME` 时使用其 skills 目录。用户可以直接说“帮我配置 SapLink 并连接这个 SAP 系统”“查询物料”“修改这个 ABAP 程序”，由 Agent 按需读取配置管理、客户端接入或 SAP 工具说明。不要只分发 SKILL.md 而遗漏引用文件。
+将整个技能目录（包括 `references`、`agents`）导入客户端。用户可以直接说“帮我配置 SapLink 并连接这个 SAP 系统”“查询物料”“修改这个 ABAP 程序”，由 Agent 按需完成安装核实、连接配置、命令发现、登录验证和业务操作。不要只分发 SKILL.md 而遗漏引用文件。
 
-客户端新增条目默认名为 `saplink-mcp`，已有同服务条目可复用。Agent 在本机私有文件内转存认证头，合并当前客户端支持的配置，不要求用户复制令牌或手写 TOML/JSON；保留其他服务器及审批策略。Codex 字段及示例见 [客户端接入说明](../skills/saplink-manager/references/client-setup.md)，其他产品需核实其真实配置入口。
+技能先执行 `saplink tools instructions --json` 与 `saplink sap list_connections --json`，再按 `tools describe` 返回的 schema 调用 `saplink sap <operation>`。安装后 PATH 未刷新时，使用已核实的启动器绝对路径继续。命令不可用时先核对版本和入口，不自动改走 MCP。远程/容器终端不能假装拥有用户 Windows 本机的配置与凭据。详细流程见[技能 CLI 接入](../skills/saplink-manager/references/cli-setup.md)。
 
-分别验证配置写入、MCP 初始化、当前会话工具可见及目标 SAP 操作成功。客户端不支持热加载时可能仍需用户重载或开启新会话；密码仍由用户在本机窗口录入。远程或容器中的 Agent 不能直接通过自身 loopback 连接用户 Windows 服务，不能把这些前提隐瞒为“已全部接入”。
-
-首次安装必须同时取得安装同意和路径确认；卸载只接受用户明确要求，不将其作为连接故障、升级失败或安装损坏的常规修复。安装或卸载失败、部分完成或无法确认时，停止自动操作，报告已知结果并提醒用户手动处理。卸载保留配置、令牌、日志、SAP 凭据和客户端条目，不自动清除个人数据或重装。已安装版本可在用户明确选择后使用 `update install --yes --json` 自动升级，诊断、备份和正常退出仍按升级意图执行，完成后检查版本并恢复客户端接入。连接写开关与 SAP 具体变更遵循用户意图和 SAP 权限。后台托管不等于 Windows Service 或开机自启。
+未安装时，先取得安装同意和路径确认，再优先从 COS、其次从 GitHub 获取官方安装包，核对架构及完整性后安装；不通过构建源码替代安装产品。卸载仅接受明确要求，不将其作为连接故障的常规修复。升级按用户意图执行，保留连接、凭据、日志及已有客户端配置；完成后重新验证 CLI 命令与目标 SAP 只读操作。安装或卸载失败、部分完成、结果未知时报告实际状态，不自动卸载重装。写开关及具体 SAP 变更仍受用户授权和 SAP 权限约束。
