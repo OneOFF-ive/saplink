@@ -111,9 +111,11 @@ npm start -- token revoke <令牌ID>
 
 ## 读写控制
 
-添加或编辑连接时，`Enable program writes?` 决定该连接的 `write_enabled`。默认关闭；关闭时仍可读取、搜索、浏览、语法检查和查询传输请求，但服务端拒绝创建、修改和激活。启用后由 SAP 检查用户权限、锁、系统可修改状态及传输任务。
+连接配置仅有“允许写入”开关。禁止时仍可读取、搜索、浏览、语法检查和查询传输请求，但拒绝保存、创建、激活及 ATC/Unit 执行；开启后，CLI/MCP 可独立写入，安全与审批策略由使用者和第三方 AI 客户端设定。旧 `write_governance` 和对象范围字段读取时忽略，保存时移除，保留原 `write_enabled` 值。
 
-没有单独的读取开关，也没有按令牌区分读写或系统的权限。所有有效 MCP 令牌都能访问已配置连接，并受连接写入开关及 SAP 权限约束。agent 不能通过 tools 修改本地权限设置。Web 界面编辑连接前停止 MCP，编辑后重新启动；CLI 编辑前退出运行进程。
+仅 SapLink 客户端提供受控/完全写入选择。受控模式保留现有草稿及一次确认计划；完全写入模式按任务直接执行，无需逐项确认，内部记录授权来源以保留结果和防重复信息。两模式均服从连接开关及 SAP 权限、锁、revision 和传输要求。不确定或部分完成结果须在客户端核实；CLI/MCP 不受这些客户端审批记录的约束。
+
+连接的 `allow_table_data` 单独控制 `query_table` 和 `query_sql`，覆盖 CLI、MCP 和 SAP 助手，不限制表结构等元数据。新连接默认关闭；未设置过权限的旧连接默认开启，旧版 `agent_allow_table_data` 的显式值会保留。CLI 编辑可用 `--enable-table-data` 或 `--disable-table-data`；已有连接的目标不可修改，Client 或用户名改变时保留该权限，除非手动修改。没有按令牌区分读写或系统的权限。所有有效 MCP 令牌都能访问已配置连接，并受连接开关及 SAP 权限约束。agent 不能通过 tools 修改本地权限设置。Web 界面编辑连接前停止 MCP，编辑后重新启动；CLI 编辑前退出运行进程。
 
 ## Tools 与工作流程
 
@@ -139,7 +141,7 @@ MCP 初始化响应通过 `instructions` 提供工具选择、结果解释、版
 
 ### 数据查询
 
-`query_table` 通过 DDIC Data Preview 查询普通表及后端支持的 DDIC/CDS 实体。只传表名时使用空查询体，兼容基础预览接口；字段选择和筛选通过同一个 DDIC 接口提交 SELECT，是否支持由 SAP 决定，不自动改用 SQL Console。带参数的 CDS 暂无专用参数入口。
+`query_table` 的默认模式通过 DDIC Data Preview 查询普通表及后端支持的 DDIC/CDS 实体。只传表名时使用空查询体，兼容基础预览接口。字段选择和筛选通过同一个 DDIC 接口提交 SELECT，是否支持由 SAP 决定。带参数的 CDS 暂无专用参数入口。
 
 ```json
 {
@@ -165,9 +167,13 @@ MCP 初始化响应通过 `instructions` 提供工具选择、结果解释、版
 
 SQL 必须以 SELECT 开始并包含 FROM。不接受注释、语句结束符（分号或结尾句点）、INTO、写语句、Client 切换、外部连接或 privileged access；引号内的这些文本可作为普通数据。校验采用保守规则，部分合法 ABAP SQL 也可能被拒绝；最终语法及权限仍由 SAP 检查。
 
-两个工具默认最多返回 100 行，上限 500；后端多取一行判断 `truncated`。返回 `columns`、`rows`、`row_count`、`limit`、`truncated` 和 `pagination_supported=false`。数值、日期、编号保留为字符串，不转换为 JavaScript 数字或日期，避免前导零及大数精度丢失。结果不缓存到请求去重表，不记录查询文本、筛选值或结果到操作日志。没有稳定排序或分页承诺，limit 只限制返回行数，不限制数据库扫描成本。HTTP 请求默认 15 秒超时和 4 MiB 响应上限；每次调用可用 `timeout_ms` 覆盖单次 SAP 请求的等待时间，范围 100～600000 毫秒。CLI 也支持 `--timeout-ms`。这是单请求等待时间，不是整个操作的总时限；客户端超时不保证后端立即取消执行。
+两个工具默认最多返回 100 行，上限 500，后端多取一行判断 `truncated`。返回 `columns`、`rows`、`row_count`、`limit`、`truncated` 和 `pagination_supported`。数值、日期、编号保留为字符串。操作日志不记录查询文本、筛选值或结果。`limit` 只限制返回行数。HTTP 请求默认 15 秒超时和 4 MiB 响应上限。每次调用可用 `timeout_ms`（100～600000 毫秒）或 CLI 的 `--timeout-ms` 覆盖单次 SAP 请求的等待时间。客户端超时后，SAP 仍可能继续执行。
 
-查询不需要开启 `write_enabled`，使用连接配置中的 Client 和 SAP 用户权限。`get_capabilities.data_query` 分别提供两个接口的 discovery `advertised` 标记；未声明不等于不支持，实际查询验证可用性。数据预览请求本身返回 HTTP 404 时，只重建独立的无状态 reader 并重试一次，保留编辑会话和锁；恢复成功返回 `data.session_recovery`，操作阶段包含 `query_reader_recreated`。持续 404 或 HTTP 405/501 返回 `DATA_PREVIEW_FAILED`，保留脱敏 SAP 错误、实际失败请求路径、尝试次数和 reader 重建标记，不根据 HTTP 状态断言版本不支持。登录路径上的 404 单独保留为 `OBJECT_NOT_FOUND`，不会伪装成数据预览失败。401/403 保留认证或权限错误。查询完成和失败追加审计事件，可以用 operation_id 检索；仅记录状态、行数及恢复摘要，不记录 SQL、筛选值、返回行或原始 HTTP 数据。支持的 CDS 类型、字段语法和具体接口兼容性仍需在目标 SAP 验证。
+`query_table` 开启 `pagination` 时，通过 DDIC 元数据识别主键，使用 SQL Data Preview 按完整主键在当前 Client 内排序。支持 CHAR、NUMC、LANG、CUKY 和 UNIT 主键，Client 字段由 SAP 隐式限定。未请求的主键列不会出现在结果行中。
+
+`query_sql` 分页要求普通 SELECT 或内连接以 `ORDER BY` 结尾。排序列需显式出现在投影中，支持字段别名和升降序。排序列须为非空值的字符或 NUMC 列，且组合后唯一标识结果行。检查范围包括本页和用于判断是否有续页的额外一行，发现重复键时报错。续页按排序键的前缀分段读取。游标用本机密钥加密并绑定连接和原始查询。两种工具每页重新查询 SAP，不提供跨页快照。
+
+查询需要连接的 `allow_table_data`，不需要开启 `write_enabled`，使用连接配置中的 Client 和 SAP 用户权限。`get_capabilities.data_query` 分别提供两个接口的 discovery `advertised` 标记；未声明不等于不支持，实际查询验证可用性。数据预览请求本身返回 HTTP 404 时，只重建独立的无状态 reader 并重试一次，保留编辑会话和锁；恢复成功返回 `data.session_recovery`，操作阶段包含 `query_reader_recreated`。持续 404 或 HTTP 405/501 返回 `DATA_PREVIEW_FAILED`，保留脱敏 SAP 错误、实际失败请求路径、尝试次数和 reader 重建标记，不根据 HTTP 状态断言版本不支持。登录路径上的 404 单独保留为 `OBJECT_NOT_FOUND`，不会伪装成数据预览失败。401/403 保留认证或权限错误。查询完成和失败追加审计事件，可以用 operation_id 检索；仅记录状态、行数及恢复摘要，不记录 SQL、筛选值、返回行或原始 HTTP 数据。支持的 CDS 类型、字段语法和具体接口兼容性仍需在目标 SAP 验证。
 
 `search_objects` 的完整类型如 `PROG/P` 会精确过滤，类型族如 `PROG` 返回该族对象；`limit` 默认 100，最大 500。精确类型搜索在后端类型族结果中最多扫描 501 条，`truncated=true` 表示结果可能不完整，可缩小搜索条件。包列表排除没有 `OBJECT_URI` 的分类节点，先过滤再限量；返回后端节点字段，不提供分页游标。读取仅支持对象发现的主源码，不支持任意 include 片段选择。
 
@@ -235,7 +241,7 @@ SQL 必须以 SELECT 开始并包含 FROM。不接受注释、语句结束符（
 
 当前没有结构化的函数参数维护工具。但在支持源码式接口声明的 SAP 系统中，read_source 返回的 FUNCTION 定义区可以包含参数，通过 update_source 保存、检查和激活可更新接口。可选 IMPORTING 整型参数和 TABLES 的 BAPIRET2 参数已完成保存、检查、激活与恢复验证；其他接口特性需要分别验证。不要把旧式 Local Interface 注释等同于可编辑声明。本服务不执行函数模块，也不自动生成 RFC/BAPI 属性。
 
-`list_connections` 返回连接名称、`connection_id`、`base_url`、`client`、`language`、`username` 和 `write_enabled`，不返回密码或令牌。写入前应确认目标系统和 Client，不能仅凭连接名称判断。
+`list_connections` 返回连接名称、`connection_id`、`base_url`、`client`、`language`、`username`、`write_enabled` 和 `allow_table_data`，不返回密码或令牌。写入前应确认目标系统和 Client，不能仅凭连接名称判断。
 
 ### 创建传输请求
 

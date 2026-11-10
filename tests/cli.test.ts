@@ -214,20 +214,30 @@ test('noninteractive connection edits preserve login secrets and never reuse cre
   try {
     assert.equal((await f.run('connection', 'add', 'dev')).result.error.code, 'INTERACTION_REQUIRED');
     assert.equal((await f.run('connection', 'add', 'dev', '--url', 'https://sap.test', '--client', '001', '--username', 'TEST')).result.error.code, 'INTERACTION_REQUIRED');
-    const connection = connectionSchema.parse({ connection_id: randomUUID(), name: 'dev', base_url: 'https://sap.test', client: '001', username: 'TEST', language: 'EN' });
+    const connection = connectionSchema.parse({ connection_id: randomUUID(), name: 'dev', base_url: 'https://sap.test', client: '001', username: 'TEST', language: 'EN', allow_table_data:true });
     await f.store.save({ schema_version: 1, connections: [connection], tokens: [] });
     const edited = await f.run('connection', 'edit', 'dev', '--language', 'zh', '--disable-writes');
     assert.equal(edited.code, 0); assert.equal(edited.result.data.language, 'ZH');
     assert.equal(edited.result.data.connection_id, connection.connection_id);
+    assert.equal(edited.result.data.allow_table_data,true);
+    assert.equal((await f.run('connection', 'edit', 'dev', '--disable-table-data')).result.data.allow_table_data, false);
+    assert.equal((await f.run('connection', 'edit', 'dev', '--enable-table-data')).result.data.allow_table_data, true);
+    assert.equal((await f.run('connection', 'edit', 'dev', '--enable-table-data', '--disable-table-data')).result.error.code, 'INVALID_INPUT');
+    assert.equal((await f.run('connection','edit','dev','--enable-writes')).result.data.write_enabled,true);
+    assert.equal((await f.run('connection','edit','dev','--language','EN')).result.data.write_enabled,true);
+    assert.equal((await f.run('connection','edit','dev','--disable-writes')).result.data.write_enabled,false);
     const changed = await f.run('connection', 'edit', 'dev', '--url', 'https://other.test');
-    assert.equal(changed.result.error.code, 'INTERACTION_REQUIRED');
+    assert.equal(changed.result.error.code, 'CONNECTION_TARGET_IMMUTABLE');
+    assert.equal((await f.run('connection', 'edit', 'dev', '--url', 'https://other.test', '--password-prompt')).result.error.code, 'CONNECTION_TARGET_IMMUTABLE');
+    assert.equal((await f.run('connection', 'edit', 'dev', '--url', 'https://sap.test')).code, 0);
+    assert.equal((await f.run('connection', 'edit', 'dev', '--client', '002')).result.error.code, 'INTERACTION_REQUIRED');
     assert.equal((await f.store.load()).connections[0].base_url, 'https://sap.test');
     assert.equal((await f.run('connection', 'remove', 'dev')).result.error.code, 'CONFIRMATION_REQUIRED');
     assert.equal((await f.store.load()).connections.length, 1);
   } finally { await f.cleanup(); }
 });
 
-test('CLI selects transport, preserves router settings and requires credentials for route changes', async () => {
+test('CLI preserves existing transport and rejects changes to the connection target', async () => {
   const f = await fixture();
   try {
     const connection = connectionSchema.parse({ connection_id: randomUUID(), name: 'routed', base_url: 'https://sap.test', client: '001', username: 'TEST', language: 'EN',
@@ -235,9 +245,10 @@ test('CLI selects transport, preserves router settings and requires credentials 
     await f.store.save({ schema_version: 1, connections: [connection], tokens: [] });
     const preserved = await f.run('connection', 'edit', 'routed', '--language', 'ZH');
     assert.equal(preserved.code, 0); assert.deepEqual(preserved.result.data.rfc, connection.rfc);
-    for (const flags of [['--rfc-saprouter', '/H/other/S/3299'], ['--clear-rfc-saprouter'], ['--transport', 'http']]) {
+    for (const flags of [['--rfc-saprouter', '/H/other/S/3299'], ['--clear-rfc-saprouter'], ['--transport', 'http'],
+      ['--rfc-ashost', 'other.test'], ['--rfc-sysnr', '01'], ['--url', 'https://other.test']]) {
       const changed = await f.run('connection', 'edit', 'routed', ...flags);
-      assert.equal(changed.result.error.code, 'INTERACTION_REQUIRED');
+      assert.equal(changed.result.error.code, 'CONNECTION_TARGET_IMMUTABLE');
       assert.deepEqual((await f.store.load()).connections[0].rfc, connection.rfc);
     }
     for (const flags of [['--transport', 'http', '--rfc-ashost', 'sap.test'], ['--transport', 'unknown'],

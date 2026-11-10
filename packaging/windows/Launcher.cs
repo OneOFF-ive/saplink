@@ -1,8 +1,10 @@
 using System;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security;
 using System.Text;
 
 internal static class Launcher
@@ -80,15 +82,50 @@ internal static class Launcher
         {
             if (arguments.Length > 0 && arguments[0] == "--internal-service-run") return SpawnService(arguments);
             if (arguments.Length > 0 && arguments[0] == "--internal-update-run") return SpawnUpdate(arguments);
-            using (Process child = Process.Start(Node(arguments)))
+            var start = Node(arguments);
+            if (!File.Exists(start.FileName))
+            {
+                Console.Error.WriteLine("SapLink could not find or access its bundled Node.js runtime: " + start.FileName);
+                Console.Error.WriteLine("Check the installation and file permissions; repair the installation if the file is missing.");
+                return 1;
+            }
+            string cli = Path.Combine(Root, "app", "dist", "cli.js");
+            if (!File.Exists(cli))
+            {
+                Console.Error.WriteLine("SapLink could not find or access its CLI entry point: " + cli);
+                Console.Error.WriteLine("Check the installation and file permissions; repair the installation if the file is missing.");
+                return 1;
+            }
+            using (Process child = Process.Start(start))
             {
                 child.WaitForExit();
                 return child.ExitCode;
             }
         }
-        catch
+        catch (Win32Exception error)
         {
-            Console.Error.WriteLine("SapLink could not start. Repair the installation; the bundled Node.js runtime is required.");
+            Console.Error.WriteLine("SapLink could not start its bundled Node.js process (Windows error " + error.NativeErrorCode + "): " + error.Message);
+            Console.Error.WriteLine("The runtime may exist; check permissions, process restrictions, and the current working directory.");
+            return 1;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine("SapLink could not start: access to the installation or working directory was denied.");
+            return 1;
+        }
+        catch (SecurityException)
+        {
+            Console.Error.WriteLine("SapLink could not start: the process is restricted by a security policy.");
+            return 1;
+        }
+        catch (IOException error)
+        {
+            Console.Error.WriteLine("SapLink could not start due to an I/O error: " + error.Message);
+            return 1;
+        }
+        catch (InvalidOperationException error)
+        {
+            Console.Error.WriteLine("SapLink could not start its Node.js process: " + error.Message);
             return 1;
         }
     }

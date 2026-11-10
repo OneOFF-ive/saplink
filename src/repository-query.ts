@@ -3,6 +3,7 @@ import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import type { ADTClient, ClassComponent } from 'abap-adt-api';
 import { AppError, safeError } from './errors.js';
 import { findReferences } from './reference-query.js';
+import { fieldName } from './data-query.js';
 
 const uri = z.string().min(1).max(2048).describe('Relative ADT object URI returned by SAP search or a prior tool. No full URL, query or fragment.');
 const name = z.string().regex(/^(?:\/[A-Za-z0-9_]+\/)?[A-Za-z0-9_]+$/).max(128);
@@ -16,6 +17,7 @@ export const repositorySchemas = {
     field_name: name.optional().describe('Optional exact field name.'), limit }).strict(),
   get_data_element: z.object({ data_element_uri: uri }).strict(),
   get_domain_values: z.object({ domain_uri: uri, limit }).strict(),
+  get_odata_service_binding: z.object({ object_uri: uri, limit }).strict(),
   find_references: z.object({ object_uri: uri, line: line.optional(), column: column.optional(), limit }).strict()
     .refine(p => (p.line === undefined) === (p.column === undefined), 'Provide both line and column, or neither'),
   find_definition: z.object({ ...position, end_column: column.optional(), implementation: z.boolean().default(false) }).strict()
@@ -34,6 +36,7 @@ export const repositoryDescriptions: Record<RepositoryTool, string> = {
   get_ddic_definition: 'Read DDIC/CDS field definitions: types, lengths, keys, data elements and available labels. Optional field_name filters returned metadata locally; SAP may return the whole entity. Active backend metadata only; not business rows. Nested elements are flattened with parent indexes; limit bounds total returned elements. Support varies by backend.',
   get_data_element: 'Read active data element metadata, labels and type/domain information. Obtain data_element_uri from search_objects (DTEL), not by constructing a path. Domain typeName is backend metadata, not a business table.',
   get_domain_values: 'Read active domain metadata and fixed values/ranges, preserving raw strings and leading zeros. Obtain domain_uri from search_objects (DOMA). Fixed values are not all business-valid values; a value table is not automatically a validated check table. Does not query value tables.',
+  get_odata_service_binding: 'Read an active RAP OData service binding and its protocol and linked service definitions. Obtain object_uri from search_objects with type SRVB. To read a linked service definition, use read_source with its SRVD object URI. This tool reads ADT design-time metadata only.',
   find_references: `Read actual SAP where-used locations and bounded code snippets for an object or a symbol at line/column in its active main source. Omit both position fields for object-wide references. Input and returned location coordinates are one-based; source_context identifies the source used. Groups expand via usageSnippets: at most 6 requests / 25 groups / 30 seconds (checked between requests). limit counts actual locations, not groups. Inspect unexpanded_nodes, truncation_reasons and expansion_complete; partial expansion never proves absence. ${coverage} Does not establish a complete call graph or detect every dynamic call.`,
   find_definition: 'Locate a symbol definition (or implementation=true) using current active main source fetched by the server. Supply object_uri from search, one-based line/column and optional inclusive end_column. Returns SAP target location and queried source revision; no source is saved. Includes requiring main-program context may be unsupported.',
   get_class_structure: 'Read active class or interface member structure: names, types, visibility and available static/constant/read-only flags. Pass class/interface object URI from SAP search. Returned SAP link fragments retain native zero-based columns. Flattened members carry parent indexes; limit bounds total members. Complete method signatures and inherited members are not guaranteed; use get_type_hierarchy for inheritance.',
@@ -43,6 +46,38 @@ export const repositoryDescriptions: Record<RepositoryTool, string> = {
 function page<T>(items: T[], max: number) {
   return { items: items.slice(0, max), returned_count: Math.min(items.length, max), truncated: items.length > max,
     pagination_supported: false as const };
+}
+
+const serviceBindingPath = /^\/sap\/bc\/adt\/businessservices\/bindings\/(?:[a-z0-9_]|%2f)+$/i;
+const serviceDefinitionPath = /^\/sap\/bc\/adt\/ddic\/srvd\/sources\/(?:[a-z0-9_]|%2f)+$/i;
+
+function parseOdataServiceBinding(xml: string, objectUri: string, max: number) {
+  if (Buffer.byteLength(xml) > 1024 * 1024 || /<!DOCTYPE|<!ENTITY/i.test(xml) || XMLValidator.validate(xml) !== true)
+    malformed('Invalid service binding XML');
+  const { serviceBinding: root } = new XMLParser({ ignoreAttributes: false, removeNSPrefix: true,
+    parseTagValue: false, parseAttributeValue: false }).parse(xml);
+  const expectedName = decodeURIComponent(objectUri.split('/').at(-1)!).toUpperCase();
+  if (root?.['@_type'] !== 'SRVB/SVB' || root?.['@_name']?.toUpperCase() !== expectedName)
+    malformed('Expected matching SAP service binding metadata');
+  if (root['@_version'] && root['@_version'] !== 'active')
+    throw new AppError('VERSION_UNAVAILABLE', 'Backend did not return the active service binding');
+  const binding = root.binding;
+  if (!binding?.['@_type'] || !binding['@_version']) malformed('Expected service binding protocol metadata');
+  if (binding['@_type'] !== 'ODATA')
+    throw new AppError('CAPABILITY_UNSUPPORTED', 'The requested service binding does not use OData');
+  const list = <T>(value: T | T[] | undefined): T[] =>
+    value === undefined ? [] : Array.isArray(value) ? value : [value];
+  type Content = { '@_version'?: string; serviceDefinition?: { '@_name'?: string; '@_uri'?: string } };
+  type Service = { '@_name'?: string; content?: Content | Content[] };
+  const services = list<Service>(root.services).flatMap(service => list(service.content).map(content => {
+    const ref = content.serviceDefinition;
+    const definitionUri = ref?.['@_uri'];
+    return { name: service['@_name'], version: content['@_version'], service_definition: ref?.['@_name'],
+      service_definition_uri: definitionUri && serviceDefinitionPath.test(definitionUri) ? definitionUri : undefined };
+  }));
+  return { object_uri: objectUri, name: root['@_name'], description: root['@_description'], version: 'active',
+    binding_type: binding['@_type'], protocol_version: binding['@_version'], category: binding['@_category'],
+    ...page(services, max) };
 }
 // A nested structure cannot bypass the total result limit. Parent indexes refer
 // only to nodes already included in the flattened result (root counts as one).
@@ -157,11 +192,30 @@ export class RepositoryQueries {
       // Do not retry authentication/authorization failures via another endpoint.
       if (!status || ![404, 405, 500, 501].includes(status)) throw error;
     }
+    return this.genericDdicDefinition(entityName);
+  }
+  private async genericDdicDefinition(entityName: string) {
     const response = await this.reader.httpClient.request('/sap/bc/adt/ddic/elementinfo', {
       method: 'GET', headers: { Accept: 'application/vnd.sap.adt.elementinfo+xml' },
       qs: { path: entityName }
     });
     return parseDdicDefinition(response.body, entityName);
+  }
+  async tablePrimaryKey(entityName: string) {
+    const root = await this.genericDdicDefinition(entityName);
+    const fields = flattenTree(root, node => node.children, 10000).items.map(({ node }) => node);
+    const keyFields = fields.flatMap(node => {
+      const props = (node.properties as { elementProps?: { ddicIsKey?: boolean; ddicDataType?: string } }).elementProps;
+      // ABAP SQL already scopes a client-dependent table to the current Client.
+      const type = props?.ddicDataType?.toUpperCase();
+      return props?.ddicIsKey === true && type !== 'CLNT' ? [{ name: node.name.toUpperCase(), type }] : [];
+    });
+    // Only paginate keys that can be round-tripped as text literals from Data Preview.
+    const keys = keyFields.map(field => field.name);
+    if (root.type !== 'TABL/DT' || !keys.length || keys.length > 32 || new Set(keys).size !== keys.length ||
+        keyFields.some(({ name, type }) => !fieldName.safeParse(name).success || !/^(CHAR|NUMC|LANG|CUKY|UNIT)$/.test(type ?? '')))
+      throw new AppError('QUERY_PAGINATION_UNSUPPORTED', 'SAP did not expose a usable DDIC table primary key');
+    return keys;
   }
   private async sourcePosition(object: string, lineNumber: number, start: number, end = start) {
     const source = await this.read(this.validateUri(object), 'active');
@@ -209,6 +263,14 @@ export class RepositoryQueries {
         const p = repositorySchemas[tool].parse(input);
         const object = this.typedUri(p.domain_uri, /^\/sap\/bc\/adt\/ddic\/domains\/[^/]+$/);
         return { object_uri: object, version: 'active', ...parseDomain(await this.reader.getObjectSource(object, { version: 'active' }), p.limit) };
+      }
+      case 'get_odata_service_binding': {
+        const p = repositorySchemas[tool].parse(input);
+        const object = this.validateUri(p.object_uri);
+        if (!serviceBindingPath.test(object))
+          throw new AppError('INVALID_URI', 'Use a service binding object URI returned by SAP search');
+        const response = await this.reader.httpClient.request(object, { method: 'GET', qs: { version: 'active' } });
+        return parseOdataServiceBinding(response.body, object, p.limit);
       }
       case 'find_references': {
         const p = repositorySchemas[tool].parse(input);

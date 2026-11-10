@@ -12,35 +12,19 @@ import { parseTransportList, parseTransportSummary } from './transports.js';
 import { checkSavedVersion } from './syntax-check.js';
 import { activationBody, scopedActivationBody, activationResponse, type ActivationReference } from './activation.js';
 import { probeEnhancementActivation, type EnhancementActivation } from './enhancements.js';
-import { tableQuery, readOnlySql, queryResult, queryCapabilities, type TableQuery, type SqlQuery } from './data-query.js';
+import { tableQuery, loadQueryCursorKey, pagedTableQuery, pagedTableResult, pagedSqlQuery, pagedSqlResult,
+  readOnlySql, queryResult, queryCapabilities, type TableQuery, type SqlQuery } from './data-query.js';
 import { RfcTransport, type AdtTransport, type RfcRuntime, type RfcRole } from './rfc.js';
 import { validateRequestTimeout } from './request-timeout.js';
+import { adtUri, programUri, functionGroupUri, ddicUriName, sourceObjectUri } from './adt-uri.js';
+import { ddicCreationUri, ddicTypes, ddlTokens, sameDdicDefinition, type DdicKind } from './ddic-definition.js';
+import { targetFingerprint } from './connection-identity.js';
+import { defaultConfigDirectory } from './paths.js';
+export { adtUri, programUri, functionGroupUri } from './adt-uri.js';
 
 export type Version = 'active' | 'inactive';
 export type ProgramKind = 'report' | 'include' | 'module_pool' | 'subroutine_pool';
 const programTypes = { report: 'executableProgram', module_pool: 'modulePool', subroutine_pool: 'subroutinePool' } as const;
-export function adtUri(uri: string): string {
-  if (!uri.startsWith('/sap/bc/adt/') || /[?#\\\s]/.test(uri)) throw new AppError('INVALID_URI', 'Use an ADT relative object URI');
-  let decoded: string;
-  try { decoded = decodeURIComponent(uri); } catch { throw new AppError('INVALID_URI', 'Invalid URI encoding'); }
-  if (decoded.includes('%') || decoded.includes('\\') || /[?#\x00-\x20]/.test(decoded) || decoded.split('/').some(s => s === '.' || s === '..')) {
-    throw new AppError('INVALID_URI', 'Unsafe ADT URI');
-  }
-  return uri;
-}
-export function programUri(uri: string): string {
-  adtUri(uri);
-  if (!/^\/sap\/bc\/adt\/(?:programs\/(?:programs|includes)\/[a-zA-Z0-9_%]+|functions\/groups\/[a-zA-Z0-9_%]+(?:\/(?:fmodules|includes)\/[a-zA-Z0-9_%]+)?)(?:\/source\/main)?$/.test(uri)) {
-    throw new AppError('CAPABILITY_UNSUPPORTED', 'Unsupported ABAP source object URI');
-  }
-  return uri.replace(/\/source\/main$/, '');
-}
-export function functionGroupUri(uri: string): string {
-  const object = programUri(uri);
-  const match = object.match(/^(\/sap\/bc\/adt\/functions\/groups\/[a-zA-Z0-9_%]+)(?:\/(?:fmodules|includes)\/[^/]+)?$/);
-  if (!match) throw new AppError('INVALID_URI', 'Use a function group or member URI');
-  return match[1];
-}
 export const isFunctionGroup = (uri: string) => /^\/sap\/bc\/adt\/functions\/groups\/[^/]+$/.test(uri);
 export type GroupSnapshot = { object_uri: string; revision: string; name: string; members: { object_uri: string; version: Version; revision: string; hash: string; definition_comments_hash?: string }[] };
 export type ActivationTarget = { object_uri: string; snapshot?: GroupSnapshot };
@@ -72,6 +56,7 @@ function verificationSource(source: string): string {
   return lines.join('\n');
 }
 export function savedSourceHash(source: string, objectUri?: string): string {
+  if (objectUri && ddicUriName(objectUri)) return digest(JSON.stringify(ddlTokens(source)));
   if (objectUri && /\/fmodules\/[^/]+(?:\/source\/main)?$/.test(objectUri)) {
     const parsed = functionDefinition(source);
     if (parsed) return digest(JSON.stringify([parsed.signature, verificationSource(parsed.implementation)]));
@@ -86,6 +71,8 @@ export function definitionCommentsHash(source: string, objectUri: string): strin
 export function compareSavedSource(left: string, right: string, objectUri?: string) {
   const strict = verificationSource(left) === verificationSource(right);
   if (strict) return { equivalent: true, normalization_applied: false, warnings: [] as string[] };
+  if (objectUri && ddicUriName(objectUri) && sameDdicDefinition(left,right))
+    return { equivalent:true, normalization_applied:true, warnings:[] as string[] };
   if (!objectUri || !/\/fmodules\/[^/]+(?:\/source\/main)?$/.test(objectUri)) {
     return { equivalent: false, normalization_applied: false, warnings: [], difference: 'source' };
   }
@@ -125,6 +112,7 @@ export interface Backend {
   readonly saveDispatchTracking?: boolean;
   save(source: string, code: string, handle: string, transport?: string, onDispatch?: () => void): Promise<void>;
   create(name: string, description: string, pkg: string, transport?: string, kind?: ProgramKind): Promise<string>;
+  createDdic?(kind: DdicKind, name: string, description: string, pkg: string, transport: string | undefined, onDispatch: () => void): Promise<string>;
   createFunctionGroup?(name: string, description: string, pkg: string, transport?: string): Promise<string>;
   createFunctionModule?(name: string, description: string, group: string, transport?: string): Promise<string>;
   listFunctionGroupMembers?(group: string, limit: number): Promise<unknown>;
@@ -226,7 +214,7 @@ function diagnosticClient(connection: Connection, password: string, transport: A
   return client;
 }
 
-export type AdtBackendOptions = { queryIdleTimeoutMs?: number; now?: () => number; rfcRuntime?: RfcRuntime;
+export type AdtBackendOptions = { queryIdleTimeoutMs?: number; now?: () => number; rfcRuntime?: RfcRuntime; configDirectory?: string;
   transportFactory?: (role: RfcRole, onActivity?: () => void) => AdtTransport };
 
 function queryIdleTimeoutMs() {
@@ -255,7 +243,7 @@ export class AdtBackend implements Backend {
   private readerLastActivity?: number;
   private readonly queryIdleTimeoutMs: number;
   private readonly now: () => number;
-  constructor(private connection: Connection, password: string, options: AdtBackendOptions = {}) {
+  constructor(private connection: Connection, password: string, private options: AdtBackendOptions = {}) {
     this.queryIdleTimeoutMs = options.queryIdleTimeoutMs ?? queryIdleTimeoutMs();
     if (!Number.isSafeInteger(this.queryIdleTimeoutMs) || this.queryIdleTimeoutMs < 1 || this.queryIdleTimeoutMs > 86400000)
       throw new AppError('INVALID_CONFIG', 'Query reader idle timeout must be between 1 and 86400000 milliseconds');
@@ -304,6 +292,11 @@ export class AdtBackend implements Backend {
       source_lock_policy: { function_module: 'module', function_group_include: 'include' },
       repository_query: { tools: Object.keys(repositorySchemas), source_version: 'active', max_items: 500,
         availability_policy: 'Tools are implemented locally; backend availability and authorization must be verified by actual calls' },
+      ddic_creation: {
+        structure_advertised: discovery.some(group=>group.collection?.some(item=>item.href===ddicTypes.structure.collection)),
+        table_advertised: discovery.some(group=>group.collection?.some(item=>item.href===ddicTypes.table.collection)),
+        save_version:'inactive', activation:'separate'
+      },
       quality_tools: { tools: Object.keys(qualitySchemas), execution_policy: 'write_enabled_confirm_execution_request_id',
         unit_risk: 'harmless_only', unit_default_duration: 'short', history_source_part: 'main' },
       source_read_policy: 'separate_stateless_session',
@@ -377,12 +370,40 @@ export class AdtBackend implements Backend {
     }
     throw new AppError('DATA_PREVIEW_FAILED', 'SAP data preview retry exhausted');
   }
+  private async runQueryBranches(statements: string[], maxRows: number) {
+    const values: unknown[] = [];
+    let columns: unknown[] = [];
+    for (const sql of statements) {
+      const remaining = maxRows - values.length;
+      const batch = await this.reader.runQuery(sql, remaining, false);
+      if (!batch.columns.length) throw new AppError('QUERY_RESPONSE_INVALID', 'SAP did not return tabular query metadata');
+      columns = batch.columns;
+      values.push(...batch.values.slice(0, remaining));
+      if (values.length === maxRows) break;
+    }
+    return { columns, values };
+  }
   async queryTable(input: TableQuery) {
     const p = tableQuery(input);
+    if (p.pagination || p.cursor) {
+      const repository = new RepositoryQueries(this.reader, (object, version) => this.read(object, version), adtUri);
+      const keys = await repository.tablePrimaryKey(p.table_name);
+      const secret = await loadQueryCursorKey(this.options.configDirectory ?? defaultConfigDirectory());
+      const page = pagedTableQuery(p, keys, targetFingerprint(this.connection), secret);
+      const result = await this.dataQuery(() => this.runQueryBranches(page.statements, p.limit + 1), p.limit);
+      return pagedTableResult(result, p.fields, keys, page, secret);
+    }
     return this.dataQuery(() => this.reader.tableContents(p.table_name, p.limit + 1, false, p.sql), p.limit);
   }
   async querySql(input: SqlQuery) {
     const p = readOnlySql(input);
+    if (p.pagination || p.cursor) {
+      const secret = await loadQueryCursorKey(this.options.configDirectory ?? defaultConfigDirectory());
+      const page = pagedSqlQuery(p, targetFingerprint(this.connection), secret);
+      const fetchLimit = p.limit + 1;
+      const result = await this.dataQuery(() => this.runQueryBranches(page.statements, fetchLimit), fetchLimit);
+      return pagedSqlResult(result, p.limit, page, secret);
+    }
     return this.dataQuery(() => this.reader.runQuery(p.sql, p.limit + 1, false), p.limit);
   }
   async listPackage(name: string, limit: number) {
@@ -394,19 +415,28 @@ export class AdtBackend implements Backend {
   async read(object: string, version: Version, requestedSource?: string) {
     adtUri(object);
     const metadata = await this.reader.objectStructure(object, version);
-    if (metadata.metaData['adtcore:version'] !== version) throw new AppError('VERSION_UNAVAILABLE', 'Backend did not return the requested version');
-    const sourceUri = adtUri(ADTClient.mainInclude(metadata, false));
+    const ddicName = ddicUriName(object);
+    const backendVersion = metadata.metaData['adtcore:version'];
+    if (backendVersion !== version && !(ddicName && version === 'inactive' && backendVersion === 'new'))
+      throw new AppError('VERSION_UNAVAILABLE', 'Backend did not return the requested version');
+    const sourceUri = adtUri(ADTClient.mainInclude(metadata, Boolean(ddicName)));
+    if (ddicName && (!['TABL/DS','TABL/DT'].includes(metadata.metaData['adtcore:type']) ||
+        metadata.metaData['adtcore:name']?.toUpperCase() !== ddicName || ddicUriName(sourceUri) !== ddicName ||
+        !sourceUri.endsWith('/source/main')))
+      throw new AppError('CAPABILITY_UNSUPPORTED','SAP returned inconsistent Dictionary source metadata');
     if (sourceUri === object) throw new AppError('CAPABILITY_UNSUPPORTED', 'Object does not expose a main source');
     if (requestedSource && adtUri(requestedSource) !== sourceUri) throw new AppError('INVALID_URI', 'Only the discovered main source is supported');
     return sourceResult(this.connection.connection_id, object, sourceUri, await this.reader.getObjectSource(sourceUri, { version }), version);
   }
   async packageOf(object: string) {
-    const objectUri = programUri(object);
+    const objectUri = sourceObjectUri(object);
     const metadata = await this.client.objectStructure(objectUri);
+    const ddicName = ddicUriName(objectUri);
     const expectedType = objectUri.startsWith('/sap/bc/adt/programs/includes/') ? 'PROG/I'
       : objectUri.startsWith('/sap/bc/adt/programs/programs/') ? 'PROG/P'
       : objectUri.includes('/fmodules/') ? 'FUGR/FF' : objectUri.includes('/includes/') ? 'FUGR/I' : 'FUGR/F';
-    if (metadata.metaData['adtcore:type'] !== expectedType) {
+    if (ddicName ? !['TABL/DS','TABL/DT'].includes(metadata.metaData['adtcore:type']) ||
+        metadata.metaData['adtcore:name']?.toUpperCase() !== ddicName : metadata.metaData['adtcore:type'] !== expectedType) {
       throw new AppError('CAPABILITY_UNSUPPORTED', 'Object metadata does not match its URI');
     }
     const path = await this.client.findObjectPath(adtUri(object));
@@ -417,11 +447,11 @@ export class AdtBackend implements Backend {
   private lockUri(object: string) {
     // A source PUT requires that resource's own handle, including FUGR/I Includes.
     // The group handle is only used when explicitly locking the group container.
-    return programUri(object);
+    return sourceObjectUri(object);
   }
   async transportRequirement(object: string, pkg: string, _operation: 'I' | 'U') {
     // CTS operation I inserts an object into change recording, for both create and edit.
-    const info = await this.reader.transportInfo(programUri(object), pkg, 'I');
+    const info = await this.reader.transportInfo(sourceObjectUri(object), pkg, 'I');
     if (info.RESULT === 'S' && info.RECORDING === 'X') return 'required' as const;
     if (info.RESULT === 'S' && info.RECORDING === '' && info.KORRFLAG === '') return 'not_required' as const;
     throw new AppError('TRANSPORT_CHECK_UNAVAILABLE', 'SAP returned an ambiguous transport requirement; provide an explicit task or verify CTS settings.');
@@ -459,7 +489,7 @@ export class AdtBackend implements Backend {
   }
   async save(source: string, code: string, handle: string, transport?: string, onDispatch?: () => void) {
     this.saveDiagnostics = [];
-    programUri(source);
+    sourceObjectUri(source);
     const correction = await this.correctionRequest(transport);
     onDispatch?.();
     this.capturingSave = true;
@@ -502,6 +532,41 @@ export class AdtBackend implements Backend {
     await this.createFunctionXml('/sap/bc/adt/functions/groups', 'group', 'abapFunctionGroup', 'FUGR/F', name, description,
       { 'adtcore:packageRef': { '@_adtcore:name': pkg } }, transport);
     await this.verifyFunctionCreated(uri, 'FUGR/F'); return uri;
+  }
+  async createDdic(kind: DdicKind, name: string, description: string, pkg: string, transport: string | undefined, onDispatch: () => void) {
+    const {collection,type} = ddicTypes[kind];
+    const validation = await this.client.validateNewObject({ objtype:type, objname:name, description, packagename:pkg }).catch(error=>{
+      const failure = safeError(error);
+      const status = (failure.details as {http_status?:number}|undefined)?.http_status;
+      if ([404,405,501].includes(status ?? 0))
+        throw new AppError('CAPABILITY_UNSUPPORTED','This SAP ADT backend does not offer source-based creation for this Dictionary object.',failure.details);
+      throw error;
+    });
+    if (!validation.success) throw new AppError('CREATE_VALIDATION_FAILED','SAP rejected Dictionary object creation',validation);
+    if (transport) await this.correctionRequest(transport);
+    const body = new XMLBuilder({ignoreAttributes:false}).build({'blue:blueSource':{
+      '@_xmlns:blue':'http://www.sap.com/wbobj/blue', '@_xmlns:adtcore':'http://www.sap.com/adt/core',
+      '@_adtcore:name':name, '@_adtcore:type':type, '@_adtcore:description':description,
+      '@_adtcore:responsible':this.connection.username, '@_adtcore:language':this.connection.language,
+      '@_adtcore:masterLanguage':this.connection.language, 'adtcore:packageRef':{'@_adtcore:name':pkg}
+    }});
+    onDispatch();
+    const response = await this.client.httpClient.request(collection,{method:'POST',body,
+      headers:{'Content-Type':'application/*'}, ...(transport ? {qs:{corrNr:transport}} : {})});
+    const location = response.headers.location;
+    const requested = ddicCreationUri(kind,name);
+    let uri = typeof location === 'string' && ddicUriName(location) === name ? sourceObjectUri(location) : requested;
+    let metadata;
+    try { metadata = await this.reader.objectStructure(uri,'inactive'); }
+    catch (error) {
+      if (kind !== 'table' || uri !== requested || safeError(error).code !== 'OBJECT_NOT_FOUND') throw error;
+      uri = ddicCreationUri('structure',name);
+      metadata = await this.reader.objectStructure(uri,'inactive');
+    }
+    if (metadata.metaData['adtcore:type'] !== type || metadata.metaData['adtcore:name']?.toUpperCase() !== name ||
+        !['new','inactive'].includes(metadata.metaData['adtcore:version']))
+      throw new AppError('VERIFY_FAILED','Cannot confirm the new inactive Dictionary object',{object_uri:uri});
+    return uri;
   }
   async createFunctionModule(name: string, description: string, group: string, transport?: string) {
     const groupUri = functionGroupUri(group);
@@ -584,7 +649,7 @@ export class AdtBackend implements Backend {
     const selected = new Set<string>();
     // Validate all containers before metadata lookup or dispatch.
     for (const target of objects) {
-      const uri = programUri(target.object_uri);
+      const uri = sourceObjectUri(target.object_uri);
       if (selected.has(uri)) throw new AppError('INVALID_INPUT', 'Duplicate activation target');
       selected.add(uri);
       if (isFunctionGroup(uri)) {
@@ -597,20 +662,23 @@ export class AdtBackend implements Backend {
       } else if (target.snapshot) throw new AppError('INVALID_INPUT', 'Only function groups accept snapshots');
     }
     for (const target of objects) {
-      const uri = programUri(target.object_uri);
+      const uri = sourceObjectUri(target.object_uri);
       if (!isFunctionGroup(uri) && uri.includes('/functions/groups/') && selected.has(functionGroupUri(uri)))
         throw new AppError('INVALID_INPUT', 'Select either a function group or its individual members');
     }
     const targets = new Map<string, ActivationReference>();
     const approved = new Map<string, ActivationReference>();
     for (const target of objects) {
-      const uri = programUri(target.object_uri);
+      const uri = sourceObjectUri(target.object_uri);
       const entries = target.snapshot ? [...target.snapshot.members.map(member => ({ uri: member.object_uri, activate: member.version === 'inactive' })), { uri, activate: true }]
         : [{ uri, activate: true }];
       for (const entry of entries) {
         const metadata = await this.reader.objectStructure(entry.uri);
         const name = metadata.metaData['adtcore:name'], type = metadata.metaData['adtcore:type'];
         if (!name || !type) throw new AppError('ACTIVATION_SCOPE_INVALID', 'Activation metadata has no name or type');
+        const ddicName = ddicUriName(entry.uri);
+        if (ddicName && (ddicName !== name.toUpperCase() || !['TABL/DS','TABL/DT'].includes(type)))
+          throw new AppError('ACTIVATION_SCOPE_INVALID','Dictionary activation metadata does not match the selected object');
         const ref: ActivationReference = { uri: entry.uri, name, type,
           ...(entry.uri.includes('/functions/groups/') ? { parentUri: functionGroupUri(entry.uri) } : {}) };
         approved.set(entry.uri, ref);

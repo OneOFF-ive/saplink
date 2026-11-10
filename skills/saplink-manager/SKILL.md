@@ -9,23 +9,25 @@ description: "Use the local saplink CLI to connect AI to SAP, query data and edi
 
 ## 按当前任务执行
 
-- **首次使用、配置或修复连接**：检查安装；缺失时按[产品安装管理](references/installation.md)取得安装同意和路径确认 → 按[CLI 接入](references/cli-setup.md)确认当前客户端能执行命令 → 复用或配置 SAP 连接 → 通过 CLI 验证目标系统及 Client → 执行用户任务。
-- **SAP 查询或 ABAP 开发**：读取[CLI SAP 操作](references/sap-tools.md)。先执行 `saplink tools instructions --json`、`saplink sap list_connections --json`，按需用 `tools list/describe` 发现操作和参数，再调用 `saplink sap <operation>`。
+- **首次使用、配置或修复连接**：先按[接入检查](references/cli-setup.md#找不到-saplink-命令)确认能否访问用户本机。确认本机缺少安装时，按[产品安装管理](references/installation.md)处理。复用或配置 SAP 连接后验证目标系统及 Client。
+- **SAP 查询或 ABAP 开发**：优先按[CLI SAP 操作](references/sap-tools.md)执行。CLI 入口不可用时，按[接入检查](references/cli-setup.md#找不到-saplink-命令)判断是否可使用当前客户端已配置并获准使用的 SapLink MCP。
 - **状态、连接配置或本地维护**：读取[运行与配置管理](references/local-management.md)，仅处理用户要求的范围。CLI 访问 SAP 不要求管理页面或后台服务保持运行。
 - **宿主启停、界面或全部命令查询**：读取[全部 CLI 命令](references/commands.md)，区分 `app`（宿主）、`mcp`（仅 MCP）及兼容的 `service`，不要以停止宿主代替仅停止 MCP。
 - **MCP 启停、令牌或参数导出**：读取[MCP 与令牌管理](references/mcp-management.md)，完成用户要求并验证实际状态，不默认配置 AI 客户端的 MCP 接入。
 - **检查或安装更新**：读取[版本检查与自动升级](references/updates.md)。查询与安装分别按用户意图执行；已明确要求升级时无需重复询问。
 - **安装或卸载**：读取[产品安装管理](references/installation.md)。卸载仅接受明确要求，不将卸载重装作为连接故障的常规处理。
 
-全部公开管理命令均收录在[命令目录](references/commands.md)；SAP 子命令通过 `tools list/describe` 动态发现。引用文件随技能一起分发。实际安装版的 `saplink tools instructions/list/describe` 优先于静态说明；命令缺失时报告版本能力不足，按用户的升级意图处理，不自动改走另一种连接协议。
+全部公开管理命令均收录在[命令目录](references/commands.md)。通过当前入口发现工具及参数，实际工具定义优先于静态说明。已成功访问 CLI 但某个子命令缺失时，按已安装版本的能力处理。
+
+默认操作正式安装版。用户提到源码版、开发预览或两边的设置不一致时，先按[环境识别](references/local-management.md#区分正式安装版与源码预览)核实目标，再操作连接、宿主或凭据。
 
 ## 配置到可用的完成标准
 
-1. 解析已安装的 `saplink`，执行 `version --json` 和 `sap list_connections --json`。PATH 未刷新时使用已核实安装目录中的启动器绝对路径。不能仅因命令不在 PATH 就认定未安装。
+1. 验证可用入口。CLI 运行 `version --json` 和 `sap list_connections --json`。已配置的 MCP 读取当前工具定义并调用 `list_connections`。
 2. 复用已有连接，按真实服务器、传输方式和三位 Client 选取 `connection_id`，不凭名称推断系统用途。有歧义再确认。新连接优先 RFC，已有连接保持原传输方式。
 3. 缺少配置时获取 RFC 应用服务器、两位系统号、可选路由，或 HTTP ADT 地址；另需 Client、用户名和语言。密码由用户在本机窗口输入，不从聊天或命令参数获取。
-4. 验证 CLI 操作发现、连接列表，以及目标连接的 `get_capabilities` 或任务需要的只读操作。保存配置不等于 SAP 登录成功，能力声明不等于获得业务权限。
-5. 简洁报告已完成事项、目标系统及 Client、验证结果和具体剩余动作。没有本机命令执行能力的客户端不能直接使用本技能；不宣称远程或容器终端已经访问到用户 Windows 配置和凭据。
+4. 通过选定入口调用目标连接的 `get_capabilities` 或任务需要的最小只读操作，验证实际访问。
+5. 简洁报告使用的入口、目标系统及 Client、验证结果和具体剩余动作。
 
 ## 操作边界
 

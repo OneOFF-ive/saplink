@@ -13,6 +13,7 @@ export const connectionFieldHints: Record<string, string> = {
   language: '语言必须是 2 位大写英文字母，例如 EN、ZH 或 DE。',
   password: 'SAP 密码必须为文本，最多 512 个字符。',
   write_enabled: '允许程序写入必须为开启或关闭。',
+  allow_table_data: '表数据访问权限必须为开启或关闭。',
   rfc: 'RFC 连接需要应用服务器主机名或 IP，以及恰好两位数字的系统号（例如 00）。',
   rfc_ashost: '请填写 RFC 应用服务器的主机名或 IPv4 地址，不要填写路由串。',
   rfc_sysnr: 'RFC 系统号必须恰好为两位数字，例如 00。',
@@ -42,6 +43,10 @@ export const connectionSchema = z.object({
   username: z.string().min(1),
   language: z.string().regex(/^[A-Z]{2}$/),
   write_enabled: z.boolean().default(false),
+  write_governance: z.enum(['legacy', 'approval_required']).optional(),
+  write_objects: z.unknown().optional(),
+  allow_table_data: z.boolean().optional(),
+  agent_allow_table_data: z.boolean().optional(),
   rfc: z.object({
     ashost: z.string().min(1).max(253).regex(/^[A-Za-z0-9][A-Za-z0-9.-]*$/),
     sysnr: z.string().regex(/^\d{2}$/),
@@ -51,12 +56,23 @@ export const connectionSchema = z.object({
 
 export type Connection = z.infer<typeof connectionSchema>;
 
+export type WritePolicy = 'disabled' | 'enabled';
+export function writePolicy(connection: Pick<Connection, 'write_enabled' | 'write_governance'>): WritePolicy {
+  return connection.write_enabled ? 'enabled' : 'disabled';
+}
+
 // Keep the legacy field for config compatibility; RFC does not use its HTTP origin.
 export function connectionBaseUrl(baseUrl: string | undefined, rfc: { ashost: string; sysnr: string } | undefined, old?: Connection) {
   if (baseUrl !== undefined) return baseUrl;
   if (!rfc) return undefined;
   if (old?.rfc?.ashost === rfc.ashost && old.rfc.sysnr === rfc.sysnr) return old.base_url;
   return 'http://rfc.invalid';
+}
+
+export function connectionTargetChanged(old: Connection, updated: Connection) {
+  return old.base_url !== updated.base_url || Boolean(old.rfc) !== Boolean(updated.rfc)
+    || old.rfc?.ashost !== updated.rfc?.ashost || old.rfc?.sysnr !== updated.rfc?.sysnr
+    || old.rfc?.saprouter !== updated.rfc?.saprouter;
 }
 
 export function connectionIdentityChanged(old: Connection, updated: Connection) {
@@ -101,7 +117,14 @@ export class ConfigStore {
 
   async load(): Promise<Config> {
     try {
-      return configSchema.parse(JSON.parse(await readFile(join(this.directory, 'config.json'), 'utf8')));
+      const config = configSchema.parse(JSON.parse(await readFile(join(this.directory, 'config.json'), 'utf8')));
+      for (const connection of config.connections) {
+        connection.allow_table_data = connection.allow_table_data ?? connection.agent_allow_table_data ?? true;
+        delete connection.agent_allow_table_data;
+        delete connection.write_objects;
+        delete connection.write_governance;
+      }
+      return config;
     }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT')
@@ -122,6 +145,7 @@ export class ConfigStore {
 
   async save(config: Config) {
     const validated = configSchema.parse(config);
+    for (const connection of validated.connections) { delete connection.write_objects; delete connection.write_governance; }
     await mkdir(this.directory, { recursive: true });
     const temp = join(this.directory, `${randomUUID()}.tmp`);
     await writeFile(temp, JSON.stringify(validated, null, 2) + '\n', { mode: 0o600 });
@@ -172,18 +196,22 @@ export interface Credentials {
   remove(id: string): Promise<void>;
 }
 
+export const credentialService = () => process.env.SAPLINK_DEV_PREVIEW === '1' ? 'saplink-3.0-dev' : 'saplink';
+
 export class WindowsCredentials implements Credentials {
   private async entry(id: string) {
     if (process.platform !== 'win32')
       throw new Error('Windows Credential Manager is required');
     const { Entry } = await import('@napi-rs/keyring');
-    return new Entry('saplink', id);
+    return new Entry(credentialService(), id);
   }
 
   async get(id: string) {
     const password = (await this.entry(id)).getPassword();
     if (!password)
-      throw new Error('SAP credential is missing');
+      throw new AppError('SAP_CREDENTIAL_MISSING', process.env.SAPLINK_DEV_PREVIEW === '1'
+        ? '开发预览未保存此连接的 SAP 密码。请在连接配置中编辑连接，重新输入密码并保存。'
+        : '此连接未保存 SAP 密码。请在连接配置中编辑连接，重新输入密码并保存。');
     return password;
   }
 

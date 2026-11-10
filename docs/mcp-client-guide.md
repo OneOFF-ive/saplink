@@ -16,16 +16,27 @@ MCP 是 SapLink 的可选进阶功能；默认通过 [CLI 与 SapLink 技能](cl
 
 管理员先配置 SAP 连接、测试 ADT，并启动本地 MCP。客户端使用 Streamable HTTP，URL 为 `http://127.0.0.1:8765/mcp`，认证头为 `Authorization: Bearer <token>`。配置与排障见 [运维手册](operations.md)。
 
+默认服务仅绑定 SapLink 主机的回环地址。云端或容器客户端若无法访问主机回环接口，需要已有的可达、获准使用的 MCP 接入方式。详情见 [AI 客户端找不到 saplink 命令](cli-client-guide.md#ai-客户端找不到-saplink-命令)。
+
 客户端通过自己的 MCP SDK 完成初始化、读取服务指引和 `tools/list`，再调用 tools。不要用普通 HTTP GET 判断服务是否可用，当前 GET/DELETE 返回 405。本文 JSON 是 `tools/call.arguments`，工具名由各示例单独标明，不是原始 HTTP 请求。
 
 开始任何任务：
 
-1. 调用 `list_connections`，参数 `{}`。核对返回的 URL、Client、用户名和 `write_enabled`，不要仅凭 dev/prod 之类名称推断用途。
+1. 调用 `list_connections`，参数 `{}`。核对返回的 URL、Client、用户名和 `write_enabled`，不要仅凭连接名称判断用途。`write_policy` 仅返回 `disabled` 或 `enabled`，没有受控策略；写入与表数据访问由各自连接开关控制。
+
 2. 选择真实 `connection_id`；目标不明确时先询问用户。
 3. 调用 `get_capabilities`，参数 `{"connection_id":"实际连接 UUID"}`。discovery 声明不代表实际授权，未声明也不一定不支持。
 4. 按用户目的选择下面的工具；先只读了解目标，再执行已获授权的变更。
 
 所有示例中的 `CONNECTION_ID`、`OBJECT_URI`、`SOURCE_URI`、`REVISION_FROM_READ` 等为待替换字符串，不满足实际 UUID/revision 校验。URI 和 revision 必须从真实返回值取得，不计算、不猜测。JSON 中不要保留占位值。
+
+### 写入权限
+
+MCP 独立提供 SAP 写入工具，不需要 SapLink 客户端审批，也不受客户端输入框下受控/完全写入选项影响。安全与审批策略由使用者和第三方 AI 客户端自行设置。
+
+`approval_*`、`workflow_review/execute/status` 工具及公开 `approval_id` 参数已移除。连接只保留 `write_enabled` 总开关；开启后按实际 SAP 权限、锁、revision 和传输任务执行。写入仍需唯一 `request_id`，质量执行仍需其 `confirm_execution` 参数，这些参数不生成审批。
+
+未知或部分完成的写入先核对 SAP 和日志，再决定后续操作；不要切换到 CLI 盲目重试。客户端自身仍保留草稿审核、一次确认任务计划和失败核实。
 
 ### 本次调用的超时参数
 
@@ -63,7 +74,7 @@ MCP 是 SapLink 的可选进阶功能；默认通过 [CLI 与 SapLink 技能](cl
 
 ## 3. 工具选择表
 
-除 `list_connections` 外，以下所有调用都需要 `connection_id`。列表 `limit` 默认 100、上限 500；激活对象数上限 20，无通用 cursor 参数。
+以下 SAP 调用除 `list_connections` 外都需要 `connection_id`。列表 `limit` 默认 100、上限 500；激活对象数上限 20，无通用 cursor 参数。
 
 | 目标 | Tool | 关键参数 |
 | --- | --- | --- |
@@ -73,9 +84,10 @@ MCP 是 SapLink 的可选进阶功能；默认通过 [CLI 与 SapLink 技能](cl
 | 包浏览 | `list_package_objects` | package_name、limit |
 | 源码读取 | `read_source` | object_uri、version，可选匹配主源码的 source_uri |
 | 表或 DDIC/CDS 查询 | `query_table` | table_name、可选 fields、filters、limit |
-| 关联和聚合 | `query_sql` | sql、limit |
+| 关联和聚合 | `query_sql` | sql、limit、可选 pagination 或 cursor |
 | 客户出口/BAdI/增强查询 | `search_enhancements` | query、type、limit |
 | 创建 Program/Include 壳 | `create_program` | name、description、package_name、program_kind、可选 transport_task、request_id |
+| 创建 DDIC 结构或透明表 | `create_ddic_object` | ddic_kind、name、description、package_name、完整 source、可选 transport_task、request_id |
 | 创建函数组 | `create_function_group` | name、description、package_name、可选 transport_task、request_id |
 | 创建空函数模块 | `create_function_module` | name、description、function_group_uri、可选 transport_task、request_id |
 | 查看组成员 | `list_function_group_members` | function_group_uri、limit |
@@ -228,7 +240,11 @@ SAP 可能重建定义区格式。已支持语法允许 token 等价的格式变
 
 ### 多对象依赖与联合激活
 
-互相依赖的修改应先全部保存为 inactive，然后将本次已审阅、已授权的对象集合一次交给 `activate_objects`。最多选择 20 个顶层对象；函数组展开成员不占此顶层计数，每组仍限 500 个成员。当前对象范围是已支持的程序、Include、函数模块和函数组，不因此新增类或 DDIC 对象写入支持。
+互相依赖的修改应先全部保存为 inactive，然后将本次已审阅、已授权的对象集合一次交给 `activate_objects`。最多选择 20 个顶层对象；函数组展开成员不占此顶层计数，每组仍限 500 个成员。对象范围包括程序、Include、函数模块、函数组以及具有可核实非活动版本的 DDIC 结构和透明表。
+
+`create_ddic_object` 通过支持源码式 DDIC 创建的 SAP ADT 后端保存完整定义。传 `ddic_kind: "structure"` 和 `DEFINE STRUCTURE`，或 `ddic_kind: "table"` 和 `DEFINE TABLE`。名称为 Z/Y 开头，结构最多 30 字符，表最多 16 字符。保存成功后使用返回的 `object_uri` 与 `revision` 单独激活。数据库表独立的技术设置由 SAP 管理。创建或保存结果不确定时先核对 SAP 当前对象，再决定下一步。
+
+修改 Z/Y 字典结构或透明表时，先用 `read_source` 获取已审阅版本，再将该版本和 revision 传给 `update_source`。存在不同的非活动草稿时，先读取并审阅该草稿。可提交完整 DDL 或精确编辑，定义须保持原名称和种类。读回核实成功后，使用非活动 revision 单独激活。若 SAP 要求数据库转换或调整，工具会返回 SAP 的诊断，后续通过 SAP 管理流程处理。
 
 服务先在各对象编辑锁内校验版本、释放全部编辑锁，在发送首个请求前再次核对整个集合。任一版本冲突或解锁失败时，不发送激活。全部目标作为一个集合提交给 SAP，由 SAP 处理集合内依赖，不按列表顺序逐个激活。若 SAP 返回 preaudit 待确认对象，仅在其属于审阅范围、对象身份及所属用户符合要求时，最多提交一次第二阶段的联合请求；遇到集合之外的对象时返回 `ACTIVATION_SCOPE_INVALID`，详情列出 unapproved_objects，不自动扩大范围。
 
@@ -270,9 +286,14 @@ filters 支持 eq、ne、gt、ge、lt、le、like，值必须为原始字符串�
 {"connection_id":"CONNECTION_ID","sql":"SELECT mtart, COUNT(*) AS total FROM mara GROUP BY mtart","limit":20}
 ```
 
-只允许单条含 FROM 的 SELECT，不带注释、语句终止符、INTO、写语句、Client 覆盖、外部连接和 privileged access。保守校验可能拒绝部分合法 SQL，不换工具绕过。查询无需 write_enabled，但仍受 SAP 权限约束。
+只允许单条含 FROM 的 SELECT，不带注释、语句终止符、INTO、写语句、Client 覆盖、外部连接和 privileged access。保守校验可能拒绝部分合法 SQL，不换工具绕过。`query_table` 和 `query_sql` 均要求连接的 `allow_table_data`，无需 `write_enabled`，但仍受 SAP 权限约束。
 
-结果包括 columns、rows、row_count、limit、truncated、pagination_supported=false；字符串保留前导零和精度。没有稳定排序或分页保证，truncated 不能用于推断总数。limit 只限返回行，不限扫描成本；先用选择性条件和小 limit。超时不保证后端已停止，避免重复提交昂贵查询。
+结果包括 `columns`、`rows`、`row_count`、`limit` 和 `truncated`。字符串保留前导零和精度，`truncated` 不能用于推断总数。每页默认 100 行、最多 500 行，`limit` 只限制返回行数。
+
+需要翻页时，首次请求加上 `"pagination": true`。结果含 `pagination_supported: true` 和 `next_cursor`。下一页用 `"cursor": "<上一页 next_cursor>"`，沿用同一连接和查询条件。`next_cursor` 为 `null` 时结束。每页查询当时的数据，跨页没有固定快照。
+
+- `query_table` 按 DDIC 表主键排序，续页使用同一表、字段和筛选条件。
+- `query_sql` 支持普通 SELECT 和内连接。SQL 必须以 `ORDER BY` 结尾，排序列须出现在 SELECT 中，并共同唯一标识一行。排序键须为非空值的字符或 NUMC 列，续页传入相同 SQL。分组、外连接、显式行数限制和顶层 OR 条件使用原有单次查询模式。
 
 ## 11. 查询客户增强与 BAdI
 

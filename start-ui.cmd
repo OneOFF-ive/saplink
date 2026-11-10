@@ -14,7 +14,7 @@ if not exist node_modules (
 )
 call npm.cmd run build
 if errorlevel 1 goto failed
-node dist/cli.js ui
+node scripts/dev-cli.mjs ui
 if errorlevel 1 goto failed
 popd
 exit /b 0

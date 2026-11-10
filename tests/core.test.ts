@@ -5,17 +5,40 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { ConfigStore, connectionSchema, normalizeUrl, type Credentials } from '../src/config.js';
+import { ConfigStore, connectionSchema, normalizeUrl, writePolicy, digest, type Credentials } from '../src/config.js';
 import { AuditLog } from '../src/audit.js';
 import { adtUri, sameSavedSource, sourceResult, type Backend, type Version } from '../src/adt.js';
-import { Operations } from '../src/operations.js';
+import { Operations, type Input } from '../src/operations.js';
 import { AppError } from '../src/errors.js';
+import { writeTools } from '../src/tool-policy.js';
 import { AdtErrorException } from 'abap-adt-api';
 import { startHttp } from '../src/server.js';
+import { parseControlledOperation, WriteApprovalStore } from '../src/write-approval.js';
+import { targetFingerprint } from '../src/connection-identity.js';
+import { reserveCliWrite, runSapOperation, validateSapInput } from '../src/sap-cli.js';
+import { startAdmin } from '../src/admin.js';
+import type { Message } from '../src/agent/model.js';
+import { ApprovalService } from '../src/approval-service.js';
+import { WorkflowReview } from '../src/workflow-review.js';
+import { WorkflowExecution } from '../src/workflow-execution.js';
+import { toolSchemas } from '../src/tool-definitions.js';
+import { AgentRuntime } from '../src/agent/runtime.js';
+import { ClientDrafts } from '../src/agent/client-drafts.js';
+import { createOperationProposal } from '../src/agent/operation-proposal.js';
+import { mergeDraftSources } from '../src/agent/draft-merge.js';
 
 const object = '/sap/bc/adt/programs/programs/ztest';
 const source = `${object}/source/main`;
 const credentials: Credentials = { get: async () => 'fake', set: async () => {}, remove: async () => {} };
+
+test('draft merge preserves insertion coordinates and refuses different insertions at the same point', () => {
+  const base = 'A\r\nB\r\nC\r\nD\r\n';
+  assert.equal(mergeDraftSources(base,'FIRST\r\nA\r\nB\r\nC\r\nD\r\n',
+    'A\r\nB\r\nTHIRD\r\nC\r\nD\r\nLAST\r\n'),
+  'FIRST\r\nA\r\nB\r\nTHIRD\r\nC\r\nD\r\nLAST\r\n');
+  assert.equal(mergeDraftSources(base,'A\r\nB\r\nX\r\nC\r\nD\r\n',
+    'A\r\nB\r\nY\r\nC\r\nD\r\n'),undefined);
+});
 test('save comparison ignores blank lines but preserves nonblank content and literal data', () => {
   assert.equal(sameSavedSource('REPORT ztest.\r\n', 'REPORT ztest.'), true);
   assert.equal(sameSavedSource('REPORT ztest.\n\n', 'REPORT ztest.\r\n'), true);
@@ -33,6 +56,8 @@ test('save comparison ignores blank lines but preserves nonblank content and lit
     sourceResult('id', object, source, 'WRITE 1.', 'active').revision);
 });
 class FakeBackend implements Backend {
+  quality?: Backend['quality'];
+  createDdic?: Backend['createDdic'];
   active = 'REPORT ztest.'; inactive: string | undefined;
   saves = 0; locks = 0; unlocks = 0; failUnlock = false; uncertain = false; activationPass = true;
   constructor(private connection: string) {}
@@ -72,6 +97,1532 @@ async function fixture() {
   return { directory, store, connection, backend, operations, logDirectory,
     cleanup: async () => { await operations.close(); await rm(directory, { recursive: true, force: true }); } };
 }
+
+test('Dictionary creation saves under lock, uses the reviewed DDL, and activates separately', async () => {
+  const f = await fixture();
+  const runtime = new AgentRuntime(f.store,{model:async()=>({message:{role:'assistant',content:'就绪'}}),credentials,factory:()=>f.backend});
+  const name='ZTEST_TABLE', uri='/sap/bc/adt/ddic/structures/ztest_table';
+  const definition="@AbapCatalog.tableCategory : #TRANSPARENT\ndefine table ztest_table { key id : abap.int4 not null; }";
+  let creates=0;
+  f.backend.createDdic=async(kind,objectName,_description,_package,_task,dispatch)=>{
+    assert.equal(kind,'table');assert.equal(objectName,name);dispatch();creates++;
+    f.backend.inactive='define table ztest_table { }';return uri;
+  };
+  try {
+    const task=await runtime.create('新建测试表',f.connection.connection_id,'chat');
+    for(let attempt=0;attempt<100&&(await runtime.tasks.get(task.id)).status!=='completed';attempt++)
+      await new Promise(resolve=>setTimeout(resolve,10));
+    const savedTask=await runtime.tasks.get(task.id);
+    assert.equal(savedTask.status,'completed');
+    await createOperationProposal(savedTask,runtime.tasks,{tool:'create_ddic_object',input:{
+      ddic_kind:'table',name,description:'Test',package_name:'$TMP',source:definition
+    }},text=>text);
+    const plan=await runtime.draftPlan(task.id);
+    assert.equal(plan.items.length,1);assert.equal(creates,0);
+    await runtime.actOnDraftPlan(task.id,'save',plan.token);
+    const done=await runtime.tasks.get(task.id),draft=done.drafts![0];
+    assert.equal(draft.state,'saved');assert.equal(draft.saved_source?.object_uri,uri);
+    assert.equal(f.backend.inactive,definition);assert.equal(f.backend.saves,1);
+    assert.equal(creates,1);assert.notEqual(f.backend.active,definition);
+    const proposal=done.operation_proposals![0];
+    const activated=await runtime.activateDraft(task.id,'operation',proposal.id,proposal.artifact_id,false);
+    assert.equal(activated.activation,'completed');assert.equal(f.backend.active,definition);
+  } finally { await runtime.close();await f.cleanup(); }
+});
+
+test('Dictionary creation blocks a mismatched definition and does not replay an uncertain save',async()=>{
+  const f=await fixture();
+  let creates=0;
+  f.backend.createDdic=async(_kind,_name,_description,_package,_task,dispatch)=>{
+    dispatch();creates++;f.backend.inactive='define structure zexample { }';return '/sap/bc/adt/ddic/structures/zexample';
+  };
+  const args={connection_id:f.connection.connection_id,ddic_kind:'structure' as const,name:'ZEXAMPLE',description:'Test',
+    package_name:'$TMP',source:'define structure zexample { field : abap.int4; }',request_id:randomUUID()};
+  try{
+    const invalid=await f.operations.run('create_ddic_object',{...args,source:'define structure zother { field : abap.int4; }'});
+    assert.equal(invalid.error?.code,'INVALID_INPUT');assert.equal(creates,0);
+    const standard=await f.operations.run('activate_objects',{connection_id:args.connection_id,request_id:randomUUID(),
+      objects:[{object_uri:'/sap/bc/adt/ddic/tables/mara',expected_revision:'a'.repeat(64)}]});
+    assert.equal(standard.error?.code,'CAPABILITY_UNSUPPORTED');assert.equal(f.backend.locks,0);
+    f.backend.uncertain=true;
+    const input={...args,request_id:randomUUID()};
+    const result=await f.operations.run('create_ddic_object',input);
+    assert.equal(result.write_dispatched,true);assert.equal(result.outcome,'unknown');
+    assert.equal(result.source_save?.saved,'unknown');assert.equal((result.error?.details as {created?:boolean})?.created,true);
+    assert.equal((await f.operations.run('create_ddic_object',input)).operation_id,result.operation_id);
+    assert.equal(creates,1);assert.equal(f.backend.saves,1);
+  }finally{await f.cleanup();}
+});
+
+test('Dictionary updates enforce the original kind, name and revision before saving',async()=>{
+  const f=await fixture();
+  const uri='/sap/bc/adt/ddic/tables/zexample';
+  const code='define table zexample { key id : abap.int4 not null; }';
+  const proposed=code.replace('not null;','not null; extra : abap.int4;');
+  try {
+    f.backend.active=code;
+    const base=await f.backend.read(uri,'active');
+    const input={connection_id:f.connection.connection_id,object_uri:uri,source_uri:base.source_uri,
+      expected_revision:base.revision,version:'active' as const};
+    for(const source of [proposed.replace('zexample','zother'),proposed.replace('define table','define structure')]){
+      const result=await f.operations.run('update_source',{...input,source,request_id:randomUUID()});
+      assert.equal(result.error?.code,'INVALID_INPUT');assert.equal(result.write_dispatched,false);
+    }
+    f.backend.inactive=code.replace('abap.int4','abap.int8');
+    const conflict=await f.operations.run('update_source',{...input,source:proposed,request_id:randomUUID()});
+    assert.equal(conflict.error?.code,'VERSION_CONFLICT');assert.equal(f.backend.saves,0);
+    const draft=await f.backend.read(uri,'inactive');
+    const saved=await f.operations.run('update_source',{...input,source:proposed,version:'inactive',
+      expected_revision:draft.revision,request_id:randomUUID()});
+    assert.equal(saved.source_save?.verification,'passed');
+    assert.equal(f.backend.active,code);assert.equal(f.backend.inactive,proposed);
+  }finally{await f.cleanup();}
+});
+
+test('Dictionary change drafts show the reviewed diff, save inactive DDL, and verify activation',async()=>{
+  const f=await workflowApiFixture();
+  const runtime=new AgentRuntime(f.store,{credentials,factory:()=>f.backend});
+  const uri='/sap/bc/adt/ddic/structures/zexample';
+  const code='define structure zexample {\n  id : abap.int4;\n}';
+  const edited=code.replace('  id : abap.int4;','  id : abap.int4;\n  extra : abap.int4;');
+  try{
+    f.backend.active=code;f.backend.inactive=undefined;
+    const task=await runtime.tasks.get(f.task.id);
+    const data=await f.backend.read(uri,'active');
+    const artifact_id=await runtime.tasks.artifacts.put(task.id,'result',JSON.stringify({status:'success',data}));
+    task.source_reads=[{artifact_id,object_uri:uri,revision:data.revision,read_source:true,
+      total_characters:data.source.length,ranges:[[0,data.source.length]]}];
+    const drafts=new ClientDrafts(f.store,runtime.tasks,f.operations);
+    const change=await drafts.publishChange(task,{source_artifact_id:artifact_id,summary:'增加字段',
+      edits:[{old_text:'  id : abap.int4;',new_text:'  id : abap.int4;\n  extra : abap.int4;'}]},text=>text);
+    const review=await runtime.draftDetail(task.id,'change',change.change_id);
+    assert.equal(review.diff?.added_lines,1);assert.equal(f.backend.saves,0);
+    const saved=await runtime.saveDraft(task.id,'change',change.change_id,change.artifact_id);
+    assert.equal(saved.state,'saved');assert.equal(saved.saved_source?.version,'inactive');
+    assert.equal(f.backend.active,code);assert.equal(f.backend.inactive,edited);
+    const activated=await runtime.activateDraft(task.id,'change',change.change_id,change.artifact_id,false);
+    assert.equal(activated.activation,'completed');assert.equal(f.backend.active,edited);
+  }finally{await runtime.close();await f.cleanup();}
+});
+
+test('workflow review binds the target, complete source and ordered steps without writing', async () => {
+  const f = await fixture();
+  try {
+    const connection = { ...f.connection, write_governance: 'approval_required' as const };
+    await f.store.save({ schema_version: 1, connections: [connection], tokens: [] });
+    const approvals = new ApprovalService(f.store, input => f.operations.run('read_source', input));
+    const workflows = new WorkflowReview(approvals);
+    const plan = { connection_id: connection.connection_id, plan_id: randomUUID(), action: 'create_program',
+      name: 'ZTEST', description: 'test', package_name: '$TMP', source: 'REPORT ztest.\nWRITE 1.',
+      syntax_check: true, activate: true };
+    const review = await workflows.review(plan);
+    assert.deepEqual(review.steps, ['create_program', 'update_source', 'syntax_check', 'activate_objects']);
+    assert.equal(review.plan.source, plan.source);
+    assert.equal(review.target.connection_id, connection.connection_id);
+    assert.notEqual((await workflows.review({ ...plan, source: 'REPORT ztest.\nWRITE 2.' })).review_id, review.review_id);
+    assert.notEqual((await workflows.review({ ...plan, activate: false })).review_id, review.review_id);
+    await assert.rejects(() => workflows.review({ ...plan, activate: false, atc_variant: 'DEFAULT' }),
+      (error: unknown) => error instanceof AppError && error.code === 'WORKFLOW_INVALID');
+    assert.equal(f.backend.saves, 0);
+
+    f.backend.inactive = 'REPORT ztest.';
+    const baseline = await f.backend.read(object, 'inactive');
+    const update = await workflows.review({ connection_id: connection.connection_id, plan_id: randomUUID(),
+      action: 'update_source', object_uri: object, source_uri: source, version: 'inactive',
+      expected_revision: baseline.revision, source: 'REPORT ztest.\nWRITE 1.', activate: false });
+    assert.deepEqual(update.steps, ['update_source', 'syntax_check']);
+    assert.ok(update.diff?.hunks.some(hunk => hunk.lines.some(line => line.text === 'WRITE 1.')));
+    f.backend.inactive = 'REPORT ztest.\nWRITE 2.';
+    await assert.rejects(() => workflows.review(update.plan),
+      (error: unknown) => error instanceof AppError && error.code === 'APPROVAL_BASELINE_CHANGED');
+    assert.equal(f.backend.saves, 0);
+  } finally { await f.cleanup(); }
+});
+
+test('one reviewed workflow creates, saves, checks and activates once', async () => {
+  const f = await fixture();
+  try {
+    const connection = { ...f.connection, write_governance: 'approval_required' as const };
+    await f.store.save({ schema_version: 1, connections: [connection], tokens: [] });
+    const workflows = new WorkflowExecution(f.store, f.operations);
+    const plan = { connection_id: connection.connection_id, plan_id: randomUUID(), action: 'create_program',
+      name: 'ZTEST', description: 'test', package_name: '$TMP', source: 'REPORT ztest.\nWRITE 1.', activate: true };
+    const reviewed = await workflows.review(plan);
+    await assert.rejects(() => workflows.execute({ ...plan, source: 'REPORT ztest.\nWRITE 2.' }, reviewed.review_id),
+      (error: unknown) => error instanceof AppError && error.code === 'WORKFLOW_REVIEW_CHANGED');
+    const result = await workflows.execute(plan, reviewed.review_id);
+    assert.equal(result.status, 'completed');
+    assert.deepEqual(result.results.map(item => item.step),
+      ['create_program', 'read_source', 'update_source', 'read_source', 'syntax_check', 'read_source', 'activate_objects']);
+    assert.equal(f.backend.active, plan.source);
+    assert.equal(f.backend.saves, 1);
+    assert.equal((await workflows.status(connection.connection_id, plan.plan_id)).state, 'completed');
+    await assert.rejects(() => workflows.execute(plan, reviewed.review_id),
+      (error: unknown) => error instanceof AppError && error.code === 'WORKFLOW_ALREADY_STARTED');
+    assert.equal(f.backend.saves, 1);
+  } finally { await f.cleanup(); }
+});
+
+test('workflow stops on failed syntax and never activates or repeats the plan', async () => {
+  const f = await fixture();
+  try {
+    const connection = { ...f.connection, write_governance: 'approval_required' as const };
+    await f.store.save({ schema_version: 1, connections: [connection], tokens: [] });
+    f.backend.inactive = 'REPORT ztest.';
+    Object.assign(f.backend, { check: async () => ({ passed: false }) });
+    const baseline = await f.backend.read(object, 'inactive');
+    const workflows = new WorkflowExecution(f.store, f.operations);
+    const plan = { connection_id: connection.connection_id, plan_id: randomUUID(), action: 'update_source',
+      object_uri: object, source_uri: source, version: 'inactive', expected_revision: baseline.revision,
+      source: 'REPORT ztest.\nWRITE 1.', activate: true };
+    const reviewed = await workflows.review(plan);
+    await assert.rejects(() => workflows.execute(plan, reviewed.review_id),
+      (error: unknown) => error instanceof AppError && error.code === 'WORKFLOW_SYNTAX_FAILED');
+    assert.equal(f.backend.active, 'REPORT ztest.');
+    assert.equal(f.backend.inactive, plan.source);
+    assert.equal((await workflows.status(connection.connection_id, plan.plan_id)).state, 'stopped');
+    await assert.rejects(() => workflows.execute(plan, reviewed.review_id));
+    assert.equal(f.backend.saves, 1);
+  } finally { await f.cleanup(); }
+});
+
+test('workflow stops on an uncertain write and blocks subsequent controlled edits', async () => {
+  const f = await fixture();
+  try {
+    const connection = { ...f.connection, write_governance: 'approval_required' as const };
+    await f.store.save({ schema_version: 1, connections: [connection], tokens: [] });
+    f.backend.inactive = 'REPORT ztest.';
+    f.backend.uncertain = true;
+    const baseline = await f.backend.read(object, 'inactive');
+    const workflows = new WorkflowExecution(f.store, f.operations);
+    const plan = { connection_id: connection.connection_id, plan_id: randomUUID(), action: 'update_source',
+      object_uri: object, source_uri: source, version: 'inactive', expected_revision: baseline.revision,
+      source: 'REPORT ztest.\nWRITE 1.', activate: true };
+    const reviewed = await workflows.review(plan);
+    await assert.rejects(() => workflows.execute(plan, reviewed.review_id), { code: 'WORKFLOW_STEP_FAILED' });
+    assert.equal(f.backend.active, 'REPORT ztest.');
+    assert.equal(f.backend.saves, 1);
+    assert.equal((await workflows.status(connection.connection_id, plan.plan_id)).state, 'stopped');
+    const current = await f.backend.read(object, 'inactive');
+    const next = { ...plan, plan_id: randomUUID(), expected_revision: current.revision, source: 'REPORT ztest.\nWRITE 2.' };
+    const nextReview = await workflows.review(next);
+    await assert.rejects(() => workflows.execute(next, nextReview.review_id), { code: 'APPROVAL_RECONCILIATION_REQUIRED' });
+    assert.equal(f.backend.saves, 1);
+  } finally { await f.cleanup(); }
+});
+
+test('workflow records ATC submission and never treats it as an ATC pass', async () => {
+  const f = await fixture();
+  try {
+    const connection = { ...f.connection, write_governance: 'approval_required' as const };
+    await f.store.save({ schema_version: 1, connections: [connection], tokens: [] });
+    let runs = 0;
+    Object.assign(f.backend, { quality: async (name: string) => {
+      assert.equal(name, 'run_atc'); runs++; return { run_id: 'WL_1', submission: 'accepted' };
+    } });
+    const workflows = new WorkflowExecution(f.store, f.operations);
+    const plan = { connection_id: connection.connection_id, plan_id: randomUUID(), action: 'create_program',
+      name: 'ZTEST', description: 'test', package_name: '$TMP', source: 'REPORT ztest.\nWRITE 1.',
+      activate: true, atc_variant: 'DEFAULT' };
+    const review = await workflows.review(plan);
+    const executed = await workflows.execute(plan, review.review_id);
+    assert.equal(runs, 1);
+    assert.deepEqual(executed.results.at(-1)?.result.data, { run_id: 'WL_1', submission: 'accepted' });
+    const status = await workflows.status(connection.connection_id, plan.plan_id);
+    assert.ok(JSON.stringify(status.events).includes('WL_1'));
+    assert.equal(JSON.stringify(status.events).includes(plan.source), false);
+  } finally { await f.cleanup(); }
+});
+
+
+test('agent workflow proposal stays read-only until one authenticated confirmation', async () => {
+  const f = await fixture();
+  const connection = { ...f.connection, write_governance: 'approval_required' as const };
+  await f.store.save({ schema_version: 1, connections: [connection], tokens: [] });
+  let round = 0;
+  const model = async () => {
+    const tool = (name: string, args: object) => ({ message: { role: 'assistant' as const, content: null,
+      tool_calls: [{ id: randomUUID(), type: 'function' as const, function: { name, arguments: JSON.stringify(args) } }] } });
+    if (++round === 1) return tool('get_capabilities', {});
+    if (round === 2) return tool('propose_program_workflow', { action: 'create_program', name: 'ZTEST',
+      description: 'test', package_name: '$TMP', source: 'REPORT ztest.\nWRITE 1.', activate: true });
+    return { message: { role: 'assistant' as const, content: '计划已生成。' } };
+  };
+  const host = await startAdmin(f.store, credentials, 0, () => f.backend, undefined, { agent: {
+    model, execute: async () => ({ status: 'success', data: {} }), audit: new AuditLog(f.logDirectory)
+  } });
+  const url = new URL(host.url), origin = url.origin;
+  const headers = { 'X-Admin-Token': url.hash.slice(1), Origin: origin, 'Content-Type': 'application/json' };
+  const post = (path: string, body: unknown) => fetch(`${origin}${path}`, { method: 'POST', headers, body: JSON.stringify(body) });
+  try {
+    const created = await (await post('/api/agent/tasks', { prompt: '创建程序并激活', connection_id: connection.connection_id,
+      output_mode: 'chat' })).json();
+    let task;
+    for (let i = 0; i < 500; i++) {
+      task = await (await fetch(`${origin}/api/agent/tasks/${created.id}`, { headers })).json();
+      if (!['queued', 'running'].includes(task.status)) break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(task.status, 'completed', JSON.stringify(task.error));
+    assert.equal(f.backend.saves, 0);
+    const base = `/api/agent/tasks/${created.id}/workflows/${task.workflow_proposals[0].id}`;
+    const detail = await (await fetch(`${origin}${base}`, { headers })).json();
+    assert.equal(detail.review.plan.source, 'REPORT ztest.\nWRITE 1.');
+    assert.deepEqual(detail.review.steps, ['create_program', 'update_source', 'syntax_check', 'activate_objects']);
+    assert.equal((await post(`${base}/execute`, { confirm: false, review_id: detail.review.review_id })).status, 400);
+    assert.equal(f.backend.saves, 0);
+    const response = await post(`${base}/execute`, { confirm: true, review_id: detail.review.review_id });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).status, 'completed');
+    assert.equal(f.backend.active, detail.review.plan.source);
+    const after = await (await fetch(`${origin}${base}`, { headers })).json();
+    assert.equal(after.execution.state, 'completed');
+    assert.equal((await post(`${base}/execute`, { confirm: true, review_id: detail.review.review_id })).status, 400);
+    assert.equal(f.backend.saves, 1);
+  } finally { await host.close(); await f.cleanup(); }
+});
+
+async function workflowApiFixture(mode: 'controlled' | 'unrestricted' = 'controlled', configure?: (backend: FakeBackend) => void, expected = 'completed') {
+  const f = await fixture();
+  configure?.(f.backend);
+  await f.store.save({ schema_version: 1, connections: [{ ...f.connection, write_governance: 'approval_required' }], tokens: [] });
+  let round = 0;
+  const host = await startAdmin(f.store, credentials, 0, () => f.backend, undefined, { agent: {
+    model: async () => {
+      const tool = (name: string, args: object) => ({ message: { role: 'assistant' as const, content: null,
+        tool_calls: [{ id: randomUUID(), type: 'function' as const, function: { name, arguments: JSON.stringify(args) } }] } });
+      if (++round === 1) return tool('get_capabilities', {});
+      if (round === 2) return tool('propose_program_workflow', { action: 'create_program', name: 'ZTEST',
+        description: 'test', package_name: '$TMP', source: 'REPORT ztest.\nWRITE 1.', activate: true });
+      return { message: { role: 'assistant' as const, content: '已生成计划' } };
+    }, execute: async () => ({ status: 'success', data: {} }), audit: new AuditLog(f.logDirectory)
+  } });
+  const url = new URL(host.url), origin = url.origin;
+  const headers = { 'X-Admin-Token': url.hash.slice(1), Origin: origin, 'Content-Type': 'application/json' };
+  const post = (path: string, body: unknown) => fetch(origin + path, { method: 'POST', headers, body: JSON.stringify(body) });
+  const get = async (path: string) => { const response = await fetch(origin + path, { headers });
+    assert.equal(response.status, 200); return response.json(); };
+  try {
+    const created = await (await post('/api/agent/tasks', { prompt: '创建程序并激活', connection_id: f.connection.connection_id,
+      output_mode: 'chat', write_mode: mode })).json();
+    let task;
+    for (let i = 0; i < 500; i++) {
+      task = await get(`/api/agent/tasks/${created.id}`);
+      if (!['queued', 'running'].includes(task.status)) break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(task.status, expected, JSON.stringify(task.error));
+    const base = `/api/agent/tasks/${created.id}/workflows/${task.workflow_proposals[0].id}`;
+    const detail = await get(base);
+    return { ...f, base, origin, headers, get, post, detail, task, cleanup: async () => { await host.close(); await f.cleanup(); } };
+  } catch (error) { await host.close(); await f.cleanup(); throw error; }
+}
+
+test('unified Save reviews once, saves without activating, and activates only after the second choice', async () => {
+  const f = await workflowApiFixture();
+  try {
+    const proposal = f.task.workflow_proposals[0];
+    const base = `/api/agent/tasks/${f.task.id}/drafts/workflow/${proposal.id}`;
+    const body = {confirm:true,artifact_id:proposal.artifact_id};
+    const savedResponse = await f.post(base+'/save',body);
+    const saved = await savedResponse.json();
+    assert.equal(savedResponse.status,200,JSON.stringify(saved));
+    assert.equal(saved.state,'saved',JSON.stringify(saved));
+    assert.equal(f.backend.saves,1);
+    assert.equal(f.backend.active,'REPORT ztest.');
+    assert.equal(f.backend.inactive,'REPORT ztest.\nWRITE 1.');
+    assert.equal((await f.post(base+'/save',body)).status,400);
+    assert.equal(f.backend.saves,1);
+    const activated = await (await f.post(base+'/activate',{...body,atc:false})).json();
+    assert.equal(activated.activation,'completed',JSON.stringify(activated));
+    assert.equal(f.backend.active,'REPORT ztest.\nWRITE 1.');
+    assert.equal((await f.post(base+'/activate',{...body,atc:false})).status,400);
+  } finally { await f.cleanup(); }
+});
+
+test('session source drafts merge across proposal types, isolate conflicts and preserve saved history', async () => {
+  const f = await workflowApiFixture();
+  const runtime = new AgentRuntime(f.store, {credentials, factory:() => f.backend});
+  try {
+    const task = await runtime.tasks.get(f.task.id);
+    const drafts = new ClientDrafts(f.store, runtime.tasks, f.operations);
+    const uri = '/sap/bc/adt/programs/programs/zmerge';
+    f.backend.active = 'REPORT zmerge.\nWRITE 1.\nWRITE 2.\nWRITE 3.';
+    const record = async (version:Version) => {
+      const data = await f.backend.read(uri, version);
+      const artifact_id = await runtime.tasks.artifacts.put(task.id, 'result', JSON.stringify({status:'success', data}));
+      task.source_reads = [...(task.source_reads ?? []), {artifact_id, object_uri:uri, revision:data.revision,
+        read_source:true, total_characters:data.source.length, ranges:[[0,data.source.length]]}];
+      return {data, artifact_id};
+    };
+    const original = await record('active');
+    const change = (old_text:string,new_text:string) => drafts.publishChange(task, {
+      source_artifact_id:original.artifact_id, summary:'修改输出', edits:[{old_text,new_text}]
+    }, text=>text);
+    const workflow = (replacement:string, resolves_drafts?:string[]) => drafts.publishWorkflow(task, {
+      action:'update_source', object_uri:uri, source_uri:original.data.source_uri, version:'active',
+      expected_revision:original.data.revision, source:replacement, syntax_check:false, activate:false, resolves_drafts
+    }, text=>text);
+    const first = await change('WRITE 1.', 'WRITE 10.');
+    const second = await workflow(original.data.source.replace('WRITE 3.', 'WRITE 30.'));
+    assert.equal(second.review_required,true);
+    const old = await drafts.detail(task,'change',first.change_id);
+    assert.equal(old.diff?.context_lines,8);
+    assert.equal(old.draft?.state,'superseded');
+    assert.equal(old.can_save,false);
+    assert.equal(old.can_discard,false);
+    await assert.rejects(runtime.saveDraft(task.id,'change',first.change_id,first.artifact_id),{code:'AGENT_DRAFT_USED'});
+    const current = await drafts.detail(task,'workflow',second.workflow_id);
+    assert.match((current.proposal as typeof f.detail).plan.source,/WRITE 10\.\nWRITE 2\.\nWRITE 30\./);
+    assert.equal(current.diff?.added_lines,2);
+    assert.equal(current.diff?.context_lines,8);
+    await assert.rejects(change('WRITE 1.', 'WRITE 11.'),{code:'AGENT_DRAFT_CONFLICT'});
+    assert.equal((await drafts.detail(task,'workflow',second.workflow_id)).draft?.state,'conflict');
+    assert.equal((await drafts.detail(task,'workflow',f.task.workflow_proposals[0].id)).can_save,true);
+    assert.equal(f.backend.saves,0);
+
+    const resolved = await workflow('REPORT zmerge.\nWRITE 11.\nWRITE 2.\nWRITE 30.', [second.workflow_id]);
+    assert.equal((await runtime.saveDraft(task.id,'workflow',resolved.workflow_id,resolved.artifact_id)).state,'saved');
+    const currentTask = await runtime.tasks.get(task.id);
+    Object.assign(task,currentTask);
+    const saved = await record('inactive');
+    const next = await drafts.publishChange(task,{source_artifact_id:saved.artifact_id,summary:'只改第二行输出',
+      edits:[{old_text:'WRITE 2.',new_text:'WRITE 20.'}]},text=>text);
+    assert.equal(next.review_required,false);
+    assert.equal((await drafts.detail(task,'workflow',resolved.workflow_id)).draft?.state,'saved');
+    assert.equal(next.added_lines,1);
+    await runtime.discardDraft(task.id,'change',next.change_id,next.artifact_id);
+    assert.equal(f.backend.saves,1);
+    assert.equal(f.backend.inactive,'REPORT zmerge.\nWRITE 11.\nWRITE 2.\nWRITE 30.');
+  } finally {
+    await runtime.close();
+    await f.cleanup();
+  }
+});
+
+test('one modification plan preflights all objects and resumes after a partial save without replaying completed writes', async () => {
+  const f = await workflowApiFixture();
+  const runtime = new AgentRuntime(f.store, {credentials, factory:() => f.backend});
+  try {
+    const task = await runtime.tasks.get(f.task.id);
+    const drafts = new ClientDrafts(f.store,runtime.tasks,f.operations);
+    const existing = task.workflow_proposals![0];
+    await runtime.discardDraft(task.id,'workflow',existing.id,existing.artifact_id);
+    Object.assign(task,await runtime.tasks.get(task.id));
+    const other = '/sap/bc/adt/programs/programs/zother';
+    const active = new Map([[object,'REPORT ztest.'],[other,'REPORT zother.']]);
+    const inactive = new Map<string,string>();
+    const writes:string[] = [];
+    f.backend.read = async (uri,version) => {
+      const code = (version === 'active' ? active : inactive).get(uri);
+      if (!code) throw new AppError('VERSION_UNAVAILABLE','No source');
+      return sourceResult(f.connection.connection_id,uri,uri+'/source/main',code,version);
+    };
+    f.backend.save = async (uri,code) => {
+      const target = uri.replace(/\/source\/main$/,'');
+      assert.ok(Object.values(runtime.draftSaveProgress(task.id)).includes('saving'));
+      writes.push(target);
+      inactive.set(target,code);
+    };
+    for (const uri of [object,other]) {
+      const data = await f.backend.read(uri,'active');
+      const artifact_id = await runtime.tasks.artifacts.put(task.id,'result',JSON.stringify({status:'success',data}));
+      task.source_reads = [...(task.source_reads ?? []),{artifact_id,object_uri:uri,revision:data.revision,
+        read_source:true,total_characters:data.source.length,ranges:[[0,data.source.length]]}];
+      await drafts.publishChange(task,{source_artifact_id:artifact_id,summary:'增加输出',
+        edits:[{old_text:data.source,new_text:data.source+'\nWRITE 1.'}]},text=>text);
+    }
+    const base = '/api/agent/tasks/'+task.id+'/draft-plan';
+    const initial = await f.get(base);
+    assert.equal(initial.items.length,2);
+    assert.equal(initial.can_save,true);
+    const save = async (token:string) => {
+      const response = await f.post(base+'/save',{confirm:true,token});
+      const body = await response.json();
+      assert.equal(response.status,200,JSON.stringify(body));
+      return body;
+    };
+    active.set(other,'REPORT zother.\nWRITE 9.');
+    const rejected = await save(initial.token);
+    assert.equal(rejected.failure.key,initial.items[1].key);
+    assert.deepEqual(writes,[]);
+    // Run the partial-save path with a separate runtime without a configured model.
+    active.set(other,'REPORT zother.');
+    const lock = f.backend.lock.bind(f.backend);
+    let blocked = true;
+    f.backend.lock = async uri => {
+      if (uri === other && blocked) throw new AppError('OBJECT_LOCKED','Object locked');
+      return lock();
+    };
+    const current = await runtime.draftPlan(task.id);
+    const partial = await runtime.actOnDraftPlan(task.id,'save',current.token);
+    assert.ok('plan' in partial);
+    assert.deepEqual(partial.plan.items.map(item=>item.state),['saved','failed']);
+    const members = initial.items.map(item=>item.key);
+    assert.deepEqual((await runtime.tasks.get(task.id)).draft_plan_history,[members]);
+    assert.deepEqual(writes,[object]);
+    await assert.rejects(runtime.actOnDraftPlan(task.id,'save',current.token),{code:'AGENT_PLAN_CHANGED'});
+    blocked = false;
+    const remaining = await runtime.draftPlan(task.id);
+    assert.equal(remaining.can_save,true);
+    const completed = await runtime.actOnDraftPlan(task.id,'save',remaining.token);
+    assert.ok('plan' in completed);
+    assert.deepEqual(completed.plan.items.map(item=>item.state),['saved','saved']);
+    assert.deepEqual(runtime.draftSaveProgress(task.id),{});
+    assert.deepEqual(writes,[object,other]);
+    assert.deepEqual((await runtime.tasks.get(task.id)).draft_plan_history,[members]);
+    assert.equal((await runtime.draftPlan(task.id)).items.length,0);
+  } finally { await runtime.close(); await f.cleanup(); }
+});
+
+test('one modification plan creates a program and saves changes to a second object in order', async () => {
+  const f = await workflowApiFixture();
+  const runtime = new AgentRuntime(f.store,{credentials,factory:()=>f.backend});
+  try {
+    const task = await runtime.tasks.get(f.task.id);
+    const other = '/sap/bc/adt/programs/programs/zexisting';
+    const inactive = new Map<string,string>();
+    const writes:string[] = [];
+    f.backend.read = async (uri,version) => {
+      const code = version === 'inactive' ? inactive.get(uri) : uri === other ? 'REPORT zexisting.' : undefined;
+      if (!code) throw new AppError('OBJECT_NOT_FOUND','No source');
+      return sourceResult(f.connection.connection_id,uri,uri+'/source/main',code,version);
+    };
+    f.backend.create = async () => {
+      writes.push('create');
+      inactive.set(object,'REPORT ztest.');
+      return object;
+    };
+    f.backend.save = async (uri,code) => {
+      writes.push(uri);
+      inactive.set(uri.replace(/\/source\/main$/,''),code);
+    };
+    const data = await f.backend.read(other,'active');
+    const artifact_id = await runtime.tasks.artifacts.put(task.id,'result',JSON.stringify({status:'success',data}));
+    task.source_reads = [{artifact_id,object_uri:other,revision:data.revision,read_source:true,
+      total_characters:data.source.length,ranges:[[0,data.source.length]]}];
+    const drafts = new ClientDrafts(f.store,runtime.tasks,f.operations);
+    await drafts.publishChange(task,{source_artifact_id:artifact_id,summary:'增加注释',
+      edits:[{old_text:data.source,new_text:data.source+'\n* Modified.'}]},text=>text);
+    const plan = await runtime.draftPlan(task.id);
+    assert.equal(plan.items.length,2);
+    const result = await runtime.actOnDraftPlan(task.id,'save',plan.token);
+    assert.ok('plan' in result);
+    assert.deepEqual(result.plan.items.map(item=>item.state),['saved','saved']);
+    assert.deepEqual(writes,['create',source,other+'/source/main']);
+    assert.equal(f.backend.active,'REPORT ztest.');
+  } finally { await runtime.close(); await f.cleanup(); }
+});
+
+test('revising a pending program creation promotes its shell and writes only the final source once', async () => {
+  const f = await workflowApiFixture();
+  const runtime = new AgentRuntime(f.store,{credentials,factory:()=>f.backend});
+  try {
+    const original = f.task.workflow_proposals[0];
+    await runtime.discardDraft(f.task.id,'workflow',original.id,original.artifact_id);
+    const task = await runtime.tasks.get(f.task.id);
+    const drafts = new ClientDrafts(f.store,runtime.tasks,f.operations);
+    const shell = await createOperationProposal(task,runtime.tasks,{tool:'create_program',input:{
+      name:'ZTEST',description:'test',package_name:'$TMP',program_kind:'report'
+    }},text=>text);
+    const base = {action:'create_program' as const,name:'ZTEST',description:'test',package_name:'$TMP',
+      syntax_check:false,activate:false};
+    const first = await drafts.publishWorkflow(task,{...base,source:'REPORT ztest.\nWRITE 1.'},text=>text);
+    assert.equal(first.review_required,true);
+    assert.equal((await drafts.detail(task,'operation',shell.operation_id)).draft?.replacement_id,first.workflow_id);
+    const second = await drafts.publishWorkflow(task,{...base,source:'REPORT ztest.\nWRITE 1.\n* Note.'},text=>text);
+    const final = await drafts.publishWorkflow(task,{...base,source:'REPORT ztest.\nWRITE 2.\n* Note.',
+      revises_creation:second.artifact_id},text=>text);
+    assert.equal(final.review_required,true);
+    assert.equal((await runtime.draftPlan(task.id)).items.length,1);
+    await assert.rejects(runtime.saveDraft(task.id,'workflow',second.workflow_id,second.artifact_id),{code:'AGENT_DRAFT_USED'});
+    const create = f.backend.create.bind(f.backend);
+    let creations = 0;
+    f.backend.create = async () => {creations++;return create();};
+    assert.equal((await runtime.saveDraft(task.id,'workflow',final.workflow_id,final.artifact_id)).state,'saved');
+    assert.equal(creations,1);
+    assert.equal(f.backend.saves,1);
+    assert.equal(f.backend.inactive,'REPORT ztest.\nWRITE 2.\n* Note.');
+    assert.equal(f.backend.active,'REPORT ztest.');
+  } finally { await runtime.close(); await f.cleanup(); }
+});
+
+test('modification history shows a confirmed creation separately when saving its source fails', async () => {
+  const f = await workflowApiFixture();
+  const runtime = new AgentRuntime(f.store,{credentials,factory:()=>f.backend});
+  try {
+    const lock = f.backend.lock.bind(f.backend);
+    const create = f.backend.create.bind(f.backend);
+    let creations = 0;
+    f.backend.create = async () => {creations++;return create();};
+    f.backend.lock = async () => {throw new AppError('OBJECT_LOCKED','Object locked');};
+    const proposal = f.task.workflow_proposals[0];
+    const result = await runtime.saveDraft(f.task.id,'workflow',proposal.id,proposal.artifact_id);
+    assert.equal(result.state,'failed');
+    assert.equal(result.created_program?.object_uri,object);
+    assert.equal(f.backend.saves,0);
+    assert.equal(f.backend.inactive,'REPORT ztest.');
+    const path = '/api/agent/tasks/'+f.task.id+'/draft-creation-history';
+    const receipt = {...result.created_program,draft_key:'workflow:' + proposal.id};
+    assert.deepEqual(await f.get(path),[receipt]);
+    const oldTask = await runtime.tasks.get(f.task.id);
+    delete oldTask.drafts![0].created_program;
+    await runtime.tasks.save(oldTask);
+    assert.deepEqual(await f.get(path),[receipt]);
+    assert.equal((await runtime.draftDetail(f.task.id,'workflow',proposal.id)).can_resume,true);
+    f.backend.lock = lock;
+    f.backend.inactive = 'REPORT ztest.\n* Someone else edited this.';
+    await assert.rejects(runtime.saveDraft(f.task.id,'workflow',proposal.id,proposal.artifact_id),{code:'AGENT_CHANGE_STALE'});
+    assert.equal(f.backend.saves,0);
+    f.backend.inactive = 'REPORT ztest.';
+    const resumed = await runtime.saveDraft(f.task.id,'workflow',proposal.id,proposal.artifact_id);
+    assert.equal(resumed.state,'saved',JSON.stringify(resumed));
+    assert.equal(resumed.created_program?.object_uri,object);
+    assert.equal(creations,1);
+    assert.equal(f.backend.saves,1);
+  } finally { await runtime.close(); await f.cleanup(); }
+});
+
+test('only a definitively unsent transient source save retries once and rereads the unchanged baseline', async () => {
+  const f=await fixture();
+  try {
+    const originalLock=f.backend.lock.bind(f.backend);let attempts=0;
+    f.backend.lock=async()=>{if(++attempts===1)throw new AppError('CONNECTION_FAILED','temporary connection failure');return originalLock();};
+    const baseline=await f.backend.read(object,'active');
+    const plan={action:'update_source',connection_id:f.connection.connection_id,plan_id:randomUUID(),
+      object_uri:object,source_uri:baseline.source_uri,version:'active',expected_revision:baseline.revision,
+      source:'REPORT ztest.\nWRITE 4.',syntax_check:false,activate:false};
+    const workflow=new WorkflowExecution(f.store,f.operations,undefined,true);
+    const review=await workflow.review(plan);
+    const saved=await workflow.execute(plan,review.review_id);
+    assert.equal(saved.status,'completed');assert.equal(f.backend.saves,1);assert.equal(attempts,2);
+    const journal=await workflow.status(f.connection.connection_id,plan.plan_id);
+    assert.equal(journal.events.filter(e=>e.retry===true).length,1);
+  }finally{await f.cleanup();}
+});
+
+test('save retry stops after one attempt and refuses a changed baseline', async () => {
+  for(const change of [false,true]) {
+    const f=await fixture();
+    try {
+      let attempts=0;
+      f.backend.lock=async()=>{attempts++;if(change)f.backend.active='REPORT ztest.\nWRITE 9.';throw new AppError('CONNECTION_FAILED','temporary connection failure');};
+      const baseline=await f.backend.read(object,'active');
+      const plan={action:'update_source',connection_id:f.connection.connection_id,plan_id:randomUUID(),
+        object_uri:object,source_uri:baseline.source_uri,version:'active',expected_revision:baseline.revision,
+        source:'REPORT ztest.\nWRITE 4.',syntax_check:false,activate:false};
+      const workflow=new WorkflowExecution(f.store,f.operations,undefined,true);
+      const review=await workflow.review(plan);
+      await assert.rejects(workflow.execute(plan,review.review_id));
+      assert.equal(attempts,change?1:2);assert.equal(f.backend.saves,0);
+    }finally{await f.cleanup();}
+  }
+});
+
+test('unified Save rejects changed artifacts, discards locally, and blocks the legacy execution route', async () => {
+  const f = await workflowApiFixture();
+  try {
+    const proposal=f.task.workflow_proposals[0],base=`/api/agent/tasks/${f.task.id}/drafts/workflow/${proposal.id}`;
+    assert.equal((await f.post(base+'/save',{confirm:true,artifact_id:'0'.repeat(64)})).status,400);
+    const discarded=await (await f.post(base+'/discard',{confirm:true,artifact_id:proposal.artifact_id})).json();
+    assert.equal(discarded.state,'discarded');
+    assert.equal((await f.post(base+'/save',{confirm:true,artifact_id:proposal.artifact_id})).status,400);
+    assert.equal((await f.post(f.base+'/execute',{confirm:true,review_id:f.detail.review.review_id})).status,400);
+    assert.equal(f.backend.saves,0);
+  } finally { await f.cleanup(); }
+});
+
+test('legacy completed workflows appear saved in the unified view without repeating or abandoning the SAP write',async()=>{
+  const f=await workflowApiFixture('unrestricted');
+  try{
+    const p=f.task.workflow_proposals[0],base=`/api/agent/tasks/${f.task.id}/drafts/workflow/${p.id}`;
+    const detail=await f.get(base);
+    assert.equal(detail.draft.state,'saved');assert.equal(detail.draft.legacy,true);
+    assert.equal(detail.can_save,false);assert.equal(detail.can_discard,false);assert.match(detail.draft.message,/已执行成功/);
+    assert.equal((await f.get(`/api/agent/tasks/${f.task.id}`)).drafts[0].state,'saved');
+    const body={confirm:true,artifact_id:p.artifact_id};
+    assert.equal((await f.post(base+'/save',body)).status,400);assert.equal((await f.post(base+'/discard',body)).status,400);
+    assert.equal(f.backend.saves,1);
+  }finally{await f.cleanup();}
+});
+
+test('legacy baseline-only failures allow Save or Discard while incomplete write journals stay blocked',async()=>{
+  for(const action of ['save','discard','unknown']){
+    const f=await workflowApiFixture();
+    try{
+      const p=f.task.workflow_proposals[0],base=`/api/agent/tasks/${f.task.id}/drafts/workflow/${p.id}`;
+      const artifact=JSON.parse((await readFile(join(f.directory,'agent','tasks',f.task.id,'artifacts',p.artifact_id+'.json'),'utf8'))).content;
+      const plan=JSON.parse(artifact).plan;
+      await mkdir(join(f.directory,'workflow-runs'),{recursive:true});
+      const events=action==='unknown'?[{state:'started'},{state:'step_started',step:'update_source'}]
+        :[{state:'started'},{state:'step_started',step:'read_source'},{state:'step_finished',step:'read_source',status:'error'},{state:'stopped',step:'read_source'}];
+      await writeFile(join(f.directory,'workflow-runs',digest(`${f.connection.connection_id}:${plan.plan_id}`)+'.jsonl'),events.map(e=>JSON.stringify(e)).join('\n')+'\n');
+      const detail=await f.get(base);assert.equal(detail.can_save,action!=='unknown');assert.equal(detail.can_discard,action!=='unknown');
+      const body={confirm:true,artifact_id:p.artifact_id};
+      if(action==='unknown'){
+        assert.equal(detail.draft.state,'uncertain');assert.equal((await f.post(base+'/save',body)).status,400);assert.equal((await f.post(base+'/discard',body)).status,400);assert.equal(f.backend.saves,0);
+      }else{
+        const result=await (await f.post(base+'/'+action,body)).json();
+        assert.equal(result.state,action==='save'?'saved':'discarded',JSON.stringify(result));assert.equal(f.backend.saves,action==='save'?1:0);
+      }
+    }finally{await f.cleanup();}
+  }
+});
+
+test('activation refuses changed saved source and an unavailable ATC variant without changing SAP', async () => {
+  const f = await workflowApiFixture();
+  try {
+    const proposal=f.task.workflow_proposals[0],base=`/api/agent/tasks/${f.task.id}/drafts/workflow/${proposal.id}`;
+    const body={confirm:true,artifact_id:proposal.artifact_id};
+    assert.equal((await (await f.post(base+'/save',body)).json()).state,'saved');
+    assert.equal((await f.post(base+'/activate',{...body,atc:true})).status,400);
+    f.backend.inactive='REPORT ztest.\nWRITE 2.';
+    assert.equal((await f.post(base+'/activate',{...body,atc:false})).status,400);
+    assert.equal(f.backend.active,'REPORT ztest.');
+  } finally { await f.cleanup(); }
+});
+
+test('optional ATC uses the real default variant after activation and never claims a quality pass', async () => {
+  const f=await workflowApiFixture();let atcRuns=0;
+  f.backend.quality=async(tool,input)=>{
+    if(tool==='get_atc_configuration')return {properties:[{name:'supportsExemptions',value:true},{name:'defaultCheckVariant',value:'REAL_VARIANT'}]};
+    assert.equal(tool,'run_atc');assert.equal((input as {check_variant:string}).check_variant,'REAL_VARIANT');
+    assert.equal(f.backend.active,'REPORT ztest.\nWRITE 1.');atcRuns++;return {run_id:'test-atc',status:'running'};
+  };
+  try {
+    const p=f.task.workflow_proposals[0],base=`/api/agent/tasks/${f.task.id}/drafts/workflow/${p.id}`,body={confirm:true,artifact_id:p.artifact_id};
+    assert.equal((await (await f.post(base+'/save',body)).json()).state,'saved');assert.equal(atcRuns,0);
+    const result=await (await f.post(base+'/activate',{...body,atc:true})).json();
+    assert.equal(result.activation,'completed',JSON.stringify(result));assert.equal(atcRuns,1);
+    assert.match(result.message,/实际检查结果/);assert.doesNotMatch(result.message,/检查通过/);
+  }finally{await f.cleanup();}
+});
+
+test('draft execution is exclusive across runtimes and a recovered saved draft is not resubmitted', async () => {
+  const f=await workflowApiFixture();const other=new AgentRuntime(f.store,{credentials,factory:()=>f.backend});
+  let release=()=>{},started=()=>{};
+  const gate=new Promise<void>(r=>{release=r;}),saving=new Promise<void>(r=>{started=r;});
+  const original=f.backend.save.bind(f.backend);
+  f.backend.save=async(uri,source)=>{started();await gate;return original(uri,source);};
+  try {
+    const p=f.task.workflow_proposals[0],base=`/api/agent/tasks/${f.task.id}/drafts/workflow/${p.id}`,body={confirm:true,artifact_id:p.artifact_id};
+    const pending=f.post(base+'/save',body);await saving;
+    await assert.rejects(other.saveDraft(f.task.id,'workflow',p.id,p.artifact_id),{code:'AGENT_DRAFT_BUSY'});
+    // Read-only status must not misclassify the live writer as an interrupted one.
+    assert.equal((await other.draftDetail(f.task.id,'workflow',p.id)).draft?.state,'saving');
+    release();assert.equal((await (await pending).json()).state,'saved');
+    const checkpoint=await other.tasks.get(f.task.id);checkpoint.drafts![0].state='saving';delete checkpoint.drafts![0].saved_source;
+    await other.tasks.save(checkpoint);
+    const recovered=await other.draftDetail(f.task.id,'workflow',p.id);
+    assert.equal(recovered.draft?.state,'saved');assert.ok(recovered.draft?.saved_source);assert.equal(f.backend.saves,1);
+    await assert.rejects(other.saveDraft(f.task.id,'workflow',p.id,p.artifact_id),{code:'AGENT_DRAFT_USED'});
+  }finally{release();await other.close();await f.cleanup();}
+});
+
+test('save timeout automatically reads back and starts read-only diagnosis without repeating the write', async () => {
+  const f = await workflowApiFixture(); f.backend.uncertain=true;
+  try {
+    const proposal=f.task.workflow_proposals[0],base=`/api/agent/tasks/${f.task.id}/drafts/workflow/${proposal.id}`;
+    const body={confirm:true,artifact_id:proposal.artifact_id};
+    const saved=await (await f.post(base+'/save',body)).json();
+    assert.equal(saved.state,'uncertain',JSON.stringify(saved));
+    assert.ok(saved.saved_source);
+    assert.match(saved.message,/读回源码与草稿一致/);
+    assert.ok(saved.evidence_artifact);
+    assert.equal(f.backend.saves,1);
+    for(let i=0;i<200;i++) {
+      const task=await f.get(`/api/agent/tasks/${f.task.id}`);
+      if(!['running','queued'].includes(task.status))break;
+      await new Promise(r=>setTimeout(r,10));
+    }
+    assert.equal((await f.post(base+'/save',body)).status,400);
+    assert.equal((await f.post(base+'/activate',{...body,atc:false})).status,400);
+    assert.equal((await f.post(base+'/discard',body)).status,400);
+    const reconcile = {artifact_id:proposal.artifact_id,sap_execution_finished:true};
+    assert.equal((await f.post(base+'/reconcile',{artifact_id:proposal.artifact_id})).status,400);
+    const intended = f.backend.inactive;
+    f.backend.inactive = 'REPORT ztest.\nWRITE 42.';
+    assert.equal((await f.post(base+'/reconcile',reconcile)).status,400);
+    assert.equal((await f.get(base)).draft.state,'uncertain');
+    f.backend.inactive = intended;
+    const response = await f.post(base+'/reconcile',reconcile);
+    const resolved = await response.json();
+    assert.equal(response.status,200,JSON.stringify(resolved));
+    assert.equal(resolved.state,'saved');
+    const store = new WriteApprovalStore(f.directory);
+    for (const approval of resolved.approval_ids) assert.equal(await store.requiresReconciliation(approval),false);
+    assert.equal(f.backend.saves,1);
+  } finally { await f.cleanup(); }
+});
+
+test('automatic repair prepares a fresh reviewed draft even when the conversation has full write permission', async () => {
+  const f=await fixture();let round=0;
+  const agent=new AgentRuntime(f.store,{credentials,factory:()=>f.backend,audit:new AuditLog(f.logDirectory),
+    execute:async(name,input)=>f.operations.run(name,input),model:async()=>{
+      const call=(name:string,args:object)=>({message:{role:'assistant' as const,content:null,tool_calls:[{id:randomUUID(),type:'function' as const,function:{name,arguments:JSON.stringify(args)}}]}});
+      if(++round===1)return call('get_capabilities',{});
+      if(round===2)return call('propose_program_workflow',{action:'create_program',name:'ZTEST',description:'test',package_name:'$TMP',source:'REPORT ztest.\nWRITE 1.'});
+      if(round===4){const baseline=await f.backend.read(object,'active');return call('propose_program_workflow',{
+        action:'update_source',object_uri:object,source_uri:baseline.source_uri,version:'active',expected_revision:baseline.revision,source:'REPORT ztest.\nWRITE 2.'});}
+      return {message:{role:'assistant' as const,content:'请审核修复草稿。'}};
+    }});
+  async function terminal(id:string){for(let i=0;i<500;i++){const t=await agent.tasks.get(id);if(!['running','queued'].includes(t.status))return t;await new Promise(r=>setTimeout(r,10));}throw new Error('not terminal');}
+  try {
+    await agent.initialize();const created=await agent.create('创建程序',f.connection.connection_id,'chat');
+    const initial=await terminal(created.id),proposal=initial.workflow_proposals![0];
+    await agent.setWriteMode(created.id,'unrestricted');f.backend.uncertain=true;
+    const result=await agent.saveDraft(created.id,'workflow',proposal.id,proposal.artifact_id);
+    assert.equal(result.state,'uncertain');
+    const repaired=await terminal(created.id);assert.equal(repaired.status,'completed',JSON.stringify(repaired.error));
+    assert.equal(repaired.workflow_proposals?.length,2);assert.equal(f.backend.saves,1);
+    assert.equal(repaired.write_mode,'unrestricted');assert.equal(repaired.repair_only,true);
+    const next=repaired.workflow_proposals![1];
+    assert.equal(repaired.drafts?.some(d=>d.key==='workflow:'+next.id),false);
+    // A repair draft has no grant and cannot be activated before reviewed saving.
+    await assert.rejects(agent.activateDraft(created.id,'workflow',next.id,next.artifact_id,false));
+  }finally{await agent.close();await f.cleanup();}
+});
+
+test('unchanged readback after an unknown save never retries, and unavailable diagnosis leaves a usable failure record', async () => {
+  const f=await workflowApiFixture(),agent=new AgentRuntime(f.store,{credentials,factory:()=>f.backend});
+  f.backend.save=async()=>{f.backend.saves++;throw new AppError('OUTCOME_UNKNOWN','connection reset before confirmation');};
+  try {
+    const p=f.task.workflow_proposals[0];
+    const result=await agent.saveDraft(f.task.id,'workflow',p.id,p.artifact_id);
+    assert.equal(result.state,'uncertain');assert.equal(result.saved_source,undefined);assert.equal(f.backend.saves,1);
+    assert.match(result.message!,/自动排查暂未启动/);
+    assert.equal((await agent.cleanupPreview(0,[],f.connection.connection_id)).candidates.length,0);
+    const task=await agent.tasks.get(f.task.id);
+    await assert.rejects(agent.remove(task.id,task.updated_at),{code:'AGENT_APPROVAL_ACTIVE'});
+    await assert.rejects(agent.saveDraft(task.id,'workflow',p.id,p.artifact_id),{code:'AGENT_DRAFT_USED'});
+    assert.equal(f.backend.saves,1);
+  }finally{await agent.close();await f.cleanup();}
+});
+
+test('a baseline conflict generates a new draft that is saved only after a fresh user confirmation', async () => {
+  const f=await fixture();let round=0;
+  const agent=new AgentRuntime(f.store,{credentials,factory:()=>f.backend,execute:async(name,input)=>f.operations.run(name,input),model:async messages=>{
+    const call=(name:string,args:object)=>({message:{role:'assistant' as const,content:null,tool_calls:[{id:randomUUID(),type:'function' as const,function:{name,arguments:JSON.stringify(args)}}]}});
+    round++;if(round===1)return call('get_capabilities',{});
+    if(round===5)assert.ok(messages.some(m=>m.role==='system'&&m.content?.includes('不要仅因基线变化让用户重新描述修改要求')));
+    if(round===2||round===5)return call('read_source',{object_uri:object,version:'active'});
+    if(round===3||round===6){const read=JSON.parse(messages.findLast(m=>m.role==='tool'&&m.content?.includes('"source_uri"'))!.content!).data;
+      return call('propose_program_workflow',{action:'update_source',object_uri:object,source_uri:read.source_uri,version:'active',expected_revision:read.revision,
+        source:read.source+'\nWRITE 2.'});}
+    return {message:{role:'assistant' as const,content:'请审核草稿。'}};
+  }});
+  async function terminal(id:string){for(let i=0;i<500;i++){const t=await agent.tasks.get(id);if(!['running','queued'].includes(t.status))return t;await new Promise(r=>setTimeout(r,10));}throw new Error('not terminal');}
+  try {
+    const created=await agent.create('修改程序',f.connection.connection_id,'chat');const first=(await terminal(created.id)).workflow_proposals![0];
+    f.backend.active='REPORT ztest.\nWRITE 9.';
+    assert.equal((await agent.saveDraft(created.id,'workflow',first.id,first.artifact_id)).state,'failed');
+    assert.equal(f.backend.saves,0);
+    const repaired=await terminal(created.id);assert.equal(repaired.status,'completed',JSON.stringify(repaired.error));
+    assert.equal(repaired.workflow_proposals?.length,2);assert.equal(f.backend.saves,0);
+    const retry=await agent.reviseDraft(created.id,'workflow',first.id,first.artifact_id);
+    assert.equal(retry.recovery_started,true);
+    const resumed=await terminal(created.id);
+    assert.equal(resumed.latest_prompt,undefined);
+    assert.equal(resumed.messages.filter(m=>m.role==='user').length,1);
+    assert.equal(f.backend.saves,0);
+    const second=repaired.workflow_proposals![1];const saved=await agent.saveDraft(created.id,'workflow',second.id,second.artifact_id);
+    assert.equal(saved.state,'saved',JSON.stringify(saved));assert.equal(f.backend.saves,1);
+    assert.equal(f.backend.inactive,'REPORT ztest.\nWRITE 9.\nWRITE 2.');assert.equal(f.backend.active,'REPORT ztest.\nWRITE 9.');
+  }finally{await agent.close();await f.cleanup();}
+});
+
+test('ordinary draft revision binds the selected artifact internally without asking the user to repeat the requirement', async () => {
+  const f=await workflowApiFixture();let received:Message[]=[];
+  const agent=new AgentRuntime(f.store,{credentials,factory:()=>f.backend,model:async messages=>{
+    received=structuredClone(messages);return {message:{role:'assistant',content:'已沿用原要求准备修改。'}};
+  }});
+  try {
+    const p=f.task.workflow_proposals[0];await agent.setWriteMode(f.task.id,'unrestricted');
+    assert.equal((await agent.reviseDraft(f.task.id,'workflow',p.id,p.artifact_id)).recovery_started,false);
+    await agent.followUp(f.task.id,'沿用原来的修改目标继续完善');
+    let task;
+    for(let i=0;i<200;i++){task=await agent.tasks.get(f.task.id);if(!['queued','running'].includes(task.status))break;await new Promise(r=>setTimeout(r,10));}
+    assert.equal(task!.status,'completed');assert.equal(task!.repair_only,true);
+    assert.ok(received.some(m=>m.role==='system'&&m.content?.includes(p.artifact_id)));
+    assert.equal(received.filter(m=>m.role==='user').at(-1)?.content,'沿用原来的修改目标继续完善');
+    assert.equal(task!.draft_revision_artifact,undefined);assert.equal(f.backend.saves,0);
+  }finally{await agent.close();await f.cleanup();}
+});
+
+test('client full mode executes the requested workflow without per-operation confirmation and records its authority', async () => {
+  const f = await workflowApiFixture('unrestricted');
+  try {
+    assert.equal(f.task.write_mode, 'unrestricted');
+    assert.equal(f.backend.saves, 1);
+    assert.equal(f.backend.active, 'REPORT ztest.\nWRITE 1.');
+    assert.equal(f.detail.execution.state, 'completed');
+    for (const item of f.detail.approvals) {
+      const record = await new WriteApprovalStore(f.directory).get(item.id);
+      assert.equal(record.authorization, 'client_full');
+    }
+  } finally { await f.cleanup(); }
+});
+test('client full mode can save a source change or create an object directly, with complete receipts across stop and resume', async () => {
+  for (const kind of ['source','operation']) {
+    const f = await fixture(); let round = 0, release = () => {}, started = () => {};
+    const saving = new Promise<void>(resolve => { started = resolve; });
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    if (kind === 'source') {
+      const save = f.backend.save.bind(f.backend);
+      f.backend.save = async (uri,code) => { started(); await blocked; await save(uri,code); };
+    }
+    const agent = new AgentRuntime(f.store,{credentials,factory:()=>f.backend,audit:new AuditLog(f.logDirectory),
+      execute:async(name,input)=>f.operations.run(name,input), model:async messages=>{
+        const call=(name:string,args:object)=>({message:{role:'assistant' as const,content:null,tool_calls:[{id:randomUUID(),type:'function' as const,function:{name,arguments:JSON.stringify(args)}}]}});
+        if (++round===1) return call('get_capabilities',{});
+        if (kind==='operation' && round===2) return call('propose_controlled_operation',{tool:'create_program',input:{name:'ZTEST',description:'test',package_name:'$TMP'}});
+        if (kind==='source' && round===2) return call('read_source',{object_uri:object,version:'active'});
+        if (kind==='source' && round===3) {
+          const read=JSON.parse(messages.findLast(message=>message.role==='tool')!.content!);
+          return call('propose_source_change',{source_artifact_id:read._task_artifact.artifact_id,summary:'修改输出',edits:[{old_text:'REPORT ztest.',new_text:'REPORT ztest.\nWRITE 1.'}]});
+        }
+        return {message:{role:'assistant' as const,content:'已按执行结果完成。'}};
+      }});
+    async function terminal(id:string) {
+      for(let i=0;i<500;i++){const task=await agent.tasks.get(id);if(!['running','queued'].includes(task.status))return task;await new Promise(resolve=>setTimeout(resolve,10));}
+      throw new Error('Task did not finish');
+    }
+    try {
+      await agent.initialize();
+      const created=await agent.create('执行修改',f.connection.connection_id,'chat',undefined,undefined,'unrestricted');
+      if(kind==='source') {
+        await saving; const stopped=agent.stop(created.id); release();
+        assert.equal((await stopped).status,'stopped');
+        assert.equal((await agent.tasks.get(created.id)).messages.at(-1)?.role,'tool');
+        await agent.resume(created.id);
+      }
+      const task=await terminal(created.id);assert.equal(task.status,'completed',JSON.stringify(task.error));
+      if(kind==='source'){assert.equal(f.backend.saves,1);assert.equal(f.backend.inactive,'REPORT ztest.\nWRITE 1.');}
+      else assert.equal(task.operation_proposals?.length,1);
+    } finally {release();await agent.close();await f.cleanup();}
+  }
+});
+
+test('client full mode replies locally on unknown writes and retains a complete tool receipt for review', async () => {
+  const f = await workflowApiFixture('unrestricted', backend => { backend.uncertain = true; });
+  try {
+    assert.equal(f.backend.saves, 1);
+    assert.match(f.task.answer, /写入未完成或结果暂时无法确认/);
+    assert.equal(f.detail.execution.state, 'stopped');
+    assert.ok(f.detail.approvals.some(item => item.needs_reconciliation));
+    const saved = await f.get(`/api/agent/tasks/${f.task.id}/conversation`);
+    assert.match(saved.messages.at(-1).content, /执行回执已保留/);
+  } finally { await f.cleanup(); }
+});
+
+test('client mode switching is local, does not execute pending plans and cannot bypass a disabled connection', async () => {
+  const f = await workflowApiFixture();
+  try {
+    const path = `/api/agent/tasks/${f.task.id}/write-mode`;
+    const patch = (mode: string) => fetch(f.origin + path, { method:'PATCH', headers:f.headers, body:JSON.stringify({mode}) });
+    assert.equal(f.task.write_mode,'controlled'); assert.equal(f.backend.saves,0);
+    assert.equal((await patch('unrestricted')).status,200);
+    assert.equal(f.backend.saves,0);
+    assert.equal(Object.hasOwn((await f.store.load()).connections[0],'write_governance'),false);
+    assert.equal((await patch('controlled')).status,200);
+    const config = await f.store.load(); config.connections[0].write_enabled = false; await f.store.save(config);
+    assert.equal((await patch('unrestricted')).status,400);
+    assert.equal((await f.post('/api/agent/tasks',{prompt:'写入',connection_id:f.connection.connection_id,write_mode:'unrestricted'})).status,400);
+    assert.equal(f.backend.saves,0);
+  } finally { await f.cleanup(); }
+});
+
+test('MCP writes independently without approval tools or tickets and obeys the connection write switch', async () => {
+  const f = await fixture(); const token = await f.store.createToken();
+  const runtime = await startHttp(f.store,f.operations,0), address = runtime.listener.address();
+  assert.ok(address && typeof address !== 'string');
+  const client = new Client({name:'independent-writes',version:'1'});
+  try {
+    await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${address.port}/mcp`),{requestInit:{headers:{Authorization:`Bearer ${token.token}`}}}));
+    const tools = (await client.listTools()).tools;
+    assert.equal(tools.some(tool=>tool.name.startsWith('approval_')||tool.name.startsWith('workflow_')),false);
+    const result = await client.callTool({name:'create_program',arguments:{connection_id:f.connection.connection_id,name:'ZTEST',description:'test',package_name:'$TMP',request_id:randomUUID()}});
+    assert.equal((result.structuredContent as {status:string}).status,'success');
+    const config=await f.store.load();config.connections[0].write_enabled=false;await f.store.save(config);
+    const denied=await client.callTool({name:'create_program',arguments:{connection_id:f.connection.connection_id,name:'ZTEST',description:'test',package_name:'$TMP',request_id:randomUUID()}});
+    assert.equal((denied.structuredContent as {error:{code:string}}).error.code,'WRITE_DISABLED');
+  } finally {await client.close();await runtime.close();await f.cleanup();}
+});
+
+test('workflow progress remains readable during execution and reports a failed syntax check precisely', async () => {
+  const f = await workflowApiFixture();
+  let release!: () => void, started!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const saving = new Promise<void>(resolve => { started = resolve; });
+  const save = f.backend.save.bind(f.backend);
+  f.backend.save = async (uri, code) => { started(); await blocked; await save(uri, code); };
+  f.backend.check = async () => ({ passed: false });
+  const request = f.post(`${f.base}/execute`, { confirm: true, review_id: f.detail.review.review_id });
+  try {
+    await saving;
+    const current = await f.get(`${f.base}/progress`);
+    assert.equal(current.execution.state, 'running');
+    assert.equal(current.execution.can_reconcile, false);
+    assert.equal(Object.hasOwn(current, 'plan'), false);
+    assert.equal(Object.hasOwn(current, 'review'), false);
+    assert.equal(current.progress.phases.find(phase => phase.id === 'update_source').status, 'running');
+    const approval = current.approvals.find(item => item.step === 'update_source');
+    assert.equal((await f.post(`${f.base}/reconcile`, { confirm: true, action: 'resolve', approval_id: approval.id })).status, 400);
+    assert.equal((await f.post(`${f.base}/verify`, {})).status, 400);
+    release(); assert.equal((await request).status, 400);
+    const after = await f.get(`${f.base}/progress`);
+    assert.equal(after.execution.state, 'stopped');
+    assert.equal(after.progress.phases.find(phase => phase.id === 'update_source').status, 'completed');
+    assert.equal(after.progress.phases.find(phase => phase.id === 'syntax_check').status, 'failed');
+    assert.equal(after.progress.phases.find(phase => phase.id === 'activate_objects').status, 'skipped');
+    assert.equal(after.progress.failure.code, 'WORKFLOW_SYNTAX_FAILED');
+    const verification = await (await f.post(`${f.base}/verify`, {})).json();
+    assert.equal(verification.observations.find(item => item.version === 'inactive').matches_plan, true);
+    assert.equal(verification.observations.find(item => item.version === 'active').matches_plan, false);
+    assert.equal(f.backend.saves, 1);
+  } finally { release(); await request; await f.cleanup(); }
+});
+
+test('workflow reconciliation is authenticated, plan-scoped, explicit and never repeats an uncertain save', async () => {
+  const f = await workflowApiFixture(); f.backend.uncertain = true;
+  try {
+    assert.equal((await f.post(`${f.base}/execute`, { confirm: true, review_id: f.detail.review.review_id })).status, 400);
+    const current = await f.get(`${f.base}/progress`);
+    const approval = current.approvals.find(item => item.step === 'update_source');
+    assert.equal(approval.needs_reconciliation, true);
+    assert.equal(current.progress.phases.find(phase => phase.id === 'update_source').status, 'unknown');
+    assert.equal((await f.post(`${f.base}/reconcile`, { confirm: false, action: 'resolve', approval_id: approval.id })).status, 400);
+    assert.equal((await f.post(`${f.base}/reconcile`, { confirm: true, action: 'resolve', approval_id: randomUUID() })).status, 400);
+    assert.equal((await fetch(`${f.origin}${f.base}/reconcile`, { method: 'POST', headers: { 'Content-Type':'application/json' },
+      body: JSON.stringify({ confirm:true, action:'resolve', approval_id:approval.id }) })).status, 401);
+    assert.equal((await f.post(`${f.base}/reconcile`, { confirm: true, action: 'resolve', approval_id: approval.id })).status, 200);
+    const after = await f.get(`${f.base}/progress`);
+    assert.equal(after.approvals.find(item => item.id === approval.id).resolved, true);
+    assert.equal(after.approvals.find(item => item.id === approval.id).needs_reconciliation, false);
+    assert.equal(after.progress.phases.find(phase => phase.id === 'update_source').status, 'unknown');
+    assert.equal((await f.post(`${f.base}/reconcile`, { confirm: true, action: 'resolve', approval_id: approval.id })).status, 400);
+    assert.equal((await f.post(`${f.base}/execute`, { confirm: true, review_id: f.detail.review.review_id })).status, 400);
+    assert.equal(f.backend.saves, 1);
+  } finally { await f.cleanup(); }
+});
+
+test('workflow recovery can revoke a journal-linked unused approval without touching SAP', async () => {
+  const f = await workflowApiFixture();
+  try {
+    const approvals = new WriteApprovalStore(f.directory);
+    const plan = f.detail.plan;
+    const record = await approvals.createOperation(parseControlledOperation('create_program', {
+      connection_id: f.connection.connection_id, name: 'ZTEST', description: 'test', package_name: '$TMP',
+      request_id: `${plan.plan_id}:write` }), targetFingerprint(f.connection), 'a'.repeat(64), new Date(Date.now() + 60000));
+    const directory = join(f.directory, 'workflow-runs'); await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, digest(`${f.connection.connection_id}:${plan.plan_id}`) + '.jsonl'), [
+      { state:'started', plan_id:plan.plan_id },
+      { state:'step_approved', step:'create_program', phase:'create_program', approval_id:record.id },
+      { state:'stopped', phase:'create_program', error:{ code:'SYNTHETIC', message:'审批后中断' } }
+    ].map(event => JSON.stringify(event) + '\n').join(''));
+    assert.equal((await f.get(`${f.base}/progress`)).approvals[0].state, 'pending');
+    assert.equal((await f.post(`${f.base}/reconcile`, { confirm:true, action:'revoke', approval_id:record.id })).status, 200);
+    assert.equal((await approvals.status(record.id)).state, 'revoked');
+    assert.equal(f.backend.saves, 0);
+  } finally { await f.cleanup(); }
+});
+
+
+test('legacy connection policies map safely and obsolete object scopes are discarded', async () => {
+  const f = await fixture();
+  try {
+    assert.equal(writePolicy({ ...f.connection, write_enabled: false, write_governance: 'approval_required' }), 'disabled');
+    assert.equal(writePolicy({ ...f.connection, write_enabled: true }), 'enabled');
+    assert.equal(writePolicy({ ...f.connection, write_enabled: true, write_governance: 'approval_required' }), 'enabled');
+    const config = await f.store.load();
+    await writeFile(join(f.directory, 'config.json'), JSON.stringify({ ...config, connections: [
+      { ...f.connection, write_governance: 'approval_required', write_objects: ['/sap/bc/adt/programs/programs/old'] }
+    ] }));
+    const migrated = await f.store.load();
+    assert.equal(writePolicy(migrated.connections[0]), 'enabled');
+    assert.equal(Object.hasOwn(migrated.connections[0], 'write_objects'), false);
+    await writeFile(join(f.directory, 'config.json'), JSON.stringify({ ...config, connections: [
+      { ...f.connection, write_objects: ['/sap/bc/adt/programs/programs/old'] }
+    ] }));
+    const unrestricted = await f.operations.run('create_program', { connection_id: f.connection.connection_id,
+      name: 'znew', description: 'test', package_name: '$TMP', request_id: randomUUID() });
+    assert.equal(unrestricted.status, 'success');
+    await f.store.save(migrated);
+    assert.equal(Object.hasOwn(JSON.parse(await readFile(join(f.directory, 'config.json'), 'utf8')).connections[0], 'write_objects'), false);
+  } finally { await f.cleanup(); }
+});
+
+test('client controlled execution denies every write tool before credentials or backend access', async () => {
+  const f = await fixture();
+  let credentialReads = 0, backends = 0;
+  const protectedCredentials: Credentials = { ...credentials, get: async () => { credentialReads++; return 'fake'; } };
+  const ops = new Operations(f.store, protectedCredentials, new AuditLog(f.logDirectory), () => { backends++; return f.backend; }, 512, false, true);
+  try {
+    await f.store.save({ schema_version: 1, connections: [{ ...f.connection, write_governance: 'approval_required' }], tokens: [] });
+    for (const name of writeTools) {
+      const result = await ops.run(name, { connection_id: f.connection.connection_id, request_id: randomUUID(), object_uri: object });
+      assert.equal(result.status, 'error', name);
+      assert.equal(result.error?.code, 'CLIENT_APPROVAL_REQUIRED', name);
+      assert.equal(result.write_dispatched, false, name);
+    }
+    assert.equal(credentialReads, 0);
+    assert.equal(backends, 0);
+    for (const args of [{}, { object_uri: object + 'other' }, { object_uri: object.toUpperCase() }, { source_uri: source },
+      { object_uri: object, source_uri: '/sap/bc/adt/programs/programs/other/source/main' }]) {
+      const denied = await ops.run('update_source', { connection_id: f.connection.connection_id, request_id: randomUUID(), ...args });
+      assert.equal(denied.error?.code, 'CLIENT_APPROVAL_REQUIRED');
+      assert.equal(denied.write_dispatched, false);
+    }
+    assert.equal(credentialReads, 0);
+    assert.equal(backends, 0);
+    const read = await ops.run('read_source', { connection_id: f.connection.connection_id, object_uri: object, version: 'active' });
+    assert.equal(read.status, 'success');
+    assert.equal(credentialReads, 1);
+    assert.equal(backends, 1);
+    await f.store.save({ schema_version: 1, connections: [{ ...f.connection, write_enabled: false, write_governance: 'approval_required' }], tokens: [] });
+    const disabled = await ops.run('create_program', { connection_id: f.connection.connection_id, request_id: randomUUID() });
+    assert.equal(disabled.error?.code, 'WRITE_DISABLED');
+  } finally { await ops.close(); await f.cleanup(); }
+});
+
+test('approved source writes bind the exact target and intent and cannot replay across processes', async () => {
+  const f = await fixture();
+  try {
+    const connection = { ...f.connection, write_governance: 'approval_required' as const };
+    await f.store.save({ schema_version: 1, connections: [connection], tokens: [] });
+    const base = await f.backend.read(object, 'active');
+    const input = { connection_id: connection.connection_id, object_uri: object, source_uri: source,
+      version: 'active' as const, expected_revision: base.revision, request_id: randomUUID(),
+      edits: [{ old_text: 'REPORT ztest.', new_text: 'REPORT ztest.\nWRITE 2.' }] };
+    const approvals = new WriteApprovalStore(f.directory);
+    const approval = await approvals.create(input, targetFingerprint(connection), 'a'.repeat(64), new Date(Date.now() + 60000));
+    const createOps = () => new Operations(f.store, credentials, new AuditLog(f.logDirectory), () => f.backend);
+    const forged = createOps();
+    try {
+      const result = await forged.run('update_source', { ...input, approval_id: approval.id, edits: [{ old_text: 'REPORT ztest.', new_text: 'MALICIOUS' }] });
+      assert.equal(result.error?.code, 'APPROVAL_MISMATCH');
+      assert.equal(result.write_dispatched, false);
+      assert.equal(f.backend.saves, 0);
+    } finally { await forged.close(); }
+    const original = createOps();
+    try {
+      const result = await original.run('update_source', { ...input, approval_id: approval.id });
+      assert.equal(result.status, 'success');
+      assert.equal(result.source_save?.verification, 'passed');
+      assert.equal(f.backend.saves, 1);
+      assert.equal(f.backend.inactive, 'REPORT ztest.\nWRITE 2.');
+      assert.equal((await approvals.status(approval.id)).state, 'completed');
+    } finally { await original.close(); }
+    const replay = createOps();
+    try {
+      assert.equal((await replay.run('update_source', { ...input, approval_id: approval.id })).error?.code, 'APPROVAL_USED');
+      await assert.rejects(reserveCliWrite(f.directory, 'update_source', input), { code: 'REQUEST_ALREADY_USED' });
+      assert.equal(f.backend.saves, 1);
+    } finally { await replay.close(); }
+    const other = await approvals.create(input, targetFingerprint(connection), 'a'.repeat(64), new Date(Date.now() + 60000));
+    const duplicate = createOps();
+    try {
+      const result = await duplicate.run('update_source', { ...input, approval_id: other.id });
+      assert.equal(result.error?.code, 'REQUEST_ALREADY_USED');
+      assert.equal(result.write_dispatched, false);
+      assert.equal(f.backend.saves, 1);
+    } finally { await duplicate.close(); }
+  } finally { await f.cleanup(); }
+});
+
+test('concurrent operation instances cannot execute the same controlled approval twice', async () => {
+  const f = await fixture();
+  try {
+    const connection = { ...f.connection, write_governance: 'approval_required' as const };
+    await f.store.save({ schema_version: 1, connections: [connection], tokens: [] });
+    const base = await f.backend.read(object, 'active');
+    const input = { connection_id: connection.connection_id, object_uri: object, source_uri: source,
+      version: 'active' as const, expected_revision: base.revision, request_id: randomUUID(),
+      edits: [{ old_text: 'REPORT ztest.', new_text: 'REPORT ztest.\nWRITE 2.' }] };
+    const approval = await new WriteApprovalStore(f.directory).create(input, targetFingerprint(connection), 'a'.repeat(64), new Date(Date.now() + 60000));
+    const one = new Operations(f.store, credentials, new AuditLog(f.logDirectory), () => f.backend);
+    const two = new Operations(f.store, credentials, new AuditLog(f.logDirectory), () => f.backend);
+    try {
+      const results = await Promise.all([one.run('update_source', { ...input, approval_id: approval.id }),
+        two.run('update_source', { ...input, approval_id: approval.id })]);
+      assert.equal(results.filter(result => result.status === 'success').length, 1);
+      assert.equal(results.filter(result => result.status === 'error').length, 1);
+      assert.equal(f.backend.saves, 1);
+    } finally { await one.close(); await two.close(); }
+  } finally { await f.cleanup(); }
+});
+
+test('target changes and stale revisions cannot use a controlled approval', async () => {
+  const f = await fixture();
+  try {
+    const connection = { ...f.connection, write_governance: 'approval_required' as const };
+    await f.store.save({ schema_version: 1, connections: [connection], tokens: [] });
+    const base = await f.backend.read(object, 'active');
+    const input = { connection_id: connection.connection_id, object_uri: object, source_uri: source,
+      version: 'active' as const, expected_revision: base.revision, request_id: randomUUID(),
+      edits: [{ old_text: 'REPORT ztest.', new_text: 'REPORT ztest.\nWRITE 2.' }] };
+    const approvals = new WriteApprovalStore(f.directory);
+    const approval = await approvals.create(input, targetFingerprint(connection), 'a'.repeat(64), new Date(Date.now() + 60000));
+    await f.store.save({ schema_version: 1, connections: [{ ...connection, username: 'OTHER' }], tokens: [] });
+    const changed = new Operations(f.store, credentials, new AuditLog(f.logDirectory), () => f.backend);
+    assert.equal((await changed.run('update_source', { ...input, approval_id: approval.id })).error?.code, 'APPROVAL_MISMATCH');
+    await changed.close();
+    await f.store.save({ schema_version: 1, connections: [connection], tokens: [] });
+    f.backend.active = 'REPORT changed.';
+    const stale = new Operations(f.store, credentials, new AuditLog(f.logDirectory), () => f.backend);
+    const result = await stale.run('update_source', { ...input, approval_id: approval.id });
+    assert.equal(result.error?.code, 'VERSION_CONFLICT');
+    assert.equal(result.write_dispatched, false);
+    assert.equal(f.backend.saves, 0);
+    assert.equal((await approvals.status(approval.id)).state, 'completed');
+    await stale.close();
+  } finally { await f.cleanup(); }
+});
+
+test('uncertain controlled saves block the object until explicitly reconciled', async () => {
+  const f = await fixture();
+  try {
+    const connection = { ...f.connection, write_governance: 'approval_required' as const };
+    await f.store.save({ schema_version: 1, connections: [connection], tokens: [] });
+    const approvals = new WriteApprovalStore(f.directory), fingerprint = targetFingerprint(connection);
+    const active = await f.backend.read(object, 'active');
+    const first = { connection_id: connection.connection_id, object_uri: object, source_uri: source,
+      version: 'active' as const, expected_revision: active.revision, request_id: randomUUID(),
+      edits: [{ old_text: 'REPORT ztest.', new_text: 'REPORT ztest.\nWRITE 2.' }] };
+    const approved = await approvals.create(first, fingerprint, 'a'.repeat(64), new Date(Date.now() + 60000));
+    f.backend.uncertain = true;
+    const op1 = new Operations(f.store, credentials, new AuditLog(f.logDirectory), () => f.backend);
+    const result = await op1.run('update_source', { ...first, approval_id: approved.id });
+    assert.equal(result.outcome, 'unknown');
+    assert.equal(result.write_dispatched, true);
+    await op1.close();
+    const inactive = await f.backend.read(object, 'inactive');
+    const second = { ...first, version: 'inactive' as const, expected_revision: inactive.revision, request_id: randomUUID(),
+      edits: [{ old_text: 'WRITE 2.', new_text: 'WRITE 3.' }] };
+    const next = await approvals.create(second, fingerprint, 'b'.repeat(64), new Date(Date.now() + 60000));
+    const blocked = new Operations(f.store, credentials, new AuditLog(f.logDirectory), () => f.backend);
+    assert.equal((await blocked.run('update_source', { ...second, approval_id: next.id })).error?.code, 'APPROVAL_RECONCILIATION_REQUIRED');
+    assert.equal(f.backend.saves, 1);
+    await blocked.close();
+    await approvals.resolve(approved.id, new Date().toISOString());
+    f.backend.uncertain = false;
+    const op2 = new Operations(f.store, credentials, new AuditLog(f.logDirectory), () => f.backend);
+    assert.equal((await op2.run('update_source', { ...second, approval_id: next.id })).status, 'success');
+    assert.equal(f.backend.inactive, 'REPORT ztest.\nWRITE 3.');
+    await op2.close();
+  } finally { await f.cleanup(); }
+});
+
+
+test('authenticated draft approval and execution persist the actual SAP result', async () => {
+  const f = await fixture();
+  const connection = { ...f.connection, write_governance: 'approval_required' as const };
+  await f.store.save({ schema_version: 1, connections: [connection], tokens: [] });
+  let round = 0;
+  const model = async (messages: Message[]) => {
+    round++;
+    const tool = (name: string, args: object) => ({ message: { role: 'assistant' as const, content: null,
+      tool_calls: [{ id: randomUUID(), type: 'function' as const, function: { name, arguments: JSON.stringify(args) } }] } });
+    if (round === 1) return tool('get_capabilities', {});
+    if (round === 2) return tool('read_source', { object_uri: object, version: 'active' });
+    if (round === 3) {
+      const read = messages.findLast(message => message.role === 'tool' && message.content?.includes('REPORT ztest.'));
+      const artifact = JSON.parse(read!.content!)._task_artifact.artifact_id;
+      return tool('propose_source_change', { source_artifact_id: artifact, summary: '修改输出',
+        edits: [{ old_text: 'REPORT ztest.', new_text: 'REPORT ztest.\nWRITE 2.' }] });
+    }
+    return { message: { role: 'assistant' as const, content: '草稿已生成。' } };
+  };
+  const host = await startAdmin(f.store, credentials, 0, () => f.backend, undefined, { agent: {
+    model, execute: async name => name === 'read_source'
+      ? { status: 'success', data: await f.backend.read(object, 'active') } : { status: 'success', data: {} },
+    audit: new AuditLog(f.logDirectory)
+  } });
+  const url = new URL(host.url), origin = url.origin;
+  const headers = { 'X-Admin-Token': url.hash.slice(1), Origin: origin, 'Content-Type': 'application/json' };
+  const post = (path: string, body: unknown, method = 'POST') => fetch(`${origin}${path}`, { method, headers, body: JSON.stringify(body) });
+  try {
+    const created = await post('/api/agent/tasks', { prompt: '修改输出', connection_id: connection.connection_id, output_mode: 'chat' });
+    assert.equal(created.status, 202);
+    const id = (await created.json()).id;
+    let task: { status: string; changes: { id: string; artifact_id: string }[] } | undefined;
+    for (let i = 0; i < 500; i++) {
+      task = await (await fetch(`${origin}/api/agent/tasks/${id}`, { headers })).json();
+      if (task && !['queued', 'running'].includes(task.status)) break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(task?.status, 'completed');
+    const change = task!.changes[0], base = `/api/agent/tasks/${id}/changes/${change.id}`;
+    assert.equal((await fetch(`${origin}${base}/approval`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm: true, artifact_id: change.artifact_id }) })).status, 401);
+    assert.equal((await fetch(`${origin}${base}/approval`, { method: 'POST', headers: { ...headers, Origin: 'http://evil.test' },
+      body: JSON.stringify({ confirm: true, artifact_id: change.artifact_id }) })).status, 403);
+    assert.equal((await post(`${base}/approval`, { confirm: false, artifact_id: change.artifact_id })).status, 400);
+    const approved = await post(`${base}/approval`, { confirm: true, artifact_id: change.artifact_id });
+    assert.equal(approved.status, 200);
+    const approval = await approved.json();
+    assert.equal(approval.state, 'pending');
+    assert.equal(f.backend.saves, 0);
+    assert.equal((await post(`${base}/approval`, { confirm: true, artifact_id: change.artifact_id })).status, 400);
+    const updated = await (await fetch(`${origin}/api/agent/tasks/${id}`, { headers })).json();
+    const blockedDelete = await post(`/api/agent/tasks/${id}`, { confirm: true, updated_at: updated.updated_at }, 'DELETE');
+    assert.equal((await blockedDelete.json()).error.code, 'AGENT_APPROVAL_ACTIVE');
+    assert.equal((await post(`${base}/approval`, { confirm: true, approval_id: approval.id }, 'DELETE')).status, 200);
+    const approvedAgain = await (await post(`${base}/approval`, { confirm: true, artifact_id: change.artifact_id })).json();
+    assert.notEqual(approvedAgain.id, approval.id);
+    const executed = await post(`${base}/execute`, { confirm: true, approval_id: approvedAgain.id });
+    assert.equal(executed.status, 200);
+    const result = await executed.json();
+    assert.equal(result.status, 'success');
+    assert.equal(result.source_save.verification, 'passed');
+    assert.equal(f.backend.saves, 1);
+    const detail = await (await fetch(`${origin}${base}`, { headers })).json();
+    assert.equal(detail.approval.state, 'completed');
+    assert.equal(detail.approval.result.source_save.saved, true);
+    assert.equal((await post(`${base}/execute`, { confirm: true, approval_id: approvedAgain.id }).then(r => r.json())).error.code, 'APPROVAL_USED');
+    assert.equal((await post(`${base}/approval`, { confirm: true, artifact_id: change.artifact_id })).status, 400);
+    assert.equal(f.backend.saves, 1);
+  } finally { await host.close(); await f.cleanup(); }
+});
+
+test('controlled operation drafts require authenticated approval and execute each approved action once', async () => {
+  const f = await fixture();
+  const connection = { ...f.connection, write_governance: 'approval_required' as const };
+  await f.store.save({ schema_version: 1, connections: [connection], tokens: [] });
+  let calls = 0, round = 0;
+  let proposal: { tool: string; input: object };
+  f.backend.transportRequirement = async (_object, pkg) => pkg === 'ZDEV' ? 'required' : 'not_required';
+  f.backend.create = async () => { calls++; return object; };
+  Object.assign(f.backend, {
+    createFunctionGroup: async () => { calls++; return '/sap/bc/adt/functions/groups/zgroup'; },
+    createFunctionModule: async () => { calls++; return '/sap/bc/adt/functions/groups/zgroup/fmodules/zfunc'; },
+    createTransportRequest: async () => { calls++; return 'DEVK900001'; },
+    verifyTransportRequest: async () => ({ request_number: 'DEVK900001', owner: 'TEST', status: 'modifiable', tasks: [], tasks_truncated: false }),
+    quality: async (name: string) => { calls++; return name === 'run_atc' ? { run_id: 'RUN1', submission: 'accepted' }
+      : { test_status: 'failed', failed: 1 }; }
+  });
+  const activate = f.backend.activate.bind(f.backend);
+  f.backend.activate = async () => { calls++; return activate(); };
+  const model = async () => {
+    round++;
+    const tool = (name: string, args: object) => ({ message: { role: 'assistant' as const, content: null,
+      tool_calls: [{ id: randomUUID(), type: 'function' as const, function: { name, arguments: JSON.stringify(args) } }] } });
+    if (round === 1) return tool('get_capabilities', {});
+    if (round === 2) return tool('propose_controlled_operation', proposal);
+    return { message: { role: 'assistant' as const, content: '草稿已生成，等待审核。' } };
+  };
+  const host = await startAdmin(f.store, credentials, 0, () => f.backend, undefined, { agent: {
+    model, execute: async () => ({ status: 'success', data: {} }), audit: new AuditLog(f.logDirectory)
+  } });
+  const url = new URL(host.url), origin = url.origin;
+  const headers = { 'X-Admin-Token': url.hash.slice(1), Origin: origin, 'Content-Type': 'application/json' };
+  const post = (path: string, body: unknown, method = 'POST') => fetch(`${origin}${path}`, { method, headers, body: JSON.stringify(body) });
+  try {
+    f.backend.inactive = 'REPORT ztest.\nWRITE 2.';
+    const revision = (await f.backend.read(object, 'inactive')).revision;
+    const proposals = [
+      { tool: 'create_program', input: { name: 'ZTEST', description: 'test', package_name: '$TMP' } },
+      { tool: 'create_function_group', input: { name: 'ZGROUP', description: 'test', package_name: '$TMP' } },
+      { tool: 'create_function_module', input: { name: 'ZFUNC', description: 'test', function_group_uri: '/sap/bc/adt/functions/groups/zgroup' } },
+      { tool: 'create_transport_request', input: { object_uri: object, package_name: 'ZDEV', description: 'test' } },
+      { tool: 'activate_objects', input: { objects: [{ object_uri: object, expected_revision: revision }] } },
+      { tool: 'run_atc', input: { object_uri: object, check_variant: 'DEFAULT' } },
+      { tool: 'run_unit_tests', input: { object_uri: object, max_duration: 'short' } }
+    ];
+    for (const [index, item] of proposals.entries()) {
+      proposal = item; round = 0;
+      const created = await post('/api/agent/tasks', { prompt: `请求操作 ${item.tool}`, connection_id: connection.connection_id, output_mode: 'chat' });
+      assert.equal(created.status, 202);
+      const id = (await created.json()).id;
+      let task;
+      for (let i = 0; i < 500; i++) {
+        task = await (await fetch(`${origin}/api/agent/tasks/${id}`, { headers })).json();
+        if (!['queued', 'running'].includes(task.status)) break;
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      assert.equal(task.status, 'completed', JSON.stringify(task.error));
+      assert.equal(calls, index, 'a draft must not execute SAP');
+      const draft = task.operation_proposals[0], base = `/api/agent/tasks/${id}/operations/${draft.id}`;
+      const detail = await (await fetch(`${origin}${base}`, { headers })).json();
+      assert.equal(detail.intent.tool, item.tool);
+      assert.equal(detail.intent.input.connection_id, connection.connection_id);
+      assert.equal((await fetch(`${origin}${base}/approval`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirm: true, artifact_id: draft.artifact_id }) })).status, 401);
+      assert.equal((await post(`${base}/approval`, { confirm: false, artifact_id: draft.artifact_id })).status, 400);
+      assert.equal((await post(`${base}/approval`, { confirm: true, artifact_id: 'a'.repeat(64) })).status, 400);
+      let approved = await (await post(`${base}/approval`, { confirm: true, artifact_id: draft.artifact_id })).json();
+      assert.equal(approved.state, 'pending');
+      assert.equal(calls, index);
+      if (index === 0) {
+        const current = await (await fetch(`${origin}/api/agent/tasks/${id}`, { headers })).json();
+        const deleted = await (await post(`/api/agent/tasks/${id}`, { confirm: true, updated_at: current.updated_at }, 'DELETE')).json();
+        assert.equal(deleted.error.code, 'AGENT_APPROVAL_ACTIVE');
+        assert.equal((await post(`${base}/approval`, { confirm: true, approval_id: approved.id }, 'DELETE')).status, 200);
+        const revoked = approved.id;
+        approved = await (await post(`${base}/approval`, { confirm: true, artifact_id: draft.artifact_id })).json();
+        assert.notEqual(approved.id, revoked);
+      }
+      const executed = await (await post(`${base}/execute`, { confirm: true, approval_id: approved.id })).json();
+      assert.equal(executed.status, 'success', JSON.stringify(executed));
+      assert.equal(calls, index + 1);
+      const saved = await (await fetch(`${origin}${base}`, { headers })).json();
+      assert.equal(saved.approval.state, 'completed');
+      if (item.tool === 'run_atc') assert.equal(saved.approval.result.data.run_id, 'RUN1');
+      if (item.tool === 'run_unit_tests') assert.equal(saved.approval.result.data.test_status, 'failed');
+      const replay = await (await post(`${base}/execute`, { confirm: true, approval_id: approved.id })).json();
+      assert.equal(replay.error.code, 'APPROVAL_USED');
+      const repeated = await f.operations.run(item.tool, { ...detail.intent.input, approval_id: approved.id });
+      assert.equal(repeated.error?.code, 'APPROVAL_USED');
+      assert.equal(calls, index + 1);
+    }
+  } finally { await host.close(); await f.cleanup(); }
+});
+
+test('uncertain operation requires authenticated human reconciliation and protects task deletion', async () => {
+  const f = await fixture();
+  const connection = { ...f.connection, write_governance: 'approval_required' as const };
+  await f.store.save({ schema_version: 1, connections: [connection], tokens: [] });
+  let round = 0, calls = 0;
+  Object.assign(f.backend, { quality: async () => { calls++; throw new AppError('ATC_EXECUTION_FAILED', 'Uncertain', { worklist_id: 'WL1' }); } });
+  const model = async () => {
+    round++;
+    const tool = (name: string, args: object) => ({ message: { role: 'assistant' as const, content: null,
+      tool_calls: [{ id: randomUUID(), type: 'function' as const, function: { name, arguments: JSON.stringify(args) } }] } });
+    if (round === 1) return tool('get_capabilities', {});
+    if (round === 2) return tool('propose_controlled_operation', { tool: 'run_atc', input: { object_uri: object, check_variant: 'DEFAULT' } });
+    return { message: { role: 'assistant' as const, content: '等待审核。' } };
+  };
+  const host = await startAdmin(f.store, credentials, 0, () => f.backend, undefined, { agent: {
+    model, execute: async () => ({ status: 'success', data: {} }), audit: new AuditLog(f.logDirectory)
+  } });
+  const url = new URL(host.url), origin = url.origin;
+  const headers = { 'X-Admin-Token': url.hash.slice(1), Origin: origin, 'Content-Type': 'application/json' };
+  const post = (path: string, body: unknown, method = 'POST') => fetch(`${origin}${path}`, { method, headers, body: JSON.stringify(body) });
+  try {
+    const created = await (await post('/api/agent/tasks', { prompt: '运行 ATC', connection_id: connection.connection_id })).json();
+    let task;
+    for (let i = 0; i < 500; i++) {
+      task = await (await fetch(`${origin}/api/agent/tasks/${created.id}`, { headers })).json();
+      if (!['queued', 'running'].includes(task.status)) break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(task.status, 'completed', JSON.stringify(task.error));
+    const draft = task.operation_proposals[0], base = `/api/agent/tasks/${created.id}/operations/${draft.id}`;
+    const approved = await (await post(`${base}/approval`, { confirm: true, artifact_id: draft.artifact_id })).json();
+    const result = await (await post(`${base}/execute`, { confirm: true, approval_id: approved.id })).json();
+    assert.equal(result.outcome, 'unknown');
+    let detail = await (await fetch(`${origin}${base}`, { headers })).json();
+    assert.equal(detail.approval.result.error.details.worklist_id, 'WL1');
+    task = await (await fetch(`${origin}/api/agent/tasks/${created.id}`, { headers })).json();
+    assert.equal((await post(`/api/agent/tasks/${created.id}`, { confirm: true, updated_at: task.updated_at }, 'DELETE').then(r => r.json())).error.code, 'AGENT_APPROVAL_ACTIVE');
+    assert.equal((await post(`${base}/resolve`, { confirm: false, approval_id: approved.id })).status, 400);
+    assert.equal((await fetch(`${origin}${base}/resolve`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm: true, approval_id: approved.id }) })).status, 401);
+    const resolved = await (await post(`${base}/resolve`, { confirm: true, approval_id: approved.id })).json();
+    assert.equal(resolved.verification, 'user_attested');
+    detail = await (await fetch(`${origin}${base}`, { headers })).json();
+    assert.equal(detail.approval.resolved, true);
+    assert.equal(calls, 1);
+    assert.equal((await post(`${base}/resolve`, { confirm: true, approval_id: approved.id })).status, 400);
+    assert.equal((await post(`/api/agent/tasks/${created.id}`, { confirm: true, updated_at: task.updated_at }, 'DELETE')).status, 200);
+  } finally { await host.close(); await f.cleanup(); }
+});
+
+test('uncertain ATC execution blocks related approvals until explicit user attestation', async () => {
+  const f = await fixture();
+  const connection = { ...f.connection, write_governance: 'approval_required' as const };
+  await f.store.save({ schema_version: 1, connections: [connection], tokens: [] });
+  let calls = 0, fail = true;
+  Object.assign(f.backend, { quality: async () => {
+    calls++;
+    if (fail) throw new AppError('ATC_EXECUTION_FAILED', 'Uncertain', { worklist_id: 'WL1' });
+    return { run_id: 'RUN2', submission: 'accepted' };
+  } });
+  const approvals = new WriteApprovalStore(f.directory);
+  const first = { tool: 'run_atc' as const, input: { connection_id: connection.connection_id,
+    object_uri: object, check_variant: 'DEFAULT', request_id: randomUUID(), confirm_execution: true as const } };
+  const second = { ...first, input: { ...first.input, request_id: randomUUID() } };
+  const a = await approvals.createOperation(first, targetFingerprint(connection), 'a'.repeat(64), new Date(Date.now() + 60000));
+  const b = await approvals.createOperation(second, targetFingerprint(connection), 'b'.repeat(64), new Date(Date.now() + 60000));
+  try {
+    const result = await f.operations.run(first.tool, { ...first.input, approval_id: a.id });
+    assert.equal(result.outcome, 'unknown');
+    const status = await approvals.status(a.id);
+    assert.equal(status.state, 'completed');
+    if (status.state === 'completed') assert.deepEqual(status.result.error?.details, { worklist_id: 'WL1' });
+    const blocked = new Operations(f.store, credentials, new AuditLog(f.logDirectory), () => f.backend);
+    assert.equal((await blocked.run(second.tool, { ...second.input, approval_id: b.id })).error?.code, 'APPROVAL_RECONCILIATION_REQUIRED');
+    assert.equal(calls, 1);
+    await blocked.close();
+    await approvals.resolve(a.id, new Date().toISOString());
+    fail = false;
+    const resumed = new Operations(f.store, credentials, new AuditLog(f.logDirectory), () => f.backend);
+    assert.equal((await resumed.run(second.tool, { ...second.input, approval_id: b.id })).status, 'success');
+    assert.equal(calls, 2);
+    await resumed.close();
+  } finally { await f.cleanup(); }
+});
+
+test('partial batch activation persists per-object results and blocks later source writes', async () => {
+  const f = await fixture();
+  const connection = { ...f.connection, write_governance: 'approval_required' as const };
+  await f.store.save({ schema_version: 1, connections: [connection], tokens: [] });
+  f.backend.inactive = 'REPORT ztest.\nWRITE 2.';
+  f.backend.activateBatch = async (_objects, dispatch) => {
+    await dispatch?.();
+    return { success: false, messages: ['activation failed'], inactive: [] };
+  };
+  const revision = (await f.backend.read(object, 'inactive')).revision;
+  const intent = { tool: 'activate_objects' as const, input: { connection_id: connection.connection_id,
+    objects: [{ object_uri: object, expected_revision: revision }], request_id: randomUUID() } };
+  const approvals = new WriteApprovalStore(f.directory);
+  const approval = await approvals.createOperation(intent, targetFingerprint(connection), 'a'.repeat(64), new Date(Date.now() + 60000));
+  try {
+    const result = await f.operations.run(intent.tool, { ...intent.input, approval_id: approval.id });
+    assert.equal(result.outcome, 'partial');
+    const state = await approvals.status(approval.id);
+    assert.equal(state.state, 'completed');
+    if (state.state === 'completed') {
+      const details = state.result.error?.details as { results: { object_uri: string; verification: string }[] };
+      assert.equal(details.results[0].object_uri, object);
+      assert.equal(details.results[0].verification, 'not_activated');
+    }
+    await assert.rejects(approvals.requireResolved({ connection_id: connection.connection_id, object_uri: object,
+      expected_revision: revision, source: 'REPORT ztest.', request_id: randomUUID() }),
+    { code: 'APPROVAL_RECONCILIATION_REQUIRED' });
+  } finally { await f.cleanup(); }
+});
+
+test('controlled operations reject modified intent, changed targets and stale activation revisions', async () => {
+  const f = await fixture();
+  const connection = { ...f.connection, write_governance: 'approval_required' as const };
+  await f.store.save({ schema_version: 1, connections: [connection], tokens: [] });
+  let activated = 0;
+  f.backend.inactive = 'REPORT ztest.\nWRITE 2.';
+  f.backend.activateBatch = async () => { activated++; return { success: true, messages: [] }; };
+  const revision = (await f.backend.read(object, 'inactive')).revision;
+  const intent = { tool: 'activate_objects' as const, input: { connection_id: connection.connection_id,
+    objects: [{ object_uri: object, expected_revision: revision }], request_id: randomUUID() } };
+  const approvals = new WriteApprovalStore(f.directory);
+  const approval = await approvals.createOperation(intent, targetFingerprint(connection), 'a'.repeat(64), new Date(Date.now() + 60000));
+  const run = async (input: typeof intent.input) => {
+    const ops = new Operations(f.store, credentials, new AuditLog(f.logDirectory), () => f.backend);
+    try { return await ops.run(intent.tool, { ...input, approval_id: approval.id }); } finally { await ops.close(); }
+  };
+  try {
+    assert.equal((await run({ ...intent.input, objects: [{ object_uri: object, expected_revision: 'f'.repeat(64) }] })).error?.code, 'APPROVAL_MISMATCH');
+    await f.store.save({ schema_version: 1, connections: [{ ...connection, username: 'OTHER' }], tokens: [] });
+    assert.equal((await run(intent.input)).error?.code, 'APPROVAL_MISMATCH');
+    await f.store.save({ schema_version: 1, connections: [connection], tokens: [] });
+    f.backend.inactive += '\nWRITE 3.';
+    const stale = await run(intent.input);
+    assert.equal(stale.error?.code, 'VERSION_CONFLICT');
+    assert.equal(stale.write_dispatched, false);
+    assert.equal(activated, 0);
+    assert.equal((await run(intent.input)).error?.code, 'APPROVAL_USED');
+  } finally { await f.cleanup(); }
+});
+
 
 test('cache cleanup recreates sessions and retains write replay protection', async () => {
   const f = await fixture();
@@ -171,7 +1722,7 @@ test('connections expose system identity without exposing credentials', async ()
   const f = await fixture(); try {
     const result = await f.operations.run('list_connections', {});
     assert.deepEqual(result.data, [{ connection_id: f.connection.connection_id, name: 'dev',
-      base_url: 'http://sap.test:8000', client: '001', language: 'EN', username: 'TEST', write_enabled: true }]);
+      base_url: 'http://sap.test:8000', client: '001', language: 'EN', username: 'TEST', write_enabled: true, write_policy: 'enabled', allow_table_data: true }]);
     assert.equal(JSON.stringify(result.data).includes('fake'), false);
   } finally { await f.cleanup(); }
 });
@@ -745,7 +2296,9 @@ test('real MCP SDK HTTP client initializes, lists tools and reads source; HTTP r
     assert.ok(instructions.includes('VERSION_CONFLICT'));
     assert.ok(instructions.includes('runtime enablement'));
     const listedTools = (await client.listTools()).tools;
-    assert.equal(listedTools.length, 31);
+    assert.equal(listedTools.length, Object.keys(toolSchemas).length);
+    assert.equal(listedTools.some(tool => tool.name.startsWith('approval_') || tool.name.startsWith('workflow_')), false);
+    for (const tool of listedTools) assert.equal(Object.hasOwn(tool.inputSchema.properties ?? {}, 'approval_id'), false);
     const queryTableTool = listedTools.find(t => t.name === 'query_table')!;
     assert.ok((queryTableTool.inputSchema.properties?.filters as { description?: string }).description?.includes('AND-combined'));
     assert.ok((queryTableTool.inputSchema.properties?.connection_id as { description?: string }).description?.includes('list_connections'));
@@ -774,6 +2327,8 @@ test('real MCP SDK HTTP client initializes, lists tools and reads source; HTTP r
     assert.ok(JSON.stringify(oversized).includes('maximum of 2000 elements'));
   } finally { await client.close(); await runtime.close(); await f.cleanup(); }
 });
+
+
 
 test('query tools work with writes disabled and validate through the MCP boundary', async () => {
   const f = await fixture();
@@ -804,6 +2359,55 @@ test('query tools work with writes disabled and validate through the MCP boundar
       assert.equal(invalid.isError, true);
     }
     assert.equal(calls.length, 2); assert.equal(f.backend.locks, 0); assert.equal(f.backend.saves, 0);
+  } finally { await client.close(); await runtime.close(); await f.cleanup(); }
+});
+
+test('table-data policy applies per connection through MCP even with cached sessions', async () => {
+  const f = await fixture();
+  const second = { ...f.connection, connection_id: randomUUID(), name: 'other', allow_table_data: true };
+  await f.store.save({ schema_version: 1, connections: [{ ...f.connection, allow_table_data: false }, second], tokens: [] });
+  let queries = 0;
+  Object.assign(f.backend, {
+    queryTable: async () => { queries++; return { rows: [] }; },
+    querySql: async () => { queries++; return { rows: [] }; }
+  });
+  const token = await f.store.createToken(); const runtime = await startHttp(f.store, f.operations, 0);
+  const address = runtime.listener.address(); assert.ok(address && typeof address !== 'string');
+  const client = new Client({ name: 'policy-test', version: '1' });
+  try {
+    await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${address.port}/mcp`),
+      { requestInit: { headers: { Authorization: `Bearer ${token.token}` } } }));
+    const listed = await client.callTool({ name: 'list_connections', arguments: {} });
+    const entries = (listed.structuredContent as { data: { connection_id: string; allow_table_data: boolean }[] }).data;
+    assert.equal(entries.find(item => item.connection_id === f.connection.connection_id)?.allow_table_data, false);
+    assert.equal(entries.find(item => item.connection_id === second.connection_id)?.allow_table_data, true);
+    for (const [name, args] of [['query_table', { table_name: 'MARA' }], ['query_sql', { sql: 'SELECT * FROM mara' }]] as const) {
+      const denied = await client.callTool({ name, arguments: { connection_id: f.connection.connection_id, ...args } });
+      assert.equal(denied.isError, true);
+      assert.equal((denied.structuredContent as { error: { code: string } }).error.code, 'TABLE_DATA_DISABLED');
+      assert.equal((await client.callTool({ name, arguments: { connection_id: second.connection_id, ...args } })).isError, false);
+    }
+    assert.equal(queries, 2);
+    assert.equal((await client.callTool({ name: 'read_source', arguments: { connection_id: f.connection.connection_id, object_uri: object } })).isError, false);
+    const config = await f.store.load();
+    config.connections.find(item => item.connection_id === second.connection_id)!.allow_table_data = false;
+    await f.store.save(config);
+    const revoked = await client.callTool({ name: 'query_table', arguments: { connection_id: second.connection_id, table_name: 'MARA' } });
+    assert.equal((revoked.structuredContent as { error: { code: string } }).error.code, 'TABLE_DATA_DISABLED');
+    assert.equal(queries, 2);
+    const governed = await f.store.load();
+    governed.connections.find(item => item.connection_id === f.connection.connection_id)!.write_enabled = false;
+    await f.store.save(governed);
+    const deniedWrite = await client.callTool({ name: 'update_source', arguments: {
+      connection_id: f.connection.connection_id, object_uri: object, expected_revision: '0'.repeat(64),
+      source: 'REPORT ztest.', request_id: 'mcp-governance-test' } });
+    assert.equal(deniedWrite.isError, true);
+    assert.equal((deniedWrite.structuredContent as { error: { code: string } }).error.code, 'WRITE_DISABLED');
+    const outside = await client.callTool({ name: 'update_source', arguments: {
+      connection_id: f.connection.connection_id, object_uri: object + 'other', expected_revision: '0'.repeat(64),
+      source: 'REPORT ztest.', request_id: 'mcp-outside-scope' } });
+    assert.equal((outside.structuredContent as { error: { code: string } }).error.code, 'WRITE_DISABLED');
+    assert.equal(f.backend.saves, 0);
   } finally { await client.close(); await runtime.close(); await f.cleanup(); }
 });
 
@@ -845,7 +2449,7 @@ test('repository tools register as read-only, preserve schema refinements and ru
   await f.store.save({ schema_version: 1, connections: [{ ...f.connection, write_enabled: false }], tokens: [] });
   let dispatched = 0;
   Object.assign(f.backend, { inspectRepository: async (tool: string, args: unknown) => { dispatched++; return { tool, args }; } });
-  const server = makeMcp(f.operations);
+  const server = makeMcp(f.operations, new ApprovalService(f.store, input => f.operations.run('read_source', input)), new WorkflowExecution(f.store, f.operations));
   const client = new Client({ name: 'repository-test', version: '1' });
   const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
   try {
@@ -861,6 +2465,7 @@ test('repository tools register as read-only, preserve schema refinements and ru
       get_ddic_definition: { entity_name: 'EKKO', field_name: 'EBELN' },
       get_data_element: { data_element_uri: '/sap/bc/adt/ddic/dataelements/ebeln' },
       get_domain_values: { domain_uri: '/sap/bc/adt/ddic/domains/ebeln' },
+      get_odata_service_binding: { object_uri: '/sap/bc/adt/businessservices/bindings/ztest' },
       find_references: { object_uri: object },
       find_definition: { object_uri: object, line: 1, column: 8 },
       get_class_structure: { object_uri: '/sap/bc/adt/oo/classes/ztest' },
@@ -877,7 +2482,7 @@ test('repository tools register as read-only, preserve schema refinements and ru
       connection_id: f.connection.connection_id, object_uri: object, line: 1
     } });
     assert.equal(invalid.isError, true);
-    assert.equal(dispatched, 7, 'invalid coordinates are rejected before dispatch');
+    assert.equal(dispatched, Object.keys(inputs).length, 'invalid coordinates are rejected before dispatch');
     assert.equal(f.backend.locks, 0); assert.equal(f.backend.saves, 0);
     assert.equal((await f.operations.run('get_ddic_definition', {
       connection_id: f.connection.connection_id, entity_name: 'EKKO', limit: 501
@@ -927,7 +2532,7 @@ test('quality tools advertise actual execution policy and reject missing confirm
   const f = await fixture();
   let dispatched = 0;
   Object.assign(f.backend, { quality: async () => { dispatched++; return { test_status: 'no_tests' }; } });
-  const server = makeMcp(f.operations); const client = new Client({ name: 'quality-test', version: '1' });
+  const server = makeMcp(f.operations, new ApprovalService(f.store, input => f.operations.run('read_source', input)), new WorkflowExecution(f.store, f.operations)); const client = new Client({ name: 'quality-test', version: '1' });
   const [a, b] = InMemoryTransport.createLinkedPair();
   try {
     await server.connect(a); await client.connect(b);

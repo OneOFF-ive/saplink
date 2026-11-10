@@ -50,7 +50,7 @@ flowchart LR
 
 主体采用单进程模块化结构，不拆分微服务。可选 RFC 模式由主体管理各通道的 Java/JCo 子进程，通过私有管道通信。CLI 启动服务后，各连接按需建立独立 SAP 会话。MCP 会话不等于 SAP 会话，不向 agent 暴露 SAP cookie、CSRF token 或锁句柄。
 
-`src/sap-cli.ts` 提供独立的 `saplink sap <operation>` 入口，以及 `tools list/describe/instructions` 能力发现。它直接调用 `Operations`，不经过 MCP，也不要求服务运行或配置令牌；与 MCP 共用 `toolSchemas`、描述和写操作分类。每次调用持有配置锁并在结束时关闭 SAP 会话，可与 MCP 进程并存。CLI 写入在发出前以独占文件持久保留请求 ID，阻止跨进程重复调用；不会缓存或重放写结果。两入口不共享会话或写请求缓存，不能跨入口重试写入。接口、限制与恢复说明见 [CLI 客户端指南](cli-client-guide.md)。
+`src/sap-cli.ts` 提供独立 SAP CLI 和工具发现；CLI 与 MCP 使用不含审批参数的公开工具 schema，并共用操作层。连接只保留写入开关。使用者及第三方 AI 客户端自行控制审批策略；两入口不依赖客户端运行。`src/approval-service.ts`、`src/write-approval.ts` 和任务计划执行器仅供 SapLink 客户端使用。客户端受控模式逐项审核，完全写入模式根据用户选择自动执行并将授权来源记录为 `client_full`。两模式均保留版本、目标、执行记录与未知结果核实。CLI 持久保留请求 ID，MCP 维护自身请求缓存，不提供跨入口事务或自动回滚。
 
 `src/request-timeout.ts` 定义两入口共用的 `timeout_ms` 范围与说明。`Operations` 在每连接队列中将本次超时传入后端，并在结束（包括失败）后恢复默认值；后端为 editor、reader、quality 及重建 reader 通道传递设置。HTTP 请求、RFC 桥启动和 RFC 请求计时器均应用该设置，显式值覆盖 RFC CTS 默认值，不修改环境变量或连接配置。超时参数在进入各领域严格校验前剥离，不作为写意图哈希的一部分；仅改变超时时间不会导致同一写请求重新发出。此参数控制单次后端请求，不是整次操作的总时限。
 
@@ -87,7 +87,7 @@ flowchart LR
 | `src/config.ts` | 连接 schema、URL 规范化、配置及令牌校验、Windows 凭据访问 |
 | `src/errors.ts` | 后端错误分类与脱敏，由 safeError 形成对外错误 |
 
-新增写工具时必须同步工具 schema、描述、writeTools 和操作实现，避免 annotations 声明为只读却执行写入，或遗漏写入保护。当前 writeTools 包含 create_program、create_function_group、create_function_module、create_transport_request、update_source、activate_objects，以及 run_atc、run_unit_tests 共八项。后两项不保存源码，但会创建检查记录或执行后端测试代码，因此同样需要开启写入、明确执行确认和请求防重复。
+新增写工具时必须同步工具 schema、描述、writeTools 和操作实现，避免 annotations 声明为只读却执行写入，或遗漏写入保护。当前 writeTools 包含 create_program、create_ddic_object、create_function_group、create_function_module、create_transport_request、update_source、activate_objects，以及 run_atc、run_unit_tests。后两项不保存源码，但会创建检查记录或执行后端测试代码，因此同样需要开启写入、明确执行确认和请求防重复。
 
 工具模块抽离不改变 HTTP 地址或认证方式。新增仓库语义查询工具通过同一注册流程接入；客户端通过运行时 tools/list 获取当前接口，不依赖源码文件布局或固定工具数量。
 
@@ -102,12 +102,13 @@ flowchart LR
 | `username` | SAP 用户名 |
 | `language` | ADT 登录语言参数，例如 EN；按后端支持验证 |
 | `write_enabled` | 默认 false，由本地配置显式启用 |
+| `allow_table_data` | 控制所有入口的表数据查询工具；新连接默认 false，未设置过权限的旧连接默认 true |
 
 SAP 连接支持 HTTP/HTTPS ADT。`base_url` 不含用户名、密码、查询参数和 fragment；CLI 可接受末尾 `/sap/bc/adt` 并规范化，其他自定义反向代理路径暂不支持。端口由用户填写，不根据系统号推算。
 
 配置存放在 `%APPDATA%\saplink\config.json`，含 `schema_version=1`，可由 `SAPLINK_CONFIG_DIR` 覆盖。连接没有 credential_ref 字段，直接按 connection_id 访问 Windows 凭据管理器。配置更新采用临时文件加 rename；删除连接时清理凭据。CLI 使用 runtime.lock 禁止服务运行期间添加、编辑或删除连接，config.lock 串行化配置变更；服务运行时可管理令牌。
 
-常驻管理宿主持有 runtime.lock，避免另一个独立宿主同时操作该配置目录；UI 启动器仅附着到该宿主，不另持运行锁。独立 SAP CLI 调用使用 config.lock，可与宿主并存。Web 管理操作串行化并使用 config.lock；MCP 已停止时可在 UI 内变更连接。编辑时变更 URL、Client 或用户名必须重新输入密码，保存失败时尽力恢复原凭据。
+常驻管理宿主持有 runtime.lock，避免另一个独立宿主同时操作该配置目录；UI 启动器仅附着到该宿主，不另持运行锁。独立 SAP CLI 调用使用 config.lock，可与宿主并存。Web 管理操作串行化并使用 config.lock；MCP 已停止时可在 UI 内变更连接。已有连接的传输方式、服务器地址、系统号和 SAProuter 路由不可更改，其他目标需要新建连接；Client 和用户名仍可编辑，但必须重新输入密码，保存失败时尽力恢复原凭据。
 
 HTTP Basic 凭据和代码流量没有 TLS 加密，应在可信网络内使用。HTTP 客户端不向其他 origin 转发认证信息。
 
@@ -158,7 +159,7 @@ Web 管理端口独立于 MCP，默认监听 127.0.0.1:8766。启动生成随机
 
 | Tool | 主要参数 | 主要结果 |
 | --- | --- | --- |
-| `list_connections` | 无 | ID、名称、write_enabled，不探测实时登录状态 |
+| `list_connections` | 无 | ID、名称、write_enabled、allow_table_data，不探测实时登录状态 |
 | `get_capabilities` | `connection_id` | discovery 支持的能力及探测时间 |
 | `search_enhancements` | 连接、query、可选 type、limit | 增强对象、coverage、truncated 和仓库版本探测证据 |
 | `search_objects` | 连接、`query`、可选类型、`limit` | 名称、类型、包、对象 URI、是否截断 |
@@ -167,6 +168,7 @@ Web 管理端口独立于 MCP，默认监听 127.0.0.1:8766。启动生成随机
 | `list_package_objects` | 连接、`package_name`、`limit` | 后端节点字段、truncated、pagination_supported=false |
 | `read_source` | 连接、`object_uri`、可选 `source_uri`、`version` | 源码、源码 URI、实际版本、revision、哈希 |
 | `create_program` | 连接、`name`、`description`、`package_name`、`program_kind`（默认 report）、可选 `transport_task`、`request_id` | 对象 URI、program_kind、创建状态 |
+| `create_ddic_object` | 连接、`ddic_kind`、名称、描述、包、完整字典 DDL、可选传输任务、请求 ID | 对象和源码 URI、已核实的非活动版本及 revision |
 | `create_function_group` | 连接、name、description、package_name、可选 transport_task、request_id | 组 URI、FUGR/F、创建状态 |
 | `create_function_module` | 连接、name、description、function_group_uri、可选 transport_task、request_id | 成员 URI、父组 URI、FUGR/FF、创建状态 |
 | `list_function_group_members` | 连接、function_group_uri、limit | FUGR/FF 和 FUGR/I 成员及截断标记 |

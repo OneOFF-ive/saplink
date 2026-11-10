@@ -1,12 +1,14 @@
 # 下载、安装与卸载
 
-适用于用户本机 Windows 10/11 的 SapLink 安装包。当前任务为通过 CLI 使用 SAP 或配置连接，也必须先处理已确认的安装缺失；不能要求业务人员自行编辑配置。远程或容器终端不是用户本机 Windows 时，说明执行位置限制，提示用户手动安装到本机，不向远端或其他 Windows 用户静默安装。
+适用于用户本机 Windows 10/11 的 SapLink 安装包。先核实当前执行位置和 Windows 用户。远程或容器终端无法检查用户本机时，按[接入检查](cli-setup.md#找不到-saplink-命令)处理。确认本机安装缺失后，再进入安装授权流程。
 
 用户仅要求下载安装包时，只下载、校验并报告保存位置，不启动安装、不修改 PATH，也不要求确认安装目录。以下安装授权和路径确认适用于实际安装任务。
 
 ## 先确认安装是否真的缺失
 
-检查 `Get-Command saplink`、当前用户的 `HKCU\Software\SapLink` 的 `InstallDir`，以及 `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\SapLink` 的 `InstallLocation`，必要时核对注册表视图、用户和系统 PATH、默认目录。安装目录内的 `install-manifest.json` 应声明 `app_id=org.saplink.desktop`，并有 `bin\saplink.exe`。PATH 未刷新时用已核实的绝对路径执行 `version --json`，不要重复安装。
+检查 `Get-Command saplink` 和当前用户注册表中的实际安装目录。先查 `HKCU\Software\SapLink` 的 `InstallDir`，该值缺失时查 `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\SapLink` 的 `InstallLocation`。如果两处登记或 PATH 解析结果指向不同安装，先核实用户要操作哪一份。默认安装目录仅作为缺少登记时的候选，也可核对用户提供的实际目录。
+
+候选目录中的 `install-manifest.json` 应声明 `app_id=org.saplink.desktop`，并有 `bin\saplink.exe`。只报告核对结果，安装清单留在本机。用已核实的启动器绝对路径执行 `version --json`，再以 `tools instructions --json` 核对 CLI 能力。自定义目录和含空格、中文的目录使用 `Join-Path` 拼接路径，并把路径作为独立参数传入。
 
 发现残留注册、版本矛盾、无法访问或安装损坏时先诊断；不把它当作未安装，不删除安装目录、注册表或运行锁。已有正常安装时按原位置维护，不能为换路径自动卸载。
 

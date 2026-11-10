@@ -1,61 +1,180 @@
 <!doctype html>
 <html lang="zh-CN">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SapLink · 本地管理</title><link rel="icon" type="image/png" sizes="256x256" href="/app-icon-1114dff665f4.png"><link rel="apple-touch-icon" href="/app-icon-1114dff665f4.png"><link rel="stylesheet" href="/style.css"><script defer src="/icons.js"></script><script defer src="/app.js"></script></head>
-<body>
-<aside class="sidebar"><div class="brand"><img class="app-logo" src="/app-icon-1114dff665f4.png" width="32" height="32" alt=""><strong>SapLink</strong></div><div class="local-label"><span class="dot"></span>本地工作区</div><nav><button class="nav active" data-view="connections"><i data-lucide="database"></i>连接配置<span id="connection-count">0</span></button><button class="nav" data-view="service"><i data-lucide="server"></i>MCP 服务</button><button class="nav" data-view="tokens"><i data-lucide="key-round"></i>访问令牌</button><button class="nav" data-view="updates"><i data-lucide="refresh-cw"></i>软件更新<span id="update-new" class="update-new" hidden aria-label="有新版本可用">New</span></button></nav><div class="sidebar-foot"><i data-lucide="shield-check"></i><span>Windows 凭据管理器</span></div></aside>
-<div class="workspace"><header><div class="breadcrumb">工作区 <span>/</span> <b id="breadcrumb">连接配置</b></div><span id="top-status" class="badge neutral">CLI 模式</span></header><main>
-<section id="connections-view" class="view"><div class="page-heading"><div><p class="eyebrow">CONNECTIONS</p><h1>连接配置</h1></div><button id="add-connection" class="primary"><i data-lucide="plus"></i>添加连接</button></div><aside class="token-intro"><h2>配置连接，开始使用 SAP</h2><p>添加并测试 SAP 连接后，让支持本机命令的 AI 客户端通过 SapLink 技能完成查询和开发任务。</p><p>MCP 服务与访问令牌是可选的进阶功能，可按需配置。</p></aside><div class="toolbar"><div class="search"><i data-lucide="search"></i><input id="search" placeholder="搜索名称、地址或用户" aria-label="搜索连接"></div><span id="connection-total" class="muted"></span></div><div class="table-wrap"><table><thead><tr><th>连接名称</th><th>连接地址</th><th>Client / 用户</th><th>访问模式</th><th>连接测试</th><th class="actions-head">操作</th></tr></thead><tbody id="connection-rows"></tbody></table></div><div id="empty-connections" class="empty" hidden><i data-lucide="database"></i><h2>暂无系统连接</h2><button class="primary" id="empty-add"><i data-lucide="plus"></i>添加连接</button></div></section>
-<section id="tokens-view" class="view" hidden><div class="page-heading"><div><p class="eyebrow">ACCESS</p><h1>访问令牌</h1></div><button id="create-token" class="primary"><i data-lucide="plus"></i>创建令牌</button></div><aside class="token-intro" aria-labelledby="token-intro-title"><h2 id="token-intro-title">访问令牌有什么用？</h2><p>访问令牌仅用于可选的 MCP 接入，让你配置的 MCP 客户端获准连接 SapLink。通过 CLI 和 SapLink 技能访问 SAP 无需创建令牌。</p><p>它不是 SAP 账号密码。请只交给可信的 AI 客户端，不要公开分享；如果泄露，可以在这里撤销，再创建一个新的令牌。</p></aside><div class="table-wrap"><table><thead><tr><th>令牌名称</th><th>创建时间</th><th class="actions-head">操作</th></tr></thead><tbody id="token-rows"></tbody></table></div><div id="empty-tokens" class="empty" hidden><i data-lucide="key-round"></i><h2>暂无访问令牌</h2></div></section>
-<section id="service-view" class="view" hidden><div class="page-heading"><div><p class="eyebrow">ADVANCED · OPTIONAL</p><h1>MCP 服务</h1><p class="muted">供希望自行配置 MCP 的用户使用。通过 CLI 和 SapLink 技能访问 SAP 无需启动此服务。</p></div></div><div class="service-panel"><div class="service-title"><i data-lucide="server"></i><h2>Streamable HTTP</h2><span id="service-status" class="badge neutral">已停止</span></div><dl><div><dt>监听地址</dt><dd>127.0.0.1</dd></div><div><dt>端口</dt><dd><input id="port" type="number" min="1" max="65535" value="8765" aria-label="MCP 端口"></dd></div><div><dt>MCP URL</dt><dd><code id="mcp-url">http://127.0.0.1:8765/mcp</code><button id="copy-url" class="icon-button" title="复制 MCP URL"><i data-lucide="copy"></i></button></dd></div><div><dt>认证</dt><dd>Bearer Token</dd></div></dl><div class="service-actions"><button id="start-service" class="primary"><i data-lucide="play"></i>启动服务</button><button id="stop-service" class="danger" hidden><i data-lucide="square"></i>停止服务</button></div><div class="cache-actions"><h3>RFC 运行环境</h3><p class="muted">检查 Java、SAP JCo 和原生库，或指定本机组件目录。所有 RFC 连接共用。</p><button id="open-rfc-environment-service" type="button"><i data-lucide="cpu"></i>检查运行环境</button></div><div class="cache-actions"><h3>MCP 连接缓存</h3><p class="muted">清理后，下次访问 SAP 会重新建立会话。连接配置、密码、令牌、日志和写入防重复记录都会保留；正在执行操作时无法清理。</p><button id="clear-cache"><i data-lucide="eraser"></i>清理连接缓存</button></div><div class="cache-actions"><h3>历史日志</h3><p class="muted">仅清理本工具的历史审计日志，当天日志始终保留。删除后无法恢复，请先备份需要保留的记录。</p><label>日志保留天数<input id="log-days" type="number" required min="0" max="36500" step="1" value="30" aria-describedby="log-days-hint"></label><p id="log-days-hint" class="muted">默认保留 30 天；填 0 可清理今天以前的日志。</p><button id="clear-logs"><i data-lucide="file-x"></i>清理过期日志</button></div></div></section>
-<section id="updates-view" class="view" hidden aria-labelledby="update-heading"><div class="page-heading"><div><p class="eyebrow">UPDATES</p><h1 id="update-heading">软件更新</h1></div></div><div id="update-panel"><div class="update-heading"><div><h2>版本与更新</h2><p id="update-summary" class="muted" role="status">可手动检查新版本。</p></div><div class="update-buttons"><button id="check-updates"><i data-lucide="refresh-cw"></i>检查版本更新</button><button id="install-update" class="primary" hidden><i data-lucide="download"></i>立即自动更新</button></div></div><progress id="update-progress" max="100" hidden aria-label="安装包下载进度"></progress><p id="update-notice" class="muted" hidden></p><section id="release-details" hidden aria-label="本次更新内容"><h3 id="release-title"></h3><pre id="release-notes"></pre></section><p id="update-help" class="muted" hidden></p></div></section></main><footer><span>HTTP / RFC · 本机管理</span><span id="app-version">SapLink</span></footer></div>
-<dialog id="connection-dialog">
+<body data-view="agent">
+<header class="sidebar top-nav"><div class="brand"><img class="app-logo" src="/app-icon-1114dff665f4.png" width="32" height="32" alt=""><strong>SapLink</strong></div><div class="local-label"><span class="dot"></span>本地工作区</div><nav><button class="nav" data-view="connections"><i data-lucide="database"></i>连接配置<span id="connection-count">0</span></button><button class="nav" data-view="service"><i data-lucide="server"></i>MCP 服务</button><button class="nav" data-view="updates"><i data-lucide="settings"></i>系统设置<span id="update-new" class="update-new" hidden aria-label="有新版本可用">New</span></button></nav><div class="sidebar-foot"><i data-lucide="shield-check"></i><span>Windows 凭据管理器</span></div></header>
+<div class="workspace"><header><div class="breadcrumb">工作区 <span>/</span> <b id="breadcrumb">工作空间</b></div><span id="top-status" class="badge neutral">只读 Agent</span></header><main>
+<section id="agent-view" class="view" aria-labelledby="agent-heading">
+  <h1 id="agent-heading" class="sr-only">工作空间</h1>
+  <div class="agent-workbench">
+    <aside class="session-panel" aria-label="系统和聊天历史">
+      <div class="workspace-system"><select id="agent-connection" hidden></select><button id="agent-connection-picker" type="button" aria-controls="agent-connection-menu" aria-expanded="false" aria-label="切换 SAP 系统" disabled><span>暂无 SAP 系统</span><i data-lucide="chevron-down"></i></button><button id="agent-connections" type="button" class="workspace-icon-button" title="管理连接" aria-label="管理连接"><i data-lucide="sliders-horizontal"></i></button><div id="agent-connection-menu" class="report-menu composer-menu" popover role="group" aria-label="可用 SAP 系统"></div></div>
+      <div class="session-heading"><button id="agent-search-toggle" type="button" class="workspace-icon-button" title="搜索会话" aria-label="搜索会话" aria-controls="agent-session-search" aria-expanded="false"><i data-lucide="search"></i></button><button id="agent-new" type="button" class="primary"><i data-lucide="plus"></i>新对话</button></div>
+      <label class="sr-only" for="agent-session-search">搜索当前系统会话</label><input id="agent-session-search" type="search" placeholder="搜索会话" hidden>
+      <select id="agent-history" class="sr-only" aria-label="历史对话"><option value="">新对话</option></select>
+      <div id="agent-session-list" class="session-list"></div><p id="agent-sessions-empty" class="workspace-empty-note">选择系统后查看会话</p>
+      <div class="session-footer"><button id="agent-cleanup" type="button" title="清理历史" aria-label="清理历史"><i data-lucide="list-x"></i></button></div>
+    </aside>
+    <section class="report-panel" aria-labelledby="agent-report-heading">
+      <div class="pane-heading"><div><span class="pane-icon">▤</span><h2 id="agent-report-heading">分析报告</h2><span id="agent-report-state" class="badge neutral">尚未生成</span></div><div class="report-heading-actions"><button id="agent-report-export" type="button" title="导出报告" aria-label="导出报告"><i data-lucide="download"></i></button></div></div>
+      <div id="agent-report-library" class="report-library" hidden><select id="agent-report-history" class="sr-only" tabindex="-1" aria-hidden="true"></select><button id="agent-report-switcher" type="button" aria-controls="agent-report-menu" aria-expanded="false" title="切换报告"><i data-lucide="file-text"></i><span id="agent-report-name"></span><span id="agent-report-count"></span><i data-lucide="chevron-down"></i></button><div id="agent-report-menu" class="report-menu" popover role="group" aria-label="当前会话的报告"></div></div>
+      <div class="report-scroll"><div id="agent-report-empty" class="report-empty"><div class="report-empty-icon"><i data-lucide="file-text"></i></div><h2>暂无报告</h2></div><article id="agent-report-content" class="report-document" hidden></article></div>
+      <div class="report-footer"><span id="agent-report-target" class="sr-only">尚未选择系统</span><span id="agent-report-length"></span></div>
+    </section>
+    <section class="chat-panel" aria-labelledby="agent-chat-heading">
+      <div class="pane-heading"><div><i data-lucide="sparkles"></i><h2 id="agent-chat-heading">SAP 助手</h2><span id="agent-task-status" class="badge neutral">等待提问</span></div><div class="report-heading-actions"><button id="agent-change-history" type="button" aria-haspopup="dialog" hidden>修改记录</button><button id="agent-settings" type="button" aria-label="模型设置" title="模型设置"><i data-lucide="settings-2"></i></button></div></div>
+      <span id="agent-target" class="sr-only">请先选择系统</span>
+      <div id="agent-notice" class="agent-notice" hidden><span id="agent-notice-text" role="status"></span><button id="agent-configure-model" type="button" aria-haspopup="dialog" hidden>配置模型</button></div>
+      <section id="agent-change-list" class="agent-change-list" aria-label="待保存的修改" hidden></section>
+      <div class="chat-scroll-frame">
+      <div class="chat-scroll" id="agent-chat-scroll">
+        <div id="agent-empty" class="agent-welcome"><i data-lucide="sparkles"></i><h2>有什么可以帮你？</h2><div class="agent-examples"><button type="button" data-agent-prompt="请解释这个程序的主要逻辑，并说明关键依赖：">理解程序</button><button type="button" data-agent-prompt="请分析这项修改会影响哪些对象，并列出尚未核实的关系：">分析修改影响</button></div></div>
+        <article id="agent-result" hidden><div id="agent-chat-history"></div><div class="agent-message user"><span>你的问题</span><p id="agent-question"></p><div id="agent-question-attachments" class="agent-sent-attachments"></div></div><div id="agent-turn-history"></div>
+          <section id="agent-progress" class="agent-progress" hidden aria-label="本轮思考与执行">
+            <details id="agent-activity-history">
+              <summary><span id="agent-activity-summary" class="sr-only">思考与执行</span><span id="agent-activity-indicator" class="activity-indicator"></span><span id="agent-activity-current" role="status"></span><span id="agent-activity-time"></span><i data-lucide="chevron-down"></i></summary>
+              <ol id="agent-events"></ol><p id="agent-activity-archive" hidden>较早记录已归档</p>
+            </details>
+          </section>
+          <div id="agent-current-reply" class="agent-message assistant" hidden><span>SapLink</span><small id="agent-stream-note" class="field-hint" role="status" hidden>正在生成，内容尚未完成</small><div id="agent-answer" aria-live="polite"></div></div>
+        </article>
+
+        <section id="agent-local-work" aria-label="本地任务和生成文件" hidden></section>
+        <p id="agent-task-error" class="inline-error" role="alert" hidden></p><p id="agent-poll-error" class="inline-error" role="alert" hidden></p><p id="agent-table-policy-note" class="field-hint" hidden></p>
+      </div>
+      <button id="agent-scroll-bottom" class="agent-scroll-bottom" type="button" title="回到底部" aria-label="回到底部" aria-controls="agent-chat-scroll" hidden><i data-lucide="arrow-down"></i></button>
+      </div>
+      <section id="agent-question-card" class="agent-question-card" aria-labelledby="agent-card-question" hidden></section>
+      <form id="agent-prompt-form" class="agent-composer"><div class="agent-input-box"><div id="agent-upload-list" class="agent-upload-list" aria-live="polite"></div><label class="sr-only" for="agent-prompt">描述分析问题</label><textarea id="agent-prompt" maxlength="4000" rows="3" required placeholder="输入你的问题…" aria-describedby="agent-keyboard-hint"></textarea><div class="agent-compose-actions"><div class="agent-task-actions"><button id="agent-retry-poll" type="button" hidden>重新连接</button></div></div><div class="composer-status" aria-label="当前对话状态"><div class="composer-status-info"><input id="agent-upload-input" type="file" multiple hidden><button id="agent-upload" type="button" title="添加到对话" aria-label="添加到对话" aria-controls="agent-add-menu" aria-expanded="false"><i data-lucide="plus"></i></button><button type="button" class="composer-status-item" id="agent-write-mode" aria-controls="agent-write-menu" aria-expanded="false" hidden><i data-lucide="shield-check"></i><span>受控写入</span></button></div><div class="composer-status-actions"><button type="button" class="composer-status-item" id="agent-model-label" aria-controls="agent-model-menu" aria-expanded="false"><span>模型未配置</span></button><button type="button" class="composer-status-item composer-model-options" id="agent-model-tuning" aria-controls="agent-tuning-menu" aria-expanded="false"><span id="agent-reasoning-value">中</span><span id="agent-context-value">512K</span></button><button id="agent-send" class="primary" type="submit" data-action="send" aria-describedby="agent-send-hint" aria-label="发送" title="发送"><i data-lucide="arrow-up"></i></button><button id="agent-stop" class="primary" type="button" aria-label="停止任务" title="停止任务" hidden><i data-lucide="square"></i></button></div></div></div><p id="agent-keyboard-hint" class="sr-only">回车发送，Shift 加回车换行。</p><p id="agent-send-hint" class="sr-only" role="status"></p><p id="agent-data-policy" class="sr-only">代码与元数据可用于分析</p></form>
+      <div id="agent-write-menu" class="report-menu composer-menu write-mode-menu" popover role="group" aria-label="客户端写入权限"></div>
+      <div id="agent-add-menu" class="report-menu composer-menu" popover role="group" aria-label="添加到对话">
+        <div id="agent-add-options">
+          <button id="agent-add-file" class="report-option" type="button"><i data-lucide="paperclip"></i>添加文件</button>
+          <button class="report-option" type="button" data-reference-kind="skills"><i data-lucide="book-open"></i>技能<i data-lucide="chevron-right"></i></button>
+          <button class="report-option" type="button" data-reference-kind="mcp"><i data-lucide="server"></i>MCP<i data-lucide="chevron-right"></i></button>
+        </div>
+        <section id="agent-reference-options" hidden>
+          <button id="agent-reference-back" class="report-option" type="button"><i data-lucide="chevron-left"></i><span></span></button>
+          <input id="agent-reference-search" type="search" autocomplete="off">
+          <div id="agent-reference-list" aria-live="polite"></div>
+          <button id="agent-reference-manage" class="report-option" type="button"><i data-lucide="settings"></i><span></span></button>
+        </section>
+      </div>
+      <div id="agent-model-menu" class="report-menu composer-menu" popover role="group" aria-label="选择模型">
+        <h3 class="model-menu-heading">选择模型</h3>
+        <div id="agent-model-options"></div>
+      </div>
+      <div id="agent-tuning-menu" class="report-menu composer-menu" popover role="group" aria-label="推理和上下文设置">
+        <section class="model-tuning" aria-label="模型运行设置">
+          <h3>推理强度</h3>
+          <div id="agent-reasoning-options" class="model-segmented" role="group" aria-label="推理强度">
+            <button type="button" data-value="low" title="较少推理">低</button>
+            <button type="button" data-value="high" title="均衡推理">中</button>
+            <button type="button" data-value="max" title="最高推理强度，任务轮次不限">高</button>
+          </div>
+          <h3>上下文</h3>
+          <div id="agent-context-options" class="model-segmented" role="group" aria-label="上下文档位">
+            <button type="button" data-value="128000">128K</button>
+            <button type="button" data-value="512000">512K</button>
+            <button type="button" data-value="1000000">1M</button>
+          </div>
+        </section>
+        <details id="agent-context-details" class="context-details">
+          <summary>会话详细信息</summary>
+          <div class="context-row"><span>已报告 Token 消耗</span><strong id="agent-context-usage">暂无数据</strong></div>
+          <p id="agent-context-usage-note" class="context-note"></p>
+          <h3>工作上下文</h3>
+          <div class="context-row"><span id="agent-context-amount">暂无数据</span><span id="agent-context-percent">--</span></div>
+          <div class="context-track" aria-hidden="true"><div id="agent-context-progress"></div></div>
+          <p class="context-note">工作上下文为估算值，比例以自动整理阈值为基准，不代表模型窗口或账单。</p>
+          <div class="context-row"><span>最近请求实际输入</span><span id="agent-context-last">暂无数据</span></div>
+          <p class="context-note">来自模型返回的用量；后续内容不包含在内。</p>
+          <button id="agent-compact" type="button">压缩对话</button>
+          <p id="agent-compact-hint" class="context-note">整理会调用模型并消耗 Token，原始对话会保留。</p>
+        </details>
+      </div>
+    </section>
+  </div>
+</section>
+<section id="connections-view" class="view management-page" hidden>
+  <div class="page-heading management-title"><span class="management-icon"><i data-lucide="database"></i></span><h1>连接配置</h1><button id="add-connection" class="primary"><i data-lucide="plus"></i>添加连接</button></div>
+  <section class="management-card connections-card" aria-label="系统连接">
+    <div class="toolbar"><div class="search"><i data-lucide="search"></i><input id="search" placeholder="搜索连接" aria-label="搜索连接"></div><span id="connection-total" class="badge neutral"></span></div>
+    <div class="table-wrap"><table><thead><tr><th>系统</th><th>连接地址</th><th>Client / 用户</th><th>访问模式</th><th>连接状态</th><th class="actions-head">操作</th></tr></thead><tbody id="connection-rows"></tbody></table></div>
+    <div id="empty-connections" class="empty" hidden><span class="connection-empty-icon"><i data-lucide="database"></i></span><h2>暂无系统连接</h2><button class="primary" id="empty-add"><i data-lucide="plus"></i>添加连接</button></div>
+  </section>
+</section>
+
+<section id="service-view" class="view management-page" hidden>
+  <div class="page-heading management-title"><span class="management-icon"><i data-lucide="server"></i></span><h1>MCP 服务</h1></div>
+  <section class="management-card mcp-connection-card" aria-label="本地 MCP 服务">
+    <div class="management-card-heading"><div class="card-identity"><span class="card-icon"><i data-lucide="radio"></i></span><div><h2>本地服务</h2><span class="card-caption">Streamable HTTP</span></div></div><div class="service-controls"><span id="service-status" class="badge neutral">已停止</span><div class="service-actions"><button id="start-service" class="primary"><i data-lucide="play"></i>启动服务</button><button id="stop-service" class="danger" hidden><i data-lucide="square"></i>停止服务</button></div></div></div>
+    <dl class="service-details"><div><dt>监听地址</dt><dd><code>127.0.0.1</code></dd></div><div><dt>端口</dt><dd><input id="port" type="number" min="1" max="65535" value="8765" aria-label="MCP 端口"></dd></div><div><dt>认证方式</dt><dd>Bearer Token</dd></div><div class="service-endpoint"><dt>连接地址</dt><dd><code id="mcp-url">http://127.0.0.1:8765/mcp</code><button id="copy-url" class="icon-button" title="复制 MCP URL" aria-label="复制 MCP URL"><i data-lucide="copy"></i></button></dd></div></dl>
+  </section>
+  <section id="tokens-view" class="management-card" aria-label="访问令牌">
+    <div class="management-card-heading"><div class="card-identity"><span class="card-icon"><i data-lucide="key-round"></i></span><h2>访问令牌</h2></div><button id="create-token" type="button"><i data-lucide="plus"></i>创建令牌</button></div>
+    <div class="table-wrap"><table><thead><tr><th>令牌名称</th><th>创建时间</th><th class="actions-head">操作</th></tr></thead><tbody id="token-rows"></tbody></table></div>
+    <div id="empty-tokens" class="empty" hidden><i data-lucide="key-round"></i><h2>暂无访问令牌</h2></div>
+  </section>
+</section>
+<section id="updates-view" class="view management-page" hidden aria-labelledby="update-heading">
+  <div class="page-heading management-title"><span class="management-icon"><i data-lucide="settings"></i></span><h1 id="update-heading">系统设置</h1></div>
+  <section id="update-panel" class="management-card"><div class="update-heading management-card-heading"><div class="card-identity"><span class="card-icon"><i data-lucide="refresh-cw"></i></span><div><h2>软件更新</h2><p id="update-summary" class="muted" role="status">可手动检查新版本。</p></div></div><div class="update-buttons"><button id="check-updates"><i data-lucide="refresh-cw"></i>检查版本更新</button><button id="install-update" class="primary" hidden><i data-lucide="download"></i>立即自动更新</button></div></div><progress id="update-progress" max="100" hidden aria-label="安装包下载进度"></progress><p id="update-notice" class="muted" hidden></p><section id="release-details" hidden aria-label="本次更新内容"><h3 id="release-title"></h3><pre id="release-notes"></pre></section><p id="update-help" class="muted" hidden></p></section>
+  <div class="maintenance-grid">
+    <section class="management-card maintenance-card"><div class="card-identity"><span class="card-icon"><i data-lucide="cpu"></i></span><h2>RFC 运行环境</h2></div><p class="muted">Java、SAP JCo 与原生库</p><div class="maintenance-actions"><button id="open-rfc-environment-service" type="button"><i data-lucide="scan-line"></i>检查运行环境</button></div></section>
+    <section class="management-card maintenance-card"><div class="card-identity"><span class="card-icon"><i data-lucide="layers"></i></span><h2>连接缓存</h2></div><p class="muted">清理后按需重新建立 SAP 会话。</p><div class="maintenance-actions"><button id="clear-cache" type="button" title="保留连接、凭据、令牌和日志；执行操作期间不可清理"><i data-lucide="eraser"></i>清理缓存</button></div></section>
+    <section class="management-card maintenance-card log-card"><div><div class="card-identity"><span class="card-icon"><i data-lucide="file-clock"></i></span><h2>历史日志</h2></div><p class="muted">当天日志始终保留。清理时也会移除已删除会话遗留的产出。</p></div><div class="log-controls"><label for="log-days">保留天数</label><input id="log-days" type="number" required min="0" max="36500" step="1" value="30" aria-describedby="log-days-hint"><span id="log-days-hint" class="sr-only">填 0 可清理今天以前的日志。</span><button id="clear-logs" title="清理历史日志与已删除会话产出"><i data-lucide="file-x"></i>清理日志</button></div></section>
+  </div>
+</section></main><footer><span>HTTP / RFC · 本机管理</span><span id="app-version">SapLink</span></footer></div>
+<dialog id="connection-dialog" aria-labelledby="form-title">
   <form id="connection-form">
-    <div class="dialog-heading"><div><h2 id="form-title">添加连接</h2><p class="dialog-subtitle">配置你的 SAP 系统连接</p></div><button type="button" class="icon-button close-dialog" title="关闭"><i data-lucide="x"></i></button></div>
-    <p class="form-section-title">连接设置</p>
+    <div class="dialog-heading"><h2 id="form-title">添加连接</h2><button type="button" class="icon-button close-dialog" title="关闭"><i data-lucide="x"></i></button></div>
     <div class="form-grid">
     <label>连接名称
       <input name="name" required pattern="[\p{Script=Han}a-zA-Z0-9_\-]+" maxlength="80" placeholder="开发系统_DEV" aria-describedby="connection-name-hint">
-      <span id="connection-name-hint" class="field-hint">支持中文、英文字母、数字、下划线或连字符；不支持空格、点号、斜杠等特殊字符。</span>
+      <span id="connection-name-hint" class="field-hint">仅支持中文、英文字母、数字、下划线和连字符。</span>
     </label>
-      <label>连接方式
-        <select name="transport"><option value="rfc">RFC / JCo</option><option value="http">HTTP / HTTPS</option></select>
-      </label>
+      <div class="connection-transport-field">
+        <div class="connection-transport-heading">
+          <label for="connection-transport">连接方式</label>
+          <button id="open-rfc-environment" type="button" class="text-button" hidden>检查运行环境</button>
+        </div>
+        <select id="connection-transport" name="transport"><option value="rfc">RFC / JCo</option><option value="http">HTTP / HTTPS</option></select>
+      </div>
     </div>
-      <div id="sap-logon-import" hidden><div class="import-icon"><i data-lucide="download"></i></div><div class="import-copy"><strong>从已有连接开始</strong><p class="field-hint">导入 SAP Logon 中的服务器信息，快速完成配置。</p></div><button id="import-sap-logon" type="button">导入本地连接<i data-lucide="arrow-up-right"></i></button></div>
+      <div id="sap-logon-import" hidden>
+        <span class="import-icon"><i data-lucide="download"></i></span>
+        <div class="import-copy"><strong>从已有连接开始</strong><p class="field-hint">导入 SAP Logon 中的服务器信息，快速完成配置。</p></div>
+        <button id="import-sap-logon" type="button">导入本地连接<i data-lucide="arrow-up-right"></i></button>
+      </div>
       <div id="rfc-fields" class="form-grid" hidden>
-        <label>RFC 应用服务器<input name="rfc_ashost" maxlength="253" pattern="[A-Za-z0-9][A-Za-z0-9.\-]*" placeholder="sap-host" aria-describedby="rfc-host-hint"><span id="rfc-host-hint" class="field-hint">填写目标应用服务器的主机名或 IPv4 地址。</span></label>
-        <label>系统号<input name="rfc_sysnr" pattern="[0-9]{2}" maxlength="2" placeholder="00" aria-describedby="rfc-system-hint"><span id="rfc-system-hint" class="field-hint">两位数字，例如 00。</span></label>
+        <label>RFC 应用服务器<input name="rfc_ashost" maxlength="253" pattern="[A-Za-z0-9][A-Za-z0-9.\-]*" placeholder="sap-host" data-format-message="请填写 RFC 应用服务器的主机名或 IPv4 地址。"></label>
+        <label>系统号<input name="rfc_sysnr" pattern="[0-9]{2}" maxlength="2" placeholder="00" data-format-message="系统号必须为两位数字。"></label>
       </div>
       <label id="saprouter-field" hidden>SAProuter 路由（可选）
-        <input name="rfc_saprouter" maxlength="2048" placeholder="/H/router.example.com/S/3299" aria-describedby="saprouter-hint">
-        <span id="saprouter-hint" class="field-hint">留空直接连接。只填写中转路由，可串联多个 /H/ 节点；目标服务器填在上方。暂不支持带路由密码或 SNC 的路由。</span>
+        <input name="rfc_saprouter" maxlength="2048" placeholder="/H/router.example.com/S/3299">
       </label>
       <label id="connection-url-field"><span id="connection-url-label">ADT 地址（推荐 HTTPS）</span>
-      <input name="base_url" type="url" required placeholder="https://sap-host:443" aria-describedby="connection-url-hint">
-      <span id="connection-url-hint" class="field-hint">例如 https://sap-host:443 或 http://sap-host:8000。必须以 http:// 或 https:// 开头，可带 /sap/bc/adt；不允许其他路径、内嵌用户名密码、查询参数或 # 片段。</span>
+      <input name="base_url" type="url" required placeholder="https://sap-host:443" data-format-message="请输入有效的 HTTP 或 HTTPS 地址。">
     </label>
     <div class="form-grid">
       <label>Client
-        <input name="client" required pattern="[0-9]{3}" maxlength="3" value="100" aria-describedby="connection-client-hint">
-        <span id="connection-client-hint" class="field-hint">必须为 3 位半角数字，例如 001 或 100；保留前导零。</span>
+        <input name="client" required pattern="[0-9]{3}" maxlength="3" value="100" data-format-message="Client 必须为三位数字，请保留前导零。">
       </label>
       <label>语言
         <select name="language"><option value="EN">EN · 英文</option><option value="ZH">ZH · 中文</option><option value="DE">DE · 德文</option><option value="JA">JA · 日文</option></select>
       </label>
     </div>
-    <div id="rfc-address-hint" class="field-hint" hidden>RFC 需要 Java 和 SAP JCo。<button id="open-rfc-environment" type="button" class="text-button">检查运行环境</button></div>
-    <p class="form-section-title">登录凭据</p>
     <div class="form-grid">
     <label>SAP 用户名
-      <input name="username" required maxlength="128" autocomplete="off" aria-describedby="connection-username-hint">
-      <span id="connection-username-hint" class="field-hint">请填写 SAP 登录用户名，不能为空。</span>
+      <input name="username" required maxlength="128" autocomplete="off" data-format-message="请填写 SAP 用户名。">
     </label>
     <label>SAP 密码
       <input name="password" type="password" maxlength="512" autocomplete="new-password" data-format-message="请输入 SAP 密码，最多 512 个字符。">
-      <span id="password-hint" class="field-hint" hidden>留空保留已保存的密码</span>
     </label>
     </div>
-    <label class="check-row"><input name="write_enabled" type="checkbox"><span>允许程序写入</span></label>
+    <label class="check-row"><input name="write_enabled" type="checkbox"><span>允许写入</span></label>
+    <label class="check-row"><input name="allow_table_data" type="checkbox"><span>允许访问表数据</span></label>
     <p id="form-error" class="inline-error" role="alert"></p>
     <div class="dialog-actions"><button type="submit" class="primary"><i data-lucide="check"></i>保存连接</button></div>
   </form>
@@ -90,4 +209,129 @@
 </dialog>
 <dialog id="token-dialog"><div class="dialog-heading"><div><h2>新访问令牌</h2><p id="created-token-name" class="dialog-subtitle"></p></div><button class="icon-button close-dialog" title="关闭"><i data-lucide="x"></i></button></div><label>Authorization 标头<textarea id="new-token" readonly rows="3"></textarea></label><p class="field-hint">令牌明文仅显示这一次，请妥善保存。</p><div class="dialog-actions"><button id="copy-token" class="primary"><i data-lucide="copy"></i>复制</button></div></dialog>
 <div id="toast" role="status" hidden></div><div id="locked" hidden><div><i data-lucide="lock-keyhole"></i><h2>管理会话未授权</h2><p>请使用启动程序打开的浏览器窗口。</p></div></div>
-</body></html>
+<dialog id="agent-change-history-dialog" class="agent-change-dialog change-history-dialog" aria-labelledby="agent-change-history-heading">
+  <div class="dialog-heading"><div><h2 id="agent-change-history-heading">修改记录</h2><p id="agent-change-history-session" class="dialog-subtitle"></p></div><button id="agent-change-history-close" class="icon-button" type="button" aria-label="关闭修改记录">×</button></div>
+  <p id="agent-change-history-empty" class="field-hint" hidden>本次会话还没有修改记录。</p>
+  <ul id="agent-change-history-list" class="change-history-list"></ul>
+</dialog>
+<dialog id="agent-draft-plan-dialog" class="agent-change-dialog draft-dialog" aria-labelledby="agent-draft-plan-heading">
+  <div class="dialog-heading"><div><h2 id="agent-draft-plan-heading">审核修改计划</h2><p class="dialog-subtitle">逐项查看修改，统一保存</p></div><button id="agent-draft-plan-close" class="icon-button" type="button" aria-label="关闭修改计划">×</button></div>
+  <div id="agent-draft-plan-items" class="draft-plan-items"></div>
+  <p id="agent-draft-plan-status" role="status" aria-live="polite"></p>
+  <div class="dialog-actions"><button type="button" data-plan-action="discard">作废</button><button type="button" data-plan-action="save" class="primary">保存</button></div>
+</dialog>
+<dialog id="agent-draft-save-dialog" class="agent-change-dialog draft-dialog" aria-labelledby="agent-draft-save-heading">
+  <div class="dialog-heading"><h2 id="agent-draft-save-heading">保存修改</h2><button id="agent-draft-save-close" class="icon-button" type="button" aria-label="关闭保存结果">×</button></div>
+  <div id="agent-draft-save-result" class="draft-save-result" role="status" aria-live="polite">
+    <span class="draft-save-symbol" aria-hidden="true"><span class="draft-save-glyph"></span></span>
+    <div class="draft-save-summary"></div>
+    <span class="draft-save-count"></span>
+  </div>
+  <ol id="agent-draft-save-steps" class="draft-save-steps"></ol>
+  <p id="agent-draft-save-error" class="inline-error" role="alert"></p>
+  <div id="agent-draft-save-actions" class="draft-save-actions" hidden>
+    <button id="agent-draft-save-review" type="button" hidden>查看修改计划</button>
+    <button id="agent-draft-save-regenerate" class="primary" type="button" hidden><i data-lucide="refresh-cw"></i><span>重新生成草稿</span></button>
+  </div>
+</dialog>
+<dialog id="agent-local-script-dialog" class="agent-change-dialog draft-dialog" aria-labelledby="agent-local-script-heading">
+  <div class="dialog-heading"><div><h2 id="agent-local-script-heading"></h2><p id="agent-local-script-runtime" class="dialog-subtitle"></p></div><button id="agent-local-script-close" class="icon-button" type="button" aria-label="关闭脚本详情">×</button></div>
+  <p class="field-hint">脚本以当前系统用户权限运行，工作目录是本次运行的临时目录。</p>
+  <pre id="agent-local-script-source" class="draft-code"></pre>
+  <p id="agent-local-script-files" class="field-hint" hidden></p>
+  <p id="agent-local-script-status" role="status" aria-live="polite"></p>
+  <pre id="agent-local-script-output" class="draft-code" hidden></pre>
+  <div class="dialog-actions"><button id="agent-local-script-run" type="button" class="primary">运行脚本</button></div>
+</dialog>
+<dialog id="agent-draft-dialog" class="agent-change-dialog draft-dialog" aria-labelledby="agent-draft-heading">
+  <div class="dialog-heading"><div><h2 id="agent-draft-heading">审核修改</h2><p id="agent-draft-target" class="dialog-subtitle"></p></div><button id="agent-draft-close" class="icon-button" aria-label="关闭草稿" type="button">×</button></div>
+  <h3 id="agent-draft-summary"></h3><p id="agent-draft-note" class="field-hint"></p>
+  <div id="agent-draft-creation"></div>
+  <p id="agent-draft-plan" class="draft-plan"></p>
+  <div id="agent-draft-diff" hidden></div>
+  <details class="draft-full-source" open><summary>完整内容</summary><pre id="agent-draft-source" class="draft-code"></pre></details>
+  <p id="agent-draft-status" role="status" aria-live="polite"></p>
+  <button id="agent-draft-reconcile" type="button" hidden>核实保存结果</button>
+  <div class="dialog-actions"><button id="agent-draft-discard" type="button">作废</button><button id="agent-draft-save" class="primary" type="button">保存</button></div>
+</dialog>
+<dialog id="agent-activate-dialog" class="activation-dialog" aria-labelledby="agent-activate-heading">
+  <h2 id="agent-activate-heading">保存成功</h2><p id="agent-activate-status" role="status" aria-live="polite"></p>
+  <label class="check-row"><input id="agent-activate-atc" type="checkbox">激活后运行 ATC</label>
+  <div class="dialog-actions"><button id="agent-activate-later" type="button">稍后激活</button><button id="agent-activate-now" type="button" class="primary">立即激活</button></div>
+</dialog>
+<dialog id="agent-manage-dialog" aria-labelledby="agent-manage-heading"><form id="agent-manage-form"><h2 id="agent-manage-heading"></h2><p id="agent-manage-description" class="field-hint"></p><label id="agent-title-label"><span id="agent-title-caption">会话名称</span><input id="agent-title" maxlength="80" autocomplete="off"></label><div id="agent-cleanup-options" hidden><label>清理范围<select id="agent-cleanup-days"><option value="30">30天前</option><option value="7">7天前</option><option value="0">全部非固定历史</option></select></label><label class="check-row"><input id="agent-keep-current" type="checkbox" checked>保留当前会话</label></div><ul id="agent-cleanup-list"></ul><p id="agent-manage-error" class="inline-error" role="alert"></p><div class="dialog-actions"><button id="agent-manage-cancel" type="button">取消</button><button id="agent-manage-confirm" class="primary" type="submit">确认</button></div></form></dialog>
+<dialog id="agent-skill-detail" aria-labelledby="agent-skill-title">
+  <div class="dialog-heading"><h2 id="agent-skill-title"></h2><button id="agent-skill-detail-close" class="icon-button" type="button" aria-label="关闭技能详情" title="关闭技能详情"><i data-lucide="x"></i></button></div>
+  <label>技能文件<select id="agent-skill-files"></select></label>
+  <pre id="agent-skill-preview" class="agent-skill-preview" tabindex="0" aria-label="技能文件预览"></pre>
+  <p id="agent-skill-preview-error" class="inline-error" role="alert"></p>
+</dialog>
+<dialog id="agent-model-dialog" aria-labelledby="agent-model-heading">
+  <div class="dialog-heading"><h2 id="agent-model-heading">模型设置</h2><button id="agent-model-close" class="icon-button" type="button" aria-label="关闭模型设置">×</button></div>
+  <div id="agent-settings-tabs" class="agent-settings-tabs" role="group" aria-label="设置分类">
+    <button type="button" data-section="key" aria-pressed="true" aria-controls="agent-model-form">API Key</button>
+    <button type="button" data-section="skills" aria-pressed="false" aria-controls="agent-skills-panel">技能</button>
+    <button type="button" data-section="mcp" aria-pressed="false" aria-controls="agent-mcp-panel">MCP</button>
+  </div>
+  <form id="agent-model-form">
+    <label><span>API Key <span id="agent-key-indicator" class="badge success" hidden>已保存</span></span><input id="agent-api-key" type="password" maxlength="1024" autocomplete="off" spellcheck="false" placeholder="输入你的 DeepSeek API Key"></label>
+    <p id="agent-model-error" class="inline-error" role="alert"></p>
+    <div class="dialog-actions"><button id="agent-model-save" class="primary" type="submit">保存设置</button></div>
+  </form>
+  <div id="agent-extensions-panel" hidden>
+    <section id="agent-skills-panel" hidden>
+      <div class="agent-extension-heading">
+        <h3>已安装技能</h3>
+        <div id="agent-skill-actions" class="agent-extension-toolbar">
+          <button id="agent-skill-add" class="primary agent-extension-icon-action" type="button" title="新增技能" aria-label="新增技能" aria-controls="agent-skill-add-menu" aria-expanded="false"><i data-lucide="plus"></i></button>
+          <div id="agent-skill-add-menu" class="report-menu composer-menu" popover role="group" aria-label="新增技能">
+            <button id="agent-skill-import" class="report-option" type="button"><i data-lucide="upload"></i>本地导入技能</button>
+            <button id="agent-skill-create" class="report-option" type="button"><i data-lucide="message-square"></i>对话创建技能</button>
+          </div>
+        </div>
+      </div>
+      <input id="agent-skill-file" type="file" accept=".zip" hidden>
+      <div id="agent-skill-drop" class="agent-skill-drop">
+        <ul id="agent-skill-list" class="agent-extension-list"></ul>
+        <p id="agent-skill-empty" class="agent-extension-empty" hidden>将技能文件夹或 ZIP 拖到这里</p>
+      </div>
+      <section id="agent-skill-builder" class="agent-extension-detail" aria-label="对话创建技能" hidden>
+        <div class="agent-extension-heading"><h3>对话创建技能</h3><button id="agent-skill-close-builder" type="button">返回列表</button></div>
+        <div id="agent-skill-chat" class="agent-skill-chat" role="log" aria-label="技能创建对话"></div>
+        <div id="agent-skill-draft" hidden>
+          <label><span id="agent-skill-draft-name">技能草稿</span><select id="agent-skill-draft-files"></select></label>
+          <pre id="agent-skill-draft-preview" class="agent-skill-preview"></pre>
+          <div class="agent-extension-actions"><button id="agent-skill-install" class="primary" type="button">安装技能</button></div>
+        </div>
+        <form id="agent-skill-chat-form">
+          <textarea id="agent-skill-prompt" aria-label="描述技能需求" placeholder="描述你希望这个技能做什么…" maxlength="4000" rows="2" required></textarea>
+          <div class="agent-extension-actions"><button id="agent-skill-send" type="submit">发送</button></div>
+        </form>
+      </section>
+    </section>
+    <section id="agent-mcp-panel" hidden>
+      <div id="agent-mcp-library">
+        <div class="agent-extension-heading">
+          <h3>已添加的服务</h3>
+          <div class="agent-extension-toolbar"><button id="agent-mcp-add" class="primary agent-extension-icon-action" type="button" title="添加 MCP 服务" aria-label="添加 MCP 服务"><i data-lucide="plus"></i></button></div>
+        </div>
+        <ul id="agent-mcp-list" class="agent-extension-list"></ul>
+        <p id="agent-mcp-empty" class="agent-extension-empty" hidden>还没有添加 MCP 服务</p>
+      </div>
+      <form id="agent-mcp-form" class="agent-extension-detail" aria-labelledby="agent-mcp-editor-heading" hidden>
+        <div class="agent-extension-heading"><h3 id="agent-mcp-editor-heading"></h3><button id="agent-mcp-back" class="agent-extension-icon-action" type="button" title="返回列表" aria-label="返回列表"><i data-lucide="arrow-left"></i></button></div>
+        <label>名称<input name="label" required maxlength="80"></label>
+        <label>服务地址<input name="url" type="url" required maxlength="1000" placeholder="https://example.com/mcp"></label>
+        <label>访问令牌<input name="token" type="password" maxlength="4096" autocomplete="off" placeholder="选填"></label>
+        <div class="agent-extension-actions">
+          <button name="remove" class="agent-extension-icon-action" type="button" title="删除服务" aria-label="删除服务"><i data-lucide="trash-2"></i></button>
+          <button name="test" class="agent-extension-icon-action agent-mcp-test" type="button" title="测试连接" aria-label="测试连接"><i class="agent-mcp-test-icon" data-lucide="plug-zap"></i><i class="agent-mcp-test-spinner" data-lucide="loader-circle"></i></button>
+          <button class="primary agent-extension-icon-action" type="submit" title="保存服务" aria-label="保存服务"><i data-lucide="save"></i></button>
+        </div>
+      </form>
+    </section>
+    <p id="agent-extensions-result" role="status" class="context-note"></p>
+    <p id="agent-extensions-error" role="alert" class="inline-error"></p>
+  </div>
+</dialog>
+<script defer src="/marked.js"></script><script defer src="/purify.js"></script><script defer src="/markdown.js"></script><script defer src="/report.js"></script><script defer src="/activity.js"></script><script defer src="/agent.js"></script></body></html>

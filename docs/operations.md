@@ -134,6 +134,7 @@ saplink logs clear --older-than-days 30 --yes --json
 | HTTP 401 | 核对 MCP Bearer 令牌是否缺失、撤销或混用了管理凭据 |
 | HTTP 403 | 核对是否用了 localhost、错误 Host 或携带 Origin；SAP tool 内部 403 需看其错误类别 |
 | GET /mcp 返回 405 | 正常：当前没有 GET 事件流，使用支持 POST JSON 响应的 Streamable HTTP 客户端 |
+| CLI 提示捆绑 Node.js 缺失或进程无法启动 | 保留完整错误和退出码，核对实际启动器路径及其安装目录中的 `runtime\node.exe`、`app\dist\cli.js` 是否存在且可访问；2.1.0 会将多种启动异常误报为 Node.js 缺失，不能仅凭该提示判断文件丢失。同一终端可用已核实的捆绑 Node 直接运行 CLI 入口的 `version --json` 比较；若直接运行成功而启动器失败，还需核查环境中的进程、权限及工作目录限制。不要自行覆盖文件或放宽安全策略。新版启动器会区分文件不可访问与 Windows 进程启动错误并报告错误码。 |
 | 无法添加/编辑连接 | 检查 UI/CLI 是否持有运行锁；先正常停止进程 |
 | `WRITE_DISABLED` | 经用户授权后由管理员在本地启用该连接写入 |
 | `AUTH_FAILED` | 更新 SAP 凭据，重新测试；勿反复重试错误密码 |

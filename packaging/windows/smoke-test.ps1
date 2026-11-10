@@ -54,6 +54,9 @@ try {
   [IO.File]::WriteAllText((Join-Path $config 'runtime.lock'), $staleRecord, [Text.UTF8Encoding]::new($false))
   Write-Host "Installing ($Architecture) into $install"
   Assert-True ((Run-Installer) -eq 0) 'Silent install failed.'
+  foreach ($skill in @('saplink-skill-creator','saplink-assistant')) {
+    Assert-True (Test-Path -LiteralPath (Join-Path $install "app\skills\$skill\SKILL.md") -PathType Leaf) "Bundled assistant skill is missing: $skill."
+  }
   & {
     Assert-True (Test-Path -LiteralPath (Join-Path $install 'runtime\java\bin\java.exe')) 'Bundled RFC Java is missing.'
     Assert-True (Test-Path -LiteralPath (Join-Path $install 'runtime\java\legal\java.base\LICENSE')) 'Java legal notices are missing.'

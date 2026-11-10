@@ -9,7 +9,7 @@ const submitSource = source.slice(source.indexOf('connectionForm.onsubmit ='), s
 function screen() {
   const elements: Record<string, any> = Object.fromEntries(Object.entries({ name: 'test', transport: 'http', base_url: 'https://sap.test',
     client: '001', username: 'TEST', language: 'EN', rfc_ashost: 'internal.sap', rfc_sysnr: '00',
-    rfc_saprouter: ' /H/router.example/S/3299 ', password: 'synthetic-secret', write_enabled: '' })
+    rfc_saprouter: ' /H/router.example/S/3299 ', password: 'synthetic-secret', write_enabled: '', allow_table_data: '' })
     .map(([key, value]) => [key, { value, disabled: false, required: false, checked: false }]));
   const button = { disabled: false }, form = { elements, querySelector: () => button };
   const nodes = new Map<string, any>([['#connection-form', form]]);
@@ -30,13 +30,17 @@ test('connection form sends only the selected transport and restores routed RFC 
   assert.equal(f.elements.rfc_ashost.disabled, true); assert.equal(f.elements.rfc_saprouter.disabled, true);
   assert.equal(f.elements.base_url.required, true);
   assert.equal(f.nodes.get('#sap-logon-import').hidden, true);
+  assert.equal(f.nodes.get('#open-rfc-environment').hidden, true);
   await f.submit();
   assert.equal(f.calls[0].data.rfc, undefined);
+  assert.equal(f.calls[0].data.write_enabled, false);
+  assert.equal(f.calls[0].data.allow_table_data, false);
   f.elements.transport.value = 'rfc'; f.update();
   assert.equal(f.nodes.get('#saprouter-field').hidden, false);
   assert.equal(f.elements.rfc_ashost.required, true); assert.equal(f.elements.rfc_sysnr.required, true);
   assert.equal(f.elements.rfc_saprouter.required, false);
   assert.equal(f.nodes.get('#sap-logon-import').hidden, false);
+  assert.equal(f.nodes.get('#open-rfc-environment').hidden, false);
   assert.equal(f.nodes.get('#connection-url-field').hidden, true);
   assert.equal(f.elements.base_url.disabled, true); assert.equal(f.elements.base_url.required, false);
   await f.submit();

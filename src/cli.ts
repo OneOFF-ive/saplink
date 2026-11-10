@@ -3,10 +3,12 @@ import { Command, CommanderError } from 'commander';
 import { input, password, confirm, select } from '@inquirer/prompts';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { open, readFile, unlink } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { appVersion } from './version.js';
-import { ConfigStore, WindowsCredentials, connectionSchema, connectionBaseUrl, connectionIdentityChanged, type Connection } from './config.js';
+import { ConfigStore, WindowsCredentials, connectionSchema, connectionBaseUrl, connectionIdentityChanged, connectionTargetChanged, writePolicy, type Connection } from './config.js';
 import { AdtBackend } from './adt.js';
 import { AppError } from './errors.js';
 import { acquireLease } from './lease.js';
@@ -19,6 +21,7 @@ import { cleanupLogs, retentionDays } from './log-cleanup.js';
 import { checkForUpdate, startRuntimeUpdateChecks } from './updates.js';
 import { SelfUpdater } from './self-update.js';
 import { registerSapCli } from './sap-cli.js';
+import { defaultMcpPort, defaultUiPort } from './paths.js';
 
 const store = new ConfigStore();
 const credentials = new WindowsCredentials();
@@ -26,6 +29,11 @@ const jsonOutput = process.argv.includes('--json');
 const cli = new Command().name('saplink').description('SapLink: direct SAP CLI, local MCP server and lifecycle manager')
   .version(appVersion).option('--json', 'Return one JSON result; never prompt in the terminal')
   .exitOverride().configureOutput({ writeErr: text => { if (!jsonOutput) process.stderr.write(text); } });
+
+cli.hook('preAction', () => {
+  if (!process.env.SAPLINK_CONFIG_DIR && existsSync(fileURLToPath(new URL('../scripts/dev-environment.mjs', import.meta.url))))
+    throw new AppError('DEV_CONFIG_REQUIRED', '源码运行必须使用隔离预览入口 npm run dev，或显式指定 SAPLINK_CONFIG_DIR。');
+});
 
 cli.hook('postAction', (_command, action) => {
   if (!['serve', '_run'].includes(action.name())) return;
@@ -49,6 +57,7 @@ async function mutate<T>(action: () => Promise<T>, connectionChange = true): Pro
 type ConnectionOptions = {
   url?: string; client?: string; username?: string; language?: string;
   enableWrites?: boolean; disableWrites?: boolean; passwordPrompt?: boolean;
+  enableTableData?: boolean; disableTableData?: boolean;
   transport?: string; rfcAshost?: string; rfcSysnr?: string; rfcSaprouter?: string; clearRfcSaprouter?: boolean; httpTransport?: boolean;
 };
 
@@ -57,7 +66,7 @@ function addConnectionOptions(command: Command) {
     .option('--client <client>', 'Three-digit SAP Client, preserving leading zeros')
     .option('--username <username>', 'SAP login username')
     .option('--language <language>', 'Two-letter language, e.g. EN')
-    .option('--transport <http|rfc>', 'Connection transport; existing connections preserve their configured transport')
+    .option('--transport <http|rfc>', 'Connection transport; an existing connection target cannot be changed')
     .option('--rfc-ashost <host>', 'Use ADT over RFC via this application server')
     .option('--rfc-sysnr <number>', 'Two-digit RFC system number; required with a new RFC host')
     .option('--rfc-saprouter <route>', 'Optional non-secret SAProuter hops, e.g. /H/router.example/S/3299')
@@ -65,11 +74,14 @@ function addConnectionOptions(command: Command) {
     .option('--http-transport', 'Use HTTP transport and remove RFC settings')
     .option('--enable-writes', 'Explicitly enable writes on this connection')
     .option('--disable-writes', 'Disable writes on this connection')
+    .option('--enable-table-data', 'Allow table-data query tools on this connection')
+    .option('--disable-table-data', 'Deny table-data query tools on this connection')
     .option('--password-prompt', 'Ask the human for the password in a local Windows dialog');
 }
 
 async function connectionInput(name: string, options: ConnectionOptions, old?: Connection) {
   if (options.enableWrites && options.disableWrites) throw new AppError('INVALID_INPUT', 'Choose either --enable-writes or --disable-writes.');
+  if (options.enableTableData && options.disableTableData) throw new AppError('INVALID_INPUT', 'Choose either --enable-table-data or --disable-table-data.');
   if (options.transport !== undefined && !['http', 'rfc'].includes(options.transport)) throw new AppError('INVALID_INPUT', 'Transport must be http or rfc.');
   const hasRfcOptions = options.rfcAshost !== undefined || options.rfcSysnr !== undefined || options.rfcSaprouter !== undefined || options.clearRfcSaprouter;
   if ((options.httpTransport || options.transport === 'http') && (hasRfcOptions || options.transport === 'rfc'))
@@ -82,19 +94,24 @@ async function connectionInput(name: string, options: ConnectionOptions, old?: C
   const interactive = !jsonOutput && Boolean(process.stdin.isTTY) && !hasOptions;
   let fields;
   if (interactive) {
-    transport = await select({ message: 'Connection type:', default: !old || old.rfc ? 'rfc' : 'http',
-      choices: [{ name: 'RFC / JCo', value: 'rfc' }, { name: 'HTTP / HTTPS', value: 'http' }] });
-    rfc = transport === 'rfc' ? {
-      ashost: await input({ message: 'RFC application server:', default: old?.rfc?.ashost }),
-      sysnr: await input({ message: 'RFC system number (two digits):', default: old?.rfc?.sysnr ?? '00' }),
-      saprouter: await input({ message: 'SAProuter route (optional, e.g. /H/router/S/3299; no route passwords):', default: old?.rfc?.saprouter })
-    } : undefined;
+    if (!old) {
+      transport = await select({ message: 'Connection type:', default: 'rfc',
+        choices: [{ name: 'RFC / JCo', value: 'rfc' }, { name: 'HTTP / HTTPS', value: 'http' }] });
+      rfc = transport === 'rfc' ? {
+        ashost: await input({ message: 'RFC application server:' }),
+        sysnr: await input({ message: 'RFC system number (two digits):', default: '00' }),
+        saprouter: await input({ message: 'SAProuter route (optional, e.g. /H/router/S/3299; no route passwords):' })
+      } : undefined;
+    }
+    const policy = await select({ message: 'Connection write policy:', default: old ? writePolicy(old) : 'disabled',
+      choices: [{ name: '禁止写入', value: 'disabled' }, { name: '允许写入', value: 'enabled' }] });
     fields = {
-      base_url: transport === 'rfc' ? undefined : await input({ message: 'ADT server URL (HTTPS recommended):', default: old?.rfc ? undefined : old?.base_url }),
+      base_url: old?.base_url ?? (transport === 'rfc' ? undefined : await input({ message: 'ADT server URL (HTTPS recommended):' })),
       client: await input({ message: 'Client (three digits):', default: old?.client ?? '100' }),
       username: await input({ message: 'SAP username:', default: old?.username }),
       language: (await input({ message: 'Language:', default: old?.language ?? 'EN' })).toUpperCase(),
-      write_enabled: await confirm({ message: 'Enable program writes?', default: old?.write_enabled ?? false })
+      write_enabled: policy !== 'disabled',
+      allow_table_data: await confirm({ message: 'Allow table-data query tools?', default: old?.allow_table_data ?? false })
     };
   } else {
     if (!old && ((transport === 'http' && !options.url) || !options.client || !options.username)) {
@@ -103,12 +120,16 @@ async function connectionInput(name: string, options: ConnectionOptions, old?: C
     fields = {
       base_url: options.url ?? (transport === 'http' ? old?.base_url : undefined), client: options.client ?? old?.client,
       username: options.username ?? old?.username, language: (options.language ?? old?.language ?? 'EN').toUpperCase(),
-      write_enabled: options.enableWrites ? true : options.disableWrites ? false : old?.write_enabled ?? false
+      write_enabled: options.enableWrites ? true : options.disableWrites ? false : old?.write_enabled ?? false,
+      allow_table_data: options.enableTableData ? true : options.disableTableData ? false : old?.allow_table_data ?? false
     };
   }
   const validatedRfc = connectionSchema.pick({ rfc: true }).parse({ rfc }).rfc;
   const connection = connectionSchema.parse({ ...fields, base_url: connectionBaseUrl(fields.base_url, validatedRfc, old),
-    ...(validatedRfc ? { rfc: validatedRfc } : {}), name, connection_id: old?.connection_id ?? randomUUID() });
+    ...(validatedRfc ? { rfc: validatedRfc } : {}),
+    name, connection_id: old?.connection_id ?? randomUUID() });
+  if (old && connectionTargetChanged(old, connection))
+    throw new AppError('CONNECTION_TARGET_IMMUTABLE', 'Existing connection targets cannot be changed; create a new connection instead.');
   const identityChanged = Boolean(old && connectionIdentityChanged(old, connection));
   let replacePassword = !old || identityChanged || Boolean(options.passwordPrompt);
   if (interactive && old && !identityChanged) replacePassword = await confirm({ message: 'Replace stored password?', default: false });
@@ -166,7 +187,7 @@ updates.command('install').option('--yes', 'Confirm download, graceful stop and 
 cli.command('status').description('Inspect configuration and process state without returning credentials')
   .action(async () => printSuccess(await installationStatus(store), jsonOutput));
 cli.command('doctor').description('Diagnose local setup; SAP probing is opt-in with --connection')
-  .option('--port <port>', 'Port to check when stopped', '8765').option('--connection <name>', 'Also test this SAP login and ADT discovery')
+  .option('--port <port>', 'Port to check when stopped', String(defaultMcpPort())).option('--connection <name>', 'Also test this SAP login and ADT discovery')
   .action(async options => {
     const result = await doctor(store, credentials, parsePort(options.port), options.connection);
     printSuccess(result, jsonOutput);
@@ -210,7 +231,7 @@ mcp.command('restart').option('--port <port>', 'MCP port; omitted preserves the 
 
 const service = cli.command('service').description('Compatibility commands: start/restart host with MCP, stop the whole host; prefer app/mcp');
 service.command('status').action(async () => printSuccess(await serviceStatus(store.directory), jsonOutput));
-service.command('start').option('--port <port>', 'MCP port', '8765').action(async options => {
+service.command('start').option('--port <port>', 'MCP port', String(defaultMcpPort())).action(async options => {
   if (!(await store.load()).tokens.length) throw new AppError('TOKEN_REQUIRED', 'Create a token with token create --out <file> --json before starting.');
   printSuccess(await startService(store.directory, parsePort(options.port)), jsonOutput);
 });
@@ -219,7 +240,7 @@ service.command('restart').option('--port <port>', 'New MCP port; omitted preser
   if (!(await store.load()).tokens.length) throw new AppError('TOKEN_REQUIRED', 'Create a token before restarting.');
   printSuccess(await restartService(store.directory, options.port ? parsePort(options.port) : undefined), jsonOutput);
 });
-service.command('_run', { hidden: true }).option('--port <port>', 'MCP port', '8765')
+service.command('_run', { hidden: true }).option('--port <port>', 'MCP port', String(defaultMcpPort()))
   .action(async options => runManagedService(store, credentials, parsePort(options.port)));
 
 const connections = cli.command('connection').description('Manage local SAP connections');
@@ -349,7 +370,7 @@ cli.command('client-config').description('Export portable connection parameters,
       throw new AppError('TOKEN_FILE_INVALID', 'Token is missing, revoked, or belongs to another configuration directory.');
     }
     const state = await serviceStatus(store.directory);
-    const port = options.port ? parsePort(options.port) : state.port ?? 8765;
+    const port = options.port ? parsePort(options.port) : state.port ?? defaultMcpPort();
     const url = `http://127.0.0.1:${port}/mcp`;
     const path = resolve(options.out);
     const file = await open(path, 'wx', 0o600);
@@ -361,7 +382,7 @@ cli.command('client-config').description('Export portable connection parameters,
   });
 
 cli.command('ui').description('Open the interactive local management interface')
-  .option('--port <port>', 'Management port', process.env.SAPLINK_UI_PORT ?? '8766').option('--no-open', 'Do not launch a browser')
+  .option('--port <port>', 'Management port', process.env.SAPLINK_UI_PORT ?? String(defaultUiPort())).option('--no-open', 'Do not launch a browser')
   .action(async options => {
     if (jsonOutput) throw new AppError('INTERACTION_REQUIRED', 'ui opens an interactive management session. Use app start/status/stop --json for automation.');
     const port = parsePort(options.port);
@@ -393,7 +414,7 @@ cli.command('ui').description('Open the interactive local management interface')
 
   });
 cli.command('serve').description('Run MCP in the foreground; use mcp start for background automation')
-  .option('--port <port>', 'MCP port', '8765').action(async options => {
+  .option('--port <port>', 'MCP port', String(defaultMcpPort())).action(async options => {
     if (jsonOutput) throw new AppError('INTERACTION_REQUIRED', 'serve stays attached to the terminal. Use mcp start --json for background startup.');
     const port = parsePort(options.port);
     if (!(await store.load()).tokens.length) throw new AppError('TOKEN_REQUIRED', 'Create a token before starting.');
@@ -412,7 +433,8 @@ catch (error) {
   else {
     const failure = error instanceof CommanderError
       ? new AppError('INVALID_ARGUMENTS', 'Unknown or missing option. Use --help; never pass passwords as command arguments.') : error;
-    if (process.argv.includes('_run')) await reportStartupFailure(store.directory, failure).catch(() => {});
+    if (process.argv.includes('_run') && !(failure instanceof AppError && failure.code === 'DEV_CONFIG_REQUIRED'))
+      await reportStartupFailure(store.directory, failure).catch(() => {});
     printFailure(failure, jsonOutput);
   }
 }

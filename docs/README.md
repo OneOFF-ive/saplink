@@ -14,6 +14,7 @@
 | 管理宿主、MCP、令牌与 CLI 工作流 | [AI 终端管理](ai-management.md) |
 | 查询技能支持的全部公开 CLI 命令 | [技能命令目录](../skills/saplink-manager/references/commands.md) |
 | 理解模块、会话、锁和版本保护 | [架构文档](architecture.md) |
+| SAP 助手使用、运行时与任务接口 | [Agent Runtime](agent-runtime.md) |
 | 配置可选的 RFC/JCo 传输与验证范围 | [ADT over RFC](rfc-transport.md) |
 | 运行源码、测试与构建安装包 | [开发与构建指南](development.md) |
 | 本地发布、Actions 暂停/恢复及 COS 同步 | [发布与 GitHub Actions](releases-and-actions.md) |
@@ -29,7 +30,7 @@
 
 ## 建议阅读顺序
 
-普通用户先按安装指南安装，在默认“连接配置”首页添加并测试 SAP 连接，再将 SapLink 技能导入支持本机命令的 AI 客户端，通过 CLI 使用 SAP。MCP 及访问令牌留作可选进阶功能。运维手册统一使用安装后的 `saplink` 命令，不要求下载源码。agent 阅读客户端操作手册，按任务选择流程。开发者从开发与构建指南开始，再查阅架构和技术参考。
+普通用户先按安装指南安装，在“连接配置”页面添加并测试 SAP 连接，再将 SapLink 技能导入支持本机命令的 AI 客户端，通过 CLI 使用 SAP。当前源码开发预览默认打开“SAP 助手”；MCP 及访问令牌留作可选进阶功能。运维手册统一使用安装后的 `saplink` 命令，不要求下载源码。agent 阅读客户端操作手册，按任务选择流程。开发者从开发与构建指南开始，再查阅架构和技术参考。
 
 文档内连接 ID、对象 URI、revision、传输任务和令牌示例均不是现成环境配置；真实调用必须使用运行结果。安装和模拟测试通过不代表真实 SAP 联调通过。
 

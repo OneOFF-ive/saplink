@@ -1,6 +1,8 @@
 const $ = selector => document.querySelector(selector);
 const icons = () => window.lucide?.createIcons();
 const sessionKey = 'saplink-admin-session';
+const initialPage = new URLSearchParams(location.search);
+if (initialPage.get('dev') === '1') document.title = 'SapLink 3.0 · 开发预览';
 const freshKey = location.hash.slice(1);
 if (freshKey) { sessionStorage.setItem(sessionKey, freshKey); history.replaceState(null, '', '/'); }
 const adminKey = sessionStorage.getItem(sessionKey);
@@ -8,7 +10,7 @@ let state = { connections: [], tokens: [], running: false, mcp_port: 8765 };
 let editing;
 let working = false;
 const tests = new Map();
-const labels = { connections: '连接配置', tokens: '访问令牌', service: 'MCP 服务', updates: '软件更新' };
+const labels = { agent: '工作空间', connections: '连接配置', service: 'MCP 服务', updates: '系统设置' };
 let toastTimer;
 function toast(message, error = false) { const node = $('#toast'); node.textContent = message; node.className = error ? 'error' : '';
   node.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { node.hidden = true; }, 5000); }
@@ -116,11 +118,13 @@ $('#install-update').onclick = () => {
 function render() {
   $('#app-version').textContent = state.version ? `SapLink ${state.version}` : 'SapLink';
   renderUpdate();
-  const query = $('#search').value.toLowerCase();
+  const query = $('#search').value.trim().toLowerCase();
   const connections = state.connections.filter(c => [c.name, c.base_url, c.username, c.rfc?.ashost ?? '', c.rfc?.saprouter ?? ''].some(v => v.toLowerCase().includes(query)));
   $('#connection-count').textContent = state.connections.length;
   $('#connection-total').textContent = `${state.connections.length} 个连接`;
   $('#empty-connections').hidden = connections.length !== 0;
+  $('#empty-connections h2').textContent=query?'未找到匹配连接':'暂无系统连接';
+  $('#empty-add').hidden=Boolean(query);
   $('#connections-view .table-wrap').hidden = connections.length === 0;
   const rows = $('#connection-rows'); rows.replaceChildren();
   for (const c of connections) {
@@ -133,10 +137,12 @@ function render() {
     const url = element('div', connectionAddress, 'address'); url.title = connectionAddress; address.append(url);
     if (c.rfc?.saprouter) { const route = element('small', '经 SAProuter'); route.title = c.rfc.saprouter; address.append(route); }
     const login = element('td'); login.append(element('strong', c.client), element('small', c.username));
-    const access = element('td'); access.append(badge(c.write_enabled ? '允许写入' : '只读', c.write_enabled ? 'writable' : 'neutral'));
+    const access = element('td'); access.append(badge(c.write_enabled ? '允许写入' : '禁止写入',
+      c.write_enabled ? 'writable' : 'neutral'));
     const test = element('td'); const result = tests.get(c.connection_id);
     test.append(badge(result?.label ?? '未测试', result?.kind ?? 'neutral')); if (result?.message) test.title = result.message;
     const actions = element('td'); const group = element('div', undefined, 'row-actions');
+    for(const [cell,label] of [[address,'连接地址'],[login,'Client / 用户'],[access,'访问模式'],[test,'连接状态']])cell.dataset.label=label;
     group.append(buttonIcon('plug-zap', '测试连接', () => testConnection(c), working),
       buttonIcon('pencil', '编辑连接', () => openConnection(c), working || state.running),
       buttonIcon('trash-2', '删除连接', () => confirmAction('删除连接', `删除 ${c.name} 及其保存的凭据？`, () => act(() => api(`connections/${c.connection_id}`, 'DELETE'))), working || state.running, true));
@@ -152,7 +158,7 @@ function render() {
   }
   $('#empty-tokens').hidden = state.tokens.length !== 0;
   $('#tokens-view .table-wrap').hidden = state.tokens.length === 0;
-  $('#top-status').textContent = state.running ? 'CLI · MCP 已启用' : 'CLI 模式';
+  $('#top-status').textContent = !$('#agent-view').hidden ? '只读 Agent' : state.running ? 'CLI · MCP 已启用' : 'CLI 模式';
   $('#top-status').className = `badge ${state.running ? 'success' : 'neutral'}`;
   $('#service-status').textContent = state.running ? '运行中' : '已停止';
   $('#service-status').className = `badge ${state.running ? 'success' : 'neutral'}`;
@@ -187,15 +193,16 @@ function openConnection(connection) {
     form.elements[key].value = values[key];
   }
   form.elements.write_enabled.checked = values.write_enabled;
+  form.elements.allow_table_data.checked = values.allow_table_data === true;
   form.elements.transport.value = !connection || values.rfc ? 'rfc' : 'http';
   form.elements.rfc_ashost.value = values.rfc?.ashost ?? '';
   form.elements.rfc_sysnr.value = values.rfc?.sysnr ?? '';
   form.elements.rfc_saprouter.value = values.rfc?.saprouter ?? '';
   updateRfcFields();
-  form.elements.password.required = !connection; $('#password-hint').hidden = !connection;
-  $('#password-hint').textContent = '留空保留已保存密码；更改连接方式、目标或 SAProuter 路由时需重新输入。';
+  form.elements.password.required = !connection;
   $('#connection-dialog').showModal();
 }
+
 function confirmAction(title, message, action, danger = true) {
   $('#confirm-action').className = danger ? 'danger' : 'primary';
   $('#confirm-title').textContent = title; $('#confirm-message').textContent = message;
@@ -209,18 +216,21 @@ async function testConnection(c) {
 }
 const connectionForm = $('#connection-form');
 function updateRfcFields() {
-  const enabled = $('#connection-form').elements.transport.value === 'rfc';
+  const form = $('#connection-form');
+  const enabled = form.elements.transport.value === 'rfc';
+  const locked = Boolean(editing);
+  form.elements.transport.disabled = locked;
   $('#sap-logon-import').hidden = !enabled || Boolean(editing);
   $('#rfc-fields').hidden = !enabled;
-  $('#rfc-address-hint').hidden = !enabled;
+  $('#open-rfc-environment').hidden = !enabled;
   $('#saprouter-field').hidden = !enabled;
   $('#connection-url-field').hidden = enabled;
-  $('#connection-form').elements.base_url.disabled = enabled;
-  $('#connection-form').elements.base_url.required = !enabled;
-  $('#connection-form').elements.rfc_saprouter.disabled = !enabled;
+  form.elements.base_url.disabled = enabled || locked;
+  form.elements.base_url.required = !enabled && !locked;
+  form.elements.rfc_saprouter.disabled = !enabled || locked;
   for (const name of ['rfc_ashost', 'rfc_sysnr']) {
-    $('#connection-form').elements[name].disabled = !enabled;
-    $('#connection-form').elements[name].required = enabled;
+    form.elements[name].disabled = !enabled || locked;
+    form.elements[name].required = enabled && !locked;
   }
 }
 connectionForm.elements.transport.onchange = updateRfcFields;
@@ -296,14 +306,17 @@ for (const control of connectionForm.querySelectorAll('input, select')) {
 connectionForm.onsubmit = async event => {
   event.preventDefault(); if (working) return;
   const form = event.currentTarget; const fields = Object.fromEntries(new FormData(form));
-  const data = { name: fields.name, ...(fields.transport === 'rfc' ? {} : { base_url: fields.base_url }), client: fields.client, username: fields.username,
+  const target = editing ? { base_url: editing.base_url, ...(editing.rfc ? { rfc: editing.rfc } : {}) }
+    : fields.transport === 'rfc' ? { rfc: { ashost: fields.rfc_ashost, sysnr: fields.rfc_sysnr,
+      ...(fields.rfc_saprouter?.trim() ? { saprouter: fields.rfc_saprouter.trim() } : {}) } } : { base_url: fields.base_url };
+  const data = { name: fields.name, ...target, client: fields.client, username: fields.username,
     language: fields.language, write_enabled: form.elements.write_enabled.checked,
-    ...(fields.transport === 'rfc' ? { rfc: { ashost: fields.rfc_ashost, sysnr: fields.rfc_sysnr,
-      ...(fields.rfc_saprouter?.trim() ? { saprouter: fields.rfc_saprouter.trim() } : {}) } } : {}),
+    allow_table_data: form.elements.allow_table_data.checked,
     ...(fields.password ? { password: fields.password } : {}) };
   working = true; render(); form.querySelector('[type=submit]').disabled = true;
   try { await api(editing ? `connections/${editing.connection_id}` : 'connections', editing ? 'PUT' : 'POST', data);
-    if (editing) tests.delete(editing.connection_id); $('#connection-dialog').close(); await refresh(); toast('连接已保存'); }
+    if (editing) tests.delete(editing.connection_id); $('#connection-dialog').close(); await refresh();
+    toast('连接已保存'); }
   catch (error) {
     $('#form-error').textContent = error.message;
     let firstInvalidControl;
@@ -327,9 +340,12 @@ for (const node of document.querySelectorAll('.close-dialog')) node.onclick = ()
 $('#connection-dialog').addEventListener('close', () => { $('#connection-form').elements.password.value = ''; });
 $('#token-dialog').addEventListener('close', () => { $('#new-token').value = ''; });
 function showView(name) {
+  if(name==='tokens')name='service';
+  document.body.dataset.view = name;
   for (const view of document.querySelectorAll('.view')) view.hidden = view.id !== `${name}-view`;
   for (const item of document.querySelectorAll('.nav')) item.classList.toggle('active', item.dataset.view === name);
   $('#breadcrumb').textContent = labels[name];
+  $('#top-status').textContent = name === 'agent' ? '只读 Agent' : state.running ? 'CLI · MCP 已启用' : 'CLI 模式';
 }
 for (const node of document.querySelectorAll('.nav')) node.onclick = () => showView(node.dataset.view);
 $('#add-connection').onclick = $('#empty-add').onclick = () => openConnection();
@@ -452,11 +468,20 @@ $('#clear-logs').onclick = async () => {
   const days = Number($('#log-days').value);
   const preview = await act(() => api('logs/clear', 'POST', { older_than_days: days, confirm: false }), null);
   if (!preview) return;
-  if (preview.failed_files) { toast('部分日志无法检查，请检查文件权限后重试。', true); return; }
-  if (!preview.eligible_files) { toast('没有符合条件的历史日志，当天日志已保留。'); return; }
-  confirmAction('删除历史日志', `将永久删除 ${preview.eligible_files} 个历史日志文件，共 ${preview.eligible_bytes.toLocaleString()} 字节。当天日志和最近 ${days} 天的日志会保留。此操作无法撤销，是否继续？`, async () => {
+  const failed = preview.failed_files + preview.failed_session_outputs;
+  const candidates = [];
+  if (preview.eligible_files) candidates.push(`${preview.eligible_files} 个历史日志文件`);
+  if (preview.eligible_session_outputs) candidates.push(`来自 ${preview.eligible_session_outputs} 个已删除会话的遗留产出`);
+  if (!candidates.length) {
+    toast(failed ? '部分日志或会话目录无法检查，请检查文件权限后重试。' : '没有可清理的历史日志或已删除会话产出。', Boolean(failed));
+    return;
+  }
+  confirmAction('清理日志与遗留产出', `将永久删除 ${candidates.join('和')}。日志保留天数仅用于日志。此操作无法撤销，是否继续？`, async () => {
     const result = await act(() => api('logs/clear', 'POST', { older_than_days: days, confirm: true }), null);
-    if (result) toast(`已删除 ${result.deleted_files} 个日志文件，释放 ${result.deleted_bytes.toLocaleString()} 字节${result.failed_files ? `；${result.failed_files} 个文件清理失败` : ''}`, result.failed_files > 0);
+    if (result) {
+      const errors = result.failed_files + result.failed_session_outputs;
+      toast(`已清理 ${result.deleted_files} 个日志文件和 ${result.deleted_session_outputs} 个会话的遗留数据${errors ? `，${errors} 项处理失败` : ''}。`, Boolean(errors));
+    }
   });
 };
 $('#stop-service').onclick = () => confirmAction('停止 MCP 服务', '等待正在执行的操作结束后停止服务？', () => act(() => api('service/stop', 'POST'), 'MCP 服务已停止'));

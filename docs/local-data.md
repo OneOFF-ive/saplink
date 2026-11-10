@@ -6,7 +6,9 @@
 | --- | --- |
 | 程序安装目录 | `%LOCALAPPDATA%\Programs\SapLink` |
 | 连接配置和令牌哈希 | `%APPDATA%\saplink\config.json` |
-| CLI 持久写请求标记 | `%APPDATA%\saplink\cli-write-requests\`，随 `SAPLINK_CONFIG_DIR` 更改，不作为缓存清理 |
+| 数据查询分页游标密钥 | 配置目录中的 `table-cursor.key`，首次使用分页时生成，由本机 CLI、助手和 MCP 共用 |
+| 持久写请求标记 | `%APPDATA%\saplink\cli-write-requests\`，CLI 和所有受控操作使用，随 `SAPLINK_CONFIG_DIR` 更改，不作为缓存清理 |
+| 受控审批和结果标记 | `%APPDATA%\saplink\write-approvals\`，含连接及请求指纹、审批终态和结果；操作结果可能含 SAP 元数据、检查结果和诊断，源码审批不保存完整源码；随 `SAPLINK_CONFIG_DIR` 更改，不作为缓存清理 |
 | 托管宿主身份及控制认证 | `%APPDATA%\saplink\managed-service.json`，含私密控制令牌，不展示或分享 |
 | 运行与操作租约 | 配置目录中的 `runtime.lock`、`config.lock`、`service-command.lock` 及其 `.guard`；不手动清理活动锁 |
 | 更新检查缓存 | `%APPDATA%\saplink\update-check.json`，随 `SAPLINK_CONFIG_DIR` 更改 |
@@ -26,9 +28,21 @@
 
 更新缓存只保存 COS/GitHub 发布元数据和检查时间，不含 SAP 凭据、连接或查询结果。有效期为 24 小时；损坏或过期后重新查询，无法写入缓存时仍返回本次检查结果。`saplink update check --force` 可跳过缓存；`saplink cache clear` 只清理 SAP 会话，不清理此文件。
 
-1.0.0 是首个正式版本，只使用上述名称和标识，不提供开发阶段旧名称、旧目录或旧凭据标识的自动迁移。卸载保留用户配置、令牌、日志、凭据和未登记文件。
+同一 Windows 用户在原位置升级时继续使用正式版配置目录和 Windows 凭据命名空间。卸载保留用户配置、令牌、日志、凭据和未登记文件。
 
 安装步骤见 [Windows 安装指南](windows-installer.md)，日常操作见 [运维手册](operations.md)。
+
+## 正式安装版与源码开发预览
+
+| 项目 | 正式安装版默认值 | 源码开发预览默认值 |
+| --- | --- | --- |
+| 配置目录 | `%APPDATA%\saplink` | `%APPDATA%\saplink-3.0-dev` |
+| 日志目录 | `%LOCALAPPDATA%\saplink\logs` | `%APPDATA%\saplink-3.0-dev\logs` |
+| 管理端口 | 8766 | 18766 |
+| MCP 端口（启用时） | 8765 | 18765 |
+| Windows 凭据命名空间 | `saplink` | `saplink-3.0-dev` |
+
+两种环境各自保存连接、令牌和助手数据。助手的模型配置和会话保存在各自配置目录的 `agent/` 下，DeepSeek API Key 保存在 Windows 凭据管理器中。正式安装或升级不会自动导入开发预览数据。使用自定义路径或端口时，以对应环境的实际状态为准。
 
 ## 项目目录与清理边界
 
@@ -36,4 +50,4 @@
 
 项目 `.saplink/tests/` 用于隔离测试及本地联调的临时文件。确认相关测试已结束后，可清理已识别的临时参数、预览脚本和空测试目录；不依据目录名称批量终止进程或删除锁。`dist/` 和 `node_modules/` 分别是当前构建结果与开发依赖，日常整理无需删除。`outputs/` 中的安装包、技能 ZIP 和 `.sha256` 是可交付产物，应按需要保留对应版本及校验文件。
 
-项目测试目录不同于用户配置目录。清理项目文件不授权删除 Windows 凭据、真实连接、审计日志、更新任务或 `cli-write-requests`；尤其不能通过删除写请求标记来重试 SAP 写入。
+项目测试目录不同于用户配置目录。清理项目文件不授权删除 Windows 凭据、真实连接、审计日志、更新任务、`cli-write-requests` 或 `write-approvals`；尤其不能通过删除请求或审批标记来重试 SAP 写入。审批标记保留，即使审批已过期；相关任务附件可能包含源码，应按敏感数据保护。

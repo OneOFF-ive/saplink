@@ -2,6 +2,12 @@
 
 使用已核实的安装版 `saplink`；PATH 未刷新时用启动器绝对路径。不直接改写连接 JSON 或 UUID。
 
+## 区分正式安装版与源码预览
+
+用目标环境的 `status --json` 核对配置目录，用 `app status --json` 和 `mcp status --json` 核对实际端口。正式版默认使用 `%APPDATA%\saplink`、管理端口 8766 和 MCP 端口 8765。源码预览默认使用 `%APPDATA%\saplink-3.0-dev`、18766 和 18765，从源码目录通过 `npm run dev -- <参数>` 操作。两边使用不同的 Windows 凭据命名空间，可以同时运行。
+
+只操作用户指定的环境。发现正式版缺少预览中已有的连接、会话或 DeepSeek API Key 时，先核实环境。需要在正式版使用助手时，由用户在正式版「模型设置」录入密钥，避免复制预览配置、凭据或写入记录。
+
 ## 状态与诊断
 
 ```powershell
@@ -37,7 +43,7 @@ saplink connection add dev --transport rfc --rfc-ashost sap-host --rfc-sysnr 00 
 
 全部命令见[命令目录](commands.md)。`app start/stop/status/restart` 管理常驻宿主，`mcp start/stop/status/restart` 仅管理 MCP；前者的 `--port` 指管理端口，后者指 MCP 端口。`app start` 默认只启动管理监听，不需要令牌；`mcp stop` 保留宿主和界面，`app stop` 关闭宿主及 MCP，不终止独立 CLI SAP 进程。
 
-`ui` 会启动或复用托管宿主，打开默认的连接配置首页；关闭浏览器或 UI 附着命令不会关闭宿主。正常退出用 `app stop` 或托盘退出。重启宿主保留 MCP 原启用状态和端口，不把原本只用 CLI 的环境变为 MCP 模式。用户只要求 SAP 查询时不启动任何宿主。
+`ui` 会启动或复用托管宿主，并打开管理页面。包含 SAP 助手的版本默认打开「工作空间」，可从顶部切换到「连接配置」。关闭浏览器或 UI 附着命令不会关闭宿主。正常退出用 `app stop` 或托盘退出。重启宿主保留 MCP 原启用状态和端口，不把原本只用 CLI 的环境变为 MCP 模式。用户只要求 SAP 查询时不启动任何宿主。
 
 ## 配置锁与正常退出
 

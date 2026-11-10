@@ -11,6 +11,15 @@ import { safeError } from '../src/errors.js';
 const object = '/sap/bc/adt/oo/classes/ztest';
 const sourceUri = `${object}/source/main`;
 const code = 'CLASS ztest DEFINITION.\r\nENDCLASS.';
+const bindingUri = '/sap/bc/adt/businessservices/bindings/ztest_binding';
+const definitionUri = '/sap/bc/adt/ddic/srvd/sources/ztest_definition';
+const bindingXml = `<srvb:serviceBinding xmlns:srvb="http://www.sap.com/adt/ddic/ServiceBindings" xmlns:adtcore="http://www.sap.com/adt/core" adtcore:type="SRVB/SVB" adtcore:name="ZTEST_BINDING">
+<srvb:services srvb:name="ZTEST_SERVICE">
+  <srvb:content srvb:version="0001"><srvb:serviceDefinition adtcore:name="ZTEST_DEFINITION" adtcore:uri="${definitionUri}"/></srvb:content>
+  <srvb:content srvb:version="0002"><srvb:serviceDefinition adtcore:name="ZTEST_DEFINITION" adtcore:uri="https://example.invalid"/></srvb:content>
+</srvb:services>
+<srvb:binding srvb:type="ODATA" srvb:version="V4" srvb:category="0"/>
+</srvb:serviceBinding>`;
 const domainXml = `<doma:domain xmlns:doma="http://www.sap.com/adt/ddic/domains" xmlns:adtcore="http://www.sap.com/adt/core" adtcore:name="ZSTATUS" adtcore:description="Status" adtcore:language="EN">
 <doma:content><doma:typeInformation><doma:datatype>CHAR</doma:datatype><doma:length>3</doma:length></doma:typeInformation>
 <doma:valueInformation><doma:valueTableRef adtcore:name="ZT_STATUS"/><doma:fixValues>
@@ -46,6 +55,8 @@ async function fixture(status = 200, ddlBody?: string, genericBody?: string, gen
         <abapsource:entry abapsource:key="ddicLabelLong">Purchasing Document</abapsource:entry>
         </abapsource:properties></abapsource:elementInfo></abapsource:elementInfo>`); break;
       case '/sap/bc/adt/ddic/domains/zstatus': res.end(domainXml); break;
+      case bindingUri: res.end(bindingXml); break;
+      case '/sap/bc/adt/businessservices/bindings/zwrong': res.end(bindingXml); break;
       case '/sap/bc/adt/ddic/dataelements/zstatus':
         res.end(`<dtel:dataElementDefinition xmlns:dtel="http://www.sap.com/adt/ddic/dataelements" xmlns:adtcore="http://www.sap.com/adt/core" adtcore:name="ZSTATUS">
         <dtel:dataElement><dtel:typeName>ZSTATUS</dtel:typeName><dtel:dataType>CHAR</dtel:dataType><dtel:dataTypeLength>3</dtel:dataTypeLength><dtel:shortFieldLabel>Status</dtel:shortFieldLabel></dtel:dataElement></dtel:dataElementDefinition>`); break;
@@ -139,6 +150,36 @@ test('DDIC, data element, domain and OO queries use stateless read-only HTTP and
     await f.backend.inspectRepository('get_class_structure', { object_uri: '/sap/bc/adt/oo/interfaces/zif_test' });
     assert.ok(f.calls.every(c => c.method === 'GET' && c.session === 'stateless'));
     assert.equal(f.calls[2].url.searchParams.get('version'), 'active');
+  } finally { await f.close(); }
+});
+
+test('OData binding reads only active ADT metadata and preserves linked service versions', async () => {
+  const f = await fixture();
+  try {
+    const read = (uri: string, limit?: number) =>
+      f.backend.inspectRepository('get_odata_service_binding', { object_uri: uri, limit }) as Promise<{
+        protocol_version: string; items: { version: string; service_definition_uri?: string }[];
+        truncated: boolean; returned_count: number;
+      }>;
+    const bounded = await read(bindingUri, 1);
+    assert.equal(bounded.protocol_version, 'V4');
+    assert.deepEqual(bounded.items, [{
+      name: 'ZTEST_SERVICE', version: '0001', service_definition: 'ZTEST_DEFINITION',
+      service_definition_uri: definitionUri
+    }]);
+    assert.equal(bounded.truncated, true);
+    assert.equal(bounded.returned_count, 1);
+    const all = await read(bindingUri);
+    assert.equal(all.items[1].version, '0002');
+    assert.equal(all.items[1].service_definition_uri, undefined);
+    assert.equal(all.truncated, false);
+    await assert.rejects(read(definitionUri), (err: unknown) => safeError(err).code === 'INVALID_URI');
+    await assert.rejects(read(bindingUri + '/source/main'), (err: unknown) => safeError(err).code === 'INVALID_URI');
+    await assert.rejects(read('/sap/bc/adt/businessservices/bindings/zwrong'),
+      (err: unknown) => safeError(err).code === 'INVALID_BACKEND_RESPONSE');
+    assert.equal(f.calls.length, 3);
+    assert.ok(f.calls.every(call => call.method === 'GET' && call.session === 'stateless' &&
+      call.url.searchParams.get('version') === 'active'));
   } finally { await f.close(); }
 });
 

@@ -96,6 +96,8 @@ test('direct operations coexist with the MCP runtime lease and close sessions af
   const input = { connection_id: randomUUID(), request_id: 'write-1' };
   const make = () => ({ run: async () => { calls++; throw new Error('Simulated interrupted write'); }, close: async () => { closed++; } });
   try {
+    await f.store.save({ schema_version:1, tokens:[], connections:[{ connection_id:input.connection_id, name:'dev',
+      base_url:'https://sap.test', client:'001', username:'TEST', language:'EN', write_enabled:true }] });
     await assert.rejects(runSapOperation(f.store, noCredentials, 'update_source', input, make), /interrupted write/);
     assert.equal(calls, 1); assert.equal(closed, 1);
     assert.equal((await inspectLease(f.directory, 'config.lock')).state, 'missing');
@@ -106,6 +108,24 @@ test('direct operations coexist with the MCP runtime lease and close sessions af
     }));
     assert.equal(read.status, 'success');
   } finally { await releaseRuntime(); await f.cleanup(); }
+});
+
+test('CLI writes independently of removed connection governance and still respects the write switch', async () => {
+  const f = await fixture();
+  try {
+    const connection = { connection_id:randomUUID(),name:'dev',base_url:'https://sap.test',client:'001',username:'TEST',language:'EN',write_enabled:true };
+    await f.store.save({schema_version:1,connections:[connection],tokens:[]});
+    let calls=0;
+    const input={connection_id:connection.connection_id,name:'ZTEST',description:'test',package_name:'$TMP',request_id:randomUUID()};
+    const factory=()=>({run:async()=>{calls++;return {operation_id:'fixture',status:'success' as const};},close:async()=>{}});
+    assert.equal((await runSapOperation(f.store,noCredentials,'create_program',input,factory)).status,'success');
+    assert.equal(calls,1);
+    await assert.rejects(runSapOperation(f.store,noCredentials,'create_program',input,factory),{code:'REQUEST_ALREADY_USED'});
+    assert.throws(()=>validateSapInput('create_program',{...input,approval_id:randomUUID()}),{code:'INVALID_INPUT'});
+    await f.store.save({schema_version:1,connections:[{...connection,write_enabled:false}],tokens:[]});
+    await assert.rejects(runSapOperation(f.store,noCredentials,'create_program',{...input,request_id:randomUUID()},factory),{code:'WRITE_DISABLED'});
+    assert.equal(calls,1);
+  } finally {await f.cleanup();}
 });
 
 test('CLI exits nonzero and preserves operation errors without requiring an MCP server', async () => {
@@ -121,5 +141,26 @@ test('CLI exits nonzero and preserves operation errors without requiring an MCP 
       assert.deepEqual(body.data.completed_steps, []);
       return true;
     });
+
+  } finally { await f.cleanup(); }
+});
+
+test('direct CLI rejects both table query tools before accessing credentials when connection policy is off', async () => {
+  const f = await fixture();
+  try {
+    const connection = { connection_id: randomUUID(), name: 'dev', base_url: 'https://sap.test',
+      client: '001', username: 'TEST', language: 'EN', write_enabled: false, allow_table_data: false };
+    await f.store.save({ schema_version: 1, connections: [connection], tokens: [] });
+    const path = join(f.directory, 'query.json');
+    for (const [tool, input] of [['query_table', { table_name: 'MARA' }], ['query_sql', { sql: 'SELECT * FROM mara' }]] as const) {
+      await writeFile(path, JSON.stringify(input));
+      await assert.rejects(execute(process.execPath, [resolve('dist/cli.js'), 'sap', tool,
+        '--connection', connection.connection_id, '--input', path, '--json'], { env: f.env }), error => {
+        const result = error as Error & { code: number; stdout: string; stderr: string };
+        assert.equal(result.code, 1);
+        assert.equal(JSON.parse(result.stdout).data.error.code, 'TABLE_DATA_DISABLED');
+        return true;
+      });
+    }
   } finally { await f.cleanup(); }
 });

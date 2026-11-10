@@ -1,17 +1,17 @@
 import type { Command } from 'commander';
 import { createReadStream } from 'node:fs';
-import { mkdir, open } from 'node:fs/promises';
-import { join } from 'node:path';
 import { z } from 'zod';
-import { ConfigStore, digest, type Credentials } from './config.js';
+import { ConfigStore, type Credentials } from './config.js';
 import { Operations, type Input, type Result } from './operations.js';
 import { AppError } from './errors.js';
 import { acquireLease } from './lease.js';
-import { toolSchemas, toolDescription, type ToolName } from './tool-definitions.js';
+import { toolSchemas, externalToolSchema, toolDescription, type ToolName } from './tool-definitions.js';
 import { writeTools } from './tool-policy.js';
 import { clientInstructions } from './client-guidance.js';
 import { printSuccess } from './cli-output.js';
 import { validateRequestTimeout } from './request-timeout.js';
+import { targetFingerprint } from './connection-identity.js';
+import { reserveWriteRequest } from './write-requests.js';
 
 const inputLimit = 2 * 1024 * 1024;
 const toolNames = Object.keys(toolSchemas) as ToolName[];
@@ -24,7 +24,7 @@ export function describeSapTool(name: string) {
   if (!Object.hasOwn(toolSchemas, name)) throw new AppError('UNKNOWN_TOOL', 'Unknown SAP operation. Run saplink tools list --json.');
   const tool = name as ToolName;
   return { name: tool, description: toolDescription(tool), write: writeTools.has(tool),
-    input_schema: z.toJSONSchema(toolSchemas[tool], { io: 'input' }) };
+    input_schema: z.toJSONSchema(externalToolSchema(tool), { io: 'input' }) };
 }
 
 export async function readSapInput(path?: string): Promise<unknown> {
@@ -58,7 +58,7 @@ export function validateSapInput(tool: ToolName, raw: unknown, connection?: stri
       throw new AppError('INVALID_INPUT', '--connection conflicts with input connection_id.');
     fields.connection_id = connection;
   }
-  const parsed = toolSchemas[tool].safeParse(fields);
+  const parsed = externalToolSchema(tool).safeParse(fields);
   if (!parsed.success) {
     // Do not echo source, row values or unrecognized input to terminal output.
     const paths = [...new Set(parsed.error.issues.map(issue => issue.path.join('.') || '(root)'))];
@@ -70,32 +70,26 @@ export function validateSapInput(tool: ToolName, raw: unknown, connection?: stri
 // An exclusive, durable reservation is made BEFORE dispatch. A killed process must
 // never turn a repeated CLI invocation into a second SAP write. Store no source or
 // result data; SAP and the operation log remain the authority after any failure.
-export async function reserveCliWrite(directory: string, tool: ToolName, input: Input) {
-  const folder = join(directory, 'cli-write-requests');
-  await mkdir(folder, { recursive: true });
-  const key = digest(JSON.stringify([input.connection_id, input.request_id]));
-  let file;
-  try { file = await open(join(folder, `${key}.json`), 'wx', 0o600); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'EEXIST')
-      throw new AppError('REQUEST_ALREADY_USED', 'This CLI write request_id is already reserved. It may have reached SAP. Read SAP state and operation logs before considering a new authorized write; do not blindly retry with a new ID.');
-    throw error;
-  }
-  try {
-    await file.writeFile(JSON.stringify({ schema_version: 1, tool, connection_id: input.connection_id,
-      request_id: input.request_id, reserved_at: new Date().toISOString() }) + '\n');
-    await file.sync();
-  } finally { await file.close(); }
-}
+export const reserveCliWrite = reserveWriteRequest;
 
 export async function runSapOperation(store: ConfigStore, credentials: Credentials, tool: ToolName, input: Input,
-  makeOperations: () => Pick<Operations, 'run' | 'close'> = () => new Operations(store, credentials)): Promise<Result> {
+  makeOperations: () => Pick<Operations, 'run' | 'close'> = () => new Operations(store, credentials, undefined, undefined, undefined, true), expectedTarget?: string): Promise<Result> {
   // Configuration changes take this same lease. The MCP runtime uses its own
   // runtime lease, so direct SAP calls work while MCP is running or stopped.
   const release = await acquireLease(store.directory, 'config.lock');
   let operations: Pick<Operations, 'run' | 'close'> | undefined;
   try {
-    if (writeTools.has(tool)) await reserveCliWrite(store.directory, tool, input);
+    const connection = (expectedTarget !== undefined || writeTools.has(tool))
+      ? (await store.load()).connections.find(item => item.connection_id === input.connection_id) : undefined;
+    if (expectedTarget !== undefined) {
+      if (!connection || targetFingerprint(connection) !== expectedTarget)
+        throw new AppError('AGENT_TARGET_CHANGED', 'SAP connection identity changed before dispatch. Review the target and create a new task.');
+    }
+    if (writeTools.has(tool)) {
+      if (!connection) throw new AppError('CONNECTION_NOT_FOUND', 'Unknown connection ID');
+      if (!connection?.write_enabled) throw new AppError('WRITE_DISABLED', 'Enable writes in connection settings first.');
+      await reserveCliWrite(store.directory, tool, input);
+    }
     operations = makeOperations();
     return await operations.run(tool, input);
   } finally {
@@ -118,7 +112,7 @@ export function registerSapCli(cli: Command, store: ConfigStore, credentials: Cr
     if (tool !== 'list_connections') command.option('--timeout-ms <milliseconds>', 'Per SAP request timeout for this call, 100..600000; not a total deadline');
     command.action(async options => {
         const input = validateSapInput(tool, await readSapInput(options.input), options.connection, options.timeoutMs);
-        const result = await runSapOperation(store, credentials, tool, input);
+        const result = await runSapOperation(store, credentials, tool, input, undefined, process.env.SAPLINK_EXPECTED_TARGET_FINGERPRINT);
         // Keep all operation details, including partial/unknown write outcomes.
         console.log(JSON.stringify(json ? { schema_version: 1, status: result.status, data: result } : result, null, 2));
         if (result.status !== 'success') process.exitCode = 1;

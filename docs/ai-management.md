@@ -58,7 +58,7 @@ saplink connection remove dev --yes --json
 
 连接修改需要 runtime 停止。AI 应记住原端口，停止自己管理的实例后修改，再恢复服务。前台 UI/serve 不会被后台管理器自动关闭。不要在聊天里传密码；无桌面交互环境下应由用户打开原管理 UI 完成凭据录入。
 
-RFC 不需要 `--url`；需要路由时添加 `--rfc-saprouter /H/router.example/S/3299`，仅填写中转节点。已有路由改直连用 `--clear-rfc-saprouter`。改变传输方式、应用服务器、系统号、路由、Client 或用户名时需重新输入密码。HTTP 新连接显式使用 `--transport http --url https://sap-host:443`，已有 HTTP 连接保持原方式。完整包在管理页检查随包 Java/JCo；不修改全局 `JAVA_HOME` 或 PATH 来修复它。
+RFC 不需要 `--url`；需要路由时添加 `--rfc-saprouter /H/router.example/S/3299`，仅填写中转节点。已有连接的传输方式、服务器、系统号和路由不可更改，要更换目标或路由请新建连接。Client 和用户名可修改，但需重新输入密码。HTTP 新连接显式使用 `--transport http --url https://sap-host:443`。完整包在管理页检查随包 Java/JCo；不修改全局 `JAVA_HOME` 或 PATH 来修复它。
 
 ## 宿主和可选 MCP 的独立生命周期
 

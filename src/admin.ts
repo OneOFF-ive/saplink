@@ -2,7 +2,7 @@ import express from 'express';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
-import { connectionSchema, connectionBaseUrl, connectionFieldHints, connectionIdentityChanged, type ConfigStore, type Credentials } from './config.js';
+import { connectionSchema, connectionBaseUrl, connectionFieldHints, connectionIdentityChanged, connectionTargetChanged, type ConfigStore, type Credentials } from './config.js';
 import { AdtBackend } from './adt.js';
 import { Operations } from './operations.js';
 import { startHttp } from './server.js';
@@ -16,8 +16,13 @@ import { SelfUpdater } from './self-update.js';
 import { localPortInUse } from './local-port.js';
 import { readSapLogon } from './sap-logon.js';
 import { checkRfcEnvironment, discoverRfcEnvironment, saveRfcEnvironment } from './rfc-environment.js';
+import { AgentRuntime, type AgentDependencies } from './agent/runtime.js';
+import { registerAgentApi } from './agent/api.js';
+import { ModelSettings } from './agent/model-settings.js';
+import { maxUploadRequestBytes } from './agent/uploads.js';
+import { skillPackageRequestLimit } from './agent/skill-packages.js';
 
-const draft = connectionSchema.omit({ connection_id: true }).extend({
+const draft = connectionSchema.omit({ connection_id: true, agent_allow_table_data: true, write_objects: true, write_governance: true }).extend({
   base_url: connectionSchema.shape.base_url.optional(),
   write_enabled: z.boolean(),
   password: z.string().max(512).optional()
@@ -39,11 +44,11 @@ function validationResponse(error: z.ZodError) {
 }
 
 export async function startAdmin(store: ConfigStore, credentials: Credentials, port = 8766,
-  factory: BackendFactory = (c, p) => new AdtBackend(c, p), requestExit?: () => Promise<void>,
+  factory: BackendFactory = (c, p) => new AdtBackend(c, p, { configDirectory: store.directory }), requestExit?: () => Promise<void>,
   options: { updater?: SelfUpdater; initialMcpPort?: number;
     sharedRuntime?: { current?: Awaited<ReturnType<typeof startHttp>>; port: number };
     exclusive?: <T>(action: () => Promise<T>) => Promise<T>;
-    runtimeChanged?: () => Promise<void> } = {}) {
+    runtimeChanged?: () => Promise<void>; agent?: AgentDependencies } = {}) {
   if (port && await localPortInUse(port)) throw new AppError('EADDRINUSE', '管理端口已被占用，现有进程不会被接管');
   const key = randomBytes(32).toString('base64url');
   const app = express();
@@ -119,11 +124,20 @@ export async function startAdmin(store: ConfigStore, credentials: Credentials, p
     }
     next();
   });
+  app.use(/^\/api\/agent\/tasks(?:\/[0-9a-f-]+\/messages)?$/i, express.json({ limit: maxUploadRequestBytes }));
+  app.use(/^\/api\/agent\/extensions\/skills\/[0-9a-f-]+$/i, express.json({limit:'64kb'}));
+  app.use(/^\/api\/agent\/extensions\/skills\/(?:import|chat|install|[0-9a-f-]+\/package)$/i, express.json({limit:skillPackageRequestLimit}));
   app.use(express.json({ limit: '16kb' }));
   app.use('/api', (req, _res, next) => {
     if (req.method !== 'GET' && updater.busy) return next(new AppError('BUSY', '更新任务正在执行，请等待完成。'));
     next();
   });
+  const localMcpStatus = () => ({running:Boolean(state.current),port:state.port});
+  const agent = new AgentRuntime(store, { credentials, factory, ...options.agent,
+    localMcp:{status:localMcpStatus,start:(port,expected)=>startMcp(port,expected),stop:expected=>stopMcp(expected)},
+    settings: options.agent?.settings ?? new ModelSettings(store.directory, credentials) });
+  await agent.initialize();
+  registerAgentApi(app, agent);
   // Both polling routes must use the newest manual or background check.
   const latestUpdate = () => {
     const background = getAutomaticUpdate();
@@ -213,6 +227,7 @@ export async function startAdmin(store: ConfigStore, credentials: Credentials, p
       const { password, ...fields } = p;
       const c = connectionSchema.parse({
         ...fields,
+        allow_table_data: fields.allow_table_data ?? false,
         base_url: connectionBaseUrl(fields.base_url, fields.rfc),
         connection_id: randomUUID()
       });
@@ -245,13 +260,16 @@ export async function startAdmin(store: ConfigStore, credentials: Credentials, p
       const old = config.connections[index];
       const updated = connectionSchema.parse({
         ...fields,
+        allow_table_data: fields.allow_table_data ?? old.allow_table_data ?? false,
         base_url: connectionBaseUrl(fields.base_url, fields.rfc, old),
         connection_id: old.connection_id
       });
+      if (connectionTargetChanged(old, updated))
+        throw new AppError('CONNECTION_TARGET_IMMUTABLE', '已有连接的连接方式和服务器目标不可更改，请新建连接。');
       if (config.connections.some(c => c !== old && c.name === updated.name))
         throw new AppError('DUPLICATE_NAME', '连接名称已存在');
       if (!password && connectionIdentityChanged(old, updated))
-        throw new AppError('PASSWORD_REQUIRED', '地址或登录身份已变更，请重新输入密码');
+        throw new AppError('PASSWORD_REQUIRED', 'Client 或登录用户名已变更，请重新输入密码');
       let previous: string | undefined;
       if (password) {
         previous = await credentials.get(old.connection_id).catch(() => undefined);
@@ -312,8 +330,14 @@ export async function startAdmin(store: ConfigStore, credentials: Credentials, p
     }));
     res.json({ success: true });
   });
-  const startMcp = (port: number) => exclusive(async () => {
+  const checkMcpStatus = (expected?:ReturnType<typeof localMcpStatus>) => {
+    const current = localMcpStatus();
+    if (expected && (current.running!==expected.running || current.port!==expected.port))
+      throw new AppError('AGENT_MCP_CHANGED','服务状态已变化，请重新提交。');
+  };
+  const startMcp = (port: number,expected?:ReturnType<typeof localMcpStatus>) => exclusive(async () => {
     if (closing || updater.busy) throw new AppError('BUSY', '应用正在退出或更新，请稍后重试');
+    checkMcpStatus(expected);
     if (state.current)
       throw new AppError('MCP_RUNNING', 'MCP 服务已启动');
     if (!(await store.load()).tokens.length)
@@ -327,14 +351,16 @@ export async function startAdmin(store: ConfigStore, credentials: Credentials, p
     await startMcp(p.port);
     res.json({ success: true });
   });
+  const stopMcp = (expected?:ReturnType<typeof localMcpStatus>) => exclusive(async () => {
+    checkMcpStatus(expected);
+    if (state.current) {
+      await state.current.close();
+      state.current = undefined;
+      await options.runtimeChanged?.();
+    }
+  });
   app.post('/api/service/stop', async (_req, res) => {
-    await exclusive(async () => {
-      if (state.current) {
-        await state.current.close();
-        state.current = undefined;
-        await options.runtimeChanged?.();
-      }
-    });
+    await stopMcp();
     res.json({ success: true });
   });
   app.post('/api/cache/clear', async (_req, res) => {
@@ -342,7 +368,13 @@ export async function startAdmin(store: ConfigStore, credentials: Credentials, p
   });
   app.post('/api/logs/clear', async (req, res) => {
     const options = z.object({ older_than_days: z.number().int().min(0).max(36500), confirm: z.boolean().default(false) }).strict().parse(req.body);
-    res.json(await exclusive(() => cleanupLogs(options.older_than_days, options.confirm)));
+    res.json(await exclusive(async () => {
+      const preview = await cleanupLogs(options.older_than_days);
+      const outputs = await agent.cleanupDeletedOutputs(options.confirm);
+      const logs = options.confirm && preview.eligible_files ? await cleanupLogs(options.older_than_days, true)
+        : {...preview,dry_run:!options.confirm};
+      return {...logs,...outputs};
+    }));
   });
   app.post('/api/application/stop', (_req, res) => {
     res.json({ success: true });
@@ -352,6 +384,8 @@ export async function startAdmin(store: ConfigStore, credentials: Credentials, p
   const assets = fileURLToPath(new URL('../web/', import.meta.url));
   // This fixed asset may live beneath a .codex worktree; no user-supplied path is accepted.
   app.get('/icons.js', (_req, res) => res.sendFile(fileURLToPath(new URL('../node_modules/lucide/dist/umd/lucide.js', import.meta.url)), { dotfiles: 'allow' }));
+  app.get('/marked.js', (_req, res) => res.sendFile(fileURLToPath(new URL('../node_modules/marked/lib/marked.umd.js', import.meta.url)), { dotfiles: 'allow' }));
+  app.get('/purify.js', (_req, res) => res.sendFile(fileURLToPath(new URL('../node_modules/dompurify/dist/purify.min.js', import.meta.url)), { dotfiles: 'allow' }));
   app.use(express.static(assets, { etag: false }));
   app.use((_req, res) => res.sendStatus(404));
   app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
@@ -377,6 +411,7 @@ export async function startAdmin(store: ConfigStore, credentials: Credentials, p
   let shutdown: Promise<void> | undefined;
   const close = () => shutdown ??= (async () => {
     closing = true;
+    await agent.close();
     const stopped = new Promise<void>(resolve => listener.close(() => resolve()));
     while (busy) await new Promise(resolve => setTimeout(resolve, 50));
     if (!options.sharedRuntime && state.current) await state.current.close();

@@ -4,13 +4,20 @@ import { qualitySchemas, qualityObject, type QualityInput, type QualityTool } fr
 import { repositorySchemas, type RepositoryInput, type RepositoryTool } from './repository-query.js';
 import { searchEnhancements } from './enhancements.js';
 import { AdtBackend, adtUri, programUri, functionGroupUri, isFunctionGroup, compareSavedSource, savedSourceHash, definitionCommentsHash, type Backend, type Version, type ProgramKind, type Source, type GroupSnapshot, type BatchActivationResult } from './adt.js';
-import { ConfigStore, digest, type Connection, type Credentials } from './config.js';
+import { ConfigStore, digest, writePolicy, type Connection, type Credentials } from './config.js';
 import { AuditLog } from './audit.js';
 import { AppError, safeError } from './errors.js';
 import { functionModuleGuidance } from './function-help.js';
 import { tableQuerySchema, readOnlySql, type TableQuery } from './data-query.js';
-import { writeTools } from './tool-policy.js';
+import { tableDataTools, writeTools } from './tool-policy.js';
 import { validateRequestTimeout } from './request-timeout.js';
+import { acquireLease } from './lease.js';
+import { targetFingerprint } from './connection-identity.js';
+import { WriteApprovalStore, isControlledOperation, parseControlledOperation } from './write-approval.js';
+import { reserveWriteRequest } from './write-requests.js';
+import { toolSchemas } from './tool-definitions.js';
+import { sourceObjectUri,ddicUriName } from './adt-uri.js';
+import { ddicCreationUri,ddicTypes,verifyDdicDefinition,verifyDdicUpdate,type DdicKind } from './ddic-definition.js';
 
 export type Input = RepositoryInput & QualityInput & {
   timeout_ms?: number;
@@ -31,11 +38,15 @@ export type Input = RepositoryInput & QualityInput & {
   transport_task?: string;
   transport_number?: string;
   request_id?: string;
+  approval_id?: string;
   program_kind?: ProgramKind;
+  ddic_kind?: DdicKind;
   function_group_uri?: string;
   table_name?: string;
   fields?: string[];
   filters?: TableQuery['filters'];
+  pagination?: boolean;
+  cursor?: string;
   sql?: string;
   objects?: {
     object_uri: string;
@@ -134,7 +145,7 @@ export class Operations {
   private closing = false;
   private maintenance: Promise<CacheClearResult> | undefined;
 
-  constructor(private store: ConfigStore, private credentials: Credentials, private audit = new AuditLog(), private factory: BackendFactory = (c, p) => new AdtBackend(c, p), private cacheEntryLimit = 512) { }
+  constructor(private store: ConfigStore, private credentials: Credentials, private audit = new AuditLog(), private factory: BackendFactory = (c, p) => new AdtBackend(c, p, { configDirectory: store.directory }), private cacheEntryLimit = 512, private configLeaseHeld = false, private clientApprovalRequired = false) { }
 
   async run(tool: string, input: Input): Promise<Result> {
     validateRequestTimeout(input.timeout_ms);
@@ -181,8 +192,10 @@ export class Operations {
   }
 
   private async execute(tool: string, input: Input): Promise<Result> {
-    const { timeout_ms: timeoutMs, ...operationInput } = input;
+    const { timeout_ms: timeoutMs, approval_id: approvalId, ...operationInput } = input;
     let backend: Backend | undefined;
+    let releaseConfig: (() => Promise<void>) | undefined;
+    let claimedApproval = false;
     const id = randomUUID();
     const context: Context = {
       steps: [],
@@ -215,7 +228,15 @@ export class Operations {
         }
       }
     };
+    const finish = async (result: Result) => {
+      if (claimedApproval && approvalId) {
+        try { await new WriteApprovalStore(this.store.directory).complete(approvalId, result); }
+        catch { result.warnings = [...(result.warnings ?? []), 'APPROVAL_RESULT_PERSIST_FAILED']; }
+      }
+      return result;
+    };
     try {
+      if (approvalId && !this.configLeaseHeld) releaseConfig = await acquireLease(this.store.directory, 'config.lock');
       const config = await this.store.load();
       if (tool === 'list_connections')
         return {
@@ -230,14 +251,39 @@ export class Operations {
             language: c.language,
             username: c.username,
             write_enabled: c.write_enabled,
+            write_policy: writePolicy(c),
+            allow_table_data: c.allow_table_data === true,
             ...(c.rfc ? { transport: 'rfc', rfc: c.rfc } : {})
           }))
         };
       const connection = config.connections.find(c => c.connection_id === input.connection_id);
       if (!connection)
         throw new AppError('CONNECTION_NOT_FOUND', 'Unknown connection ID');
+      if (approvalId) {
+        if ((tool !== 'update_source' && !isControlledOperation(tool)) || !connection.write_enabled)
+          throw new AppError('APPROVAL_INVALID', '审批只能用于对应连接的受控操作。');
+        const approvals = new WriteApprovalStore(this.store.directory);
+        const approval = await approvals.get(approvalId);
+        if (tool === 'update_source') {
+          const parsed = toolSchemas.update_source.safeParse(operationInput);
+          if (!parsed.success) throw new AppError('APPROVAL_INVALID', '审批的源码写入参数无效。');
+          await approvals.requireResolved(parsed.data);
+          await approvals.consume(approvalId, parsed.data, targetFingerprint(connection), approval.artifact_id);
+        } else if (isControlledOperation(tool)) {
+          const intent = parseControlledOperation(tool, operationInput);
+          await approvals.requireOperationResolved(intent);
+          await approvals.consumeOperation(approvalId, intent, targetFingerprint(connection), approval.artifact_id);
+        }
+        claimedApproval = true;
+        await reserveWriteRequest(this.store.directory, tool as keyof typeof toolSchemas, operationInput);
+      } else {
+        if (this.clientApprovalRequired && connection.write_enabled && writeTools.has(tool))
+          throw new AppError('CLIENT_APPROVAL_REQUIRED', '客户端受控写入需要先审核并批准此操作。');
+      }
       if (writeTools.has(tool) && !connection.write_enabled)
         throw new AppError('WRITE_DISABLED', 'Enable writes in local connection settings first');
+      if (tableDataTools.has(tool) && !connection.allow_table_data)
+        throw new AppError('TABLE_DATA_DISABLED', 'Enable table-data access in local connection settings first');
       backend = this.sessions.get(connection.connection_id);
       const cachedSession = Boolean(backend);
       if (!backend) {
@@ -302,7 +348,7 @@ export class Operations {
           });
         } catch { context.warnings.push('LOG_WRITE_FAILED'); }
       }
-      return {
+      return await finish({
         operation_id: id,
         status: 'success',
         completed_steps: context.steps,
@@ -313,7 +359,7 @@ export class Operations {
           write_dispatched: context.dispatched
         } : {}),
         ...(context.warnings.length ? { warnings: context.warnings } : {})
-      };
+      });
     }
     catch (error) {
       const failure = safeError(error);
@@ -360,7 +406,7 @@ export class Operations {
             outcome: context.confirmed ? 'partial' : context.dispatched ? 'unknown' : 'confirmed' } : {})
         });
       } catch { context.warnings.push('LOG_WRITE_FAILED'); }
-      return {
+      return await finish({
         operation_id: id,
         status: 'error',
         completed_steps: context.steps,
@@ -371,9 +417,9 @@ export class Operations {
           write_dispatched: context.dispatched
         } : {}),
         ...(context.warnings.length ? { warnings: context.warnings } : {})
-      };
+      });
     }
-    finally { backend?.setRequestTimeout?.(); }
+    finally { try { backend?.setRequestTimeout?.(); } finally { await releaseConfig?.(); } }
   }
 
   private async requireTransport(backend: Backend, object: string, pkg: string, operation: 'I' | 'U', transport?: string) {
@@ -473,7 +519,9 @@ export class Operations {
           table_name: input.table_name,
           fields: input.fields,
           filters: input.filters,
-          limit: input.limit
+          limit: input.limit,
+          pagination: input.pagination,
+          cursor: input.cursor
         });
         if (!backend.queryTable)
           throw new AppError('CAPABILITY_UNSUPPORTED', 'Table data preview is unavailable');
@@ -482,7 +530,9 @@ export class Operations {
       case 'query_sql': {
         const query = readOnlySql({
           sql: input.sql!,
-          limit: input.limit
+          limit: input.limit,
+          pagination: input.pagination,
+          cursor: input.cursor
         });
         if (!backend.querySql)
           throw new AppError('CAPABILITY_UNSUPPORTED', 'SQL data preview is unavailable');
@@ -633,15 +683,73 @@ export class Operations {
           }
         };
       }
+      case 'create_ddic_object': {
+        const ddic = toolSchemas.create_ddic_object.parse(input);
+        verifyDdicDefinition(ddic.ddic_kind,ddic.name,ddic.source);
+        if (!backend.createDdic) throw new AppError('CAPABILITY_UNSUPPORTED','Dictionary object creation is unavailable');
+        let object = ddicCreationUri(ddic.ddic_kind,ddic.name);
+        await this.requireTransport(backend,object,ddic.package_name,'I',ddic.transport_task);
+        await context.event('started');
+        let created = false;
+        try {
+          const createdUri = await backend.createDdic(ddic.ddic_kind,ddic.name,ddic.description,ddic.package_name,ddic.transport_task,
+            () => { context.dispatched = true; });
+          context.dispatched = true;
+          if (ddicUriName(createdUri) !== ddic.name || sourceObjectUri(createdUri) !== createdUri)
+            throw new AppError('VERIFY_FAILED','SAP returned an unexpected Dictionary object URI');
+          object = createdUri;
+          created = true;
+          await context.event('created');
+          const state: SourceSaveState = {saved:false,verification:'not_run',object_uri:object};
+          context.source_save = state;
+          const baseline = await backend.read(object,'inactive');
+          return await this.locked(backend,object,context,async handle => {
+            const current = await backend.read(object,'inactive',baseline.source_uri);
+            if (current.revision !== baseline.revision || current.version !== 'inactive')
+              throw new AppError('VERSION_CONFLICT','Dictionary definition changed after creation; review the inactive version.');
+            state.source_uri = current.source_uri;
+            const dispatchSave = () => { state.saved = 'unknown'; };
+            if (!backend.saveDispatchTracking) dispatchSave();
+            try { await backend.save(current.source_uri,ddic.source,handle,ddic.transport_task,dispatchSave); }
+            finally {
+              for (const diagnostic of backend.takeSaveDiagnostics?.() ?? []) await context.diagnostic(diagnostic);
+            }
+            state.saved = true;
+            context.confirmed = true;
+            state.verification = 'unavailable';
+            await context.event('saved');
+            const saved = await backend.read(object,'inactive',current.source_uri);
+            state.inactive_revision = saved.revision;
+            const comparison = compareSavedSource(ddic.source,saved.source,object);
+            if (saved.version !== 'inactive' || !comparison.equivalent) {
+              state.verification = 'failed';
+              throw new AppError('VERIFY_FAILED','SAP returned a different inactive definition. Review the saved object before activation.');
+            }
+            state.verification = 'passed';
+            state.normalization_applied = comparison.normalization_applied;
+            await context.event('verified');
+            const {source: _source,...metadata} = saved;
+            return {...metadata,type:ddicTypes[ddic.ddic_kind].type,activated:false};
+          });
+        } catch (error) {
+          if (!context.dispatched) throw error;
+          const failure = safeError(error);
+          throw new AppError(failure.code,failure.message,{...failure.details as object,object_uri:object,created:created ? true : 'unknown',
+            guidance:'A Dictionary create request was sent. Inspect this object in SAP before attempting another write.'});
+        }
+      }
       case 'update_source': {
         const update = sourceUpdateSchema.safeParse(input);
         if (!update.success) throw new AppError('INVALID_INPUT', 'Provide exactly one of source or edits; edits require non-empty old_text and new_text strings.');
         if (!input.object_uri && !input.source_uri)
           throw new AppError('INVALID_URI', 'Provide object_uri or the source_uri returned by read_source');
-        const object = programUri(input.object_uri ?? input.source_uri!);
+        const object = sourceObjectUri(input.object_uri ?? input.source_uri!);
+        const ddicName = ddicUriName(object);
+        if (ddicName && !/^[ZY]/.test(ddicName))
+          throw new AppError('CAPABILITY_UNSUPPORTED','Dictionary updates are limited to Z/Y customer objects');
         if (input.object_uri && object !== input.object_uri)
           throw new AppError('INVALID_URI', 'object_uri must identify the object, not its source');
-        if (input.source_uri && programUri(input.source_uri) !== object)
+        if (input.source_uri && sourceObjectUri(input.source_uri) !== object && (!ddicName || ddicUriName(input.source_uri) !== ddicName))
           throw new AppError('INVALID_URI', 'object_uri and source_uri identify different objects');
         const saveState: SourceSaveState = {
           saved: false,
@@ -699,6 +807,7 @@ export class Operations {
               throw conflict('An inactive draft exists; read inactive before editing', draft);
           }
           const code = update.data.edits ? applySourceEdits(current.source, update.data.edits) : update.data.source!;
+          if (ddicName) verifyDdicUpdate(ddicName,current.source,code);
           await context.event('version_checked');
           const markSaveDispatched = () => {
             context.dispatched = true;
@@ -744,9 +853,15 @@ export class Operations {
         });
       }
       case 'activate_objects': {
-        const selected = input.objects!.map(object => ({ ...object, object_uri: programUri(object.object_uri) }));
+        const selected = input.objects!.map(object => ({ ...object, object_uri: sourceObjectUri(object.object_uri) }));
         const uris = new Set(selected.map(object => object.object_uri));
-        if (uris.size !== selected.length) throw new AppError('INVALID_INPUT', 'Duplicate activation target');
+        const identities = selected.map(object => {
+          const ddicName = ddicUriName(object.object_uri);
+          if (ddicName && !/^[ZY]/.test(ddicName))
+            throw new AppError('CAPABILITY_UNSUPPORTED', 'Dictionary activation is limited to Z/Y customer objects');
+          return ddicName ? ddicCreationUri('structure',ddicName) : object.object_uri;
+        });
+        if (new Set(identities).size !== selected.length) throw new AppError('INVALID_INPUT', 'Duplicate activation target');
         for (const object of selected) {
           if (!isFunctionGroup(object.object_uri) && object.object_uri.includes('/functions/groups/') && uris.has(functionGroupUri(object.object_uri)))
             throw new AppError('INVALID_INPUT', 'Select either a function group or its individual members');

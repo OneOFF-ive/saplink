@@ -14,6 +14,7 @@ import { startHttp } from './server.js';
 import { cliFailure } from './cli-output.js';
 import { localPortInUse } from './local-port.js';
 import { startAdmin } from './admin.js';
+import { defaultMcpPort, defaultUiPort } from './paths.js';
 
 const recordName = 'managed-service.json';
 const recordSchema = z.object({
@@ -97,7 +98,7 @@ async function start(directory: string, port: number, options: { mcp?: boolean; 
     if (!mcp) {
       if (options.uiPort && before.ui_port && options.uiPort !== before.ui_port)
         throw new AppError('APP_PORT_CONFLICT', 'Management UI is already listening on a different port. Use app status or explicitly restart the application.');
-      await openServiceUi(directory, options.uiPort ?? before.ui_port ?? 8766);
+      await openServiceUi(directory, options.uiPort ?? before.ui_port ?? defaultUiPort());
       return serviceStatus(directory);
     }
     if (before.mcp_running === false) {
@@ -156,7 +157,7 @@ export function startService(directory: string, port: number) {
 }
 
 export function startApplication(directory: string, uiPort?: number) {
-  return withServiceCommand(directory, () => start(directory, 8765, { mcp: false, uiPort }));
+  return withServiceCommand(directory, () => start(directory, defaultMcpPort(), { mcp: false, uiPort }));
 }
 
 export function restartApplication(directory: string, uiPort?: number) {
@@ -165,7 +166,7 @@ export function restartApplication(directory: string, uiPort?: number) {
     if (uiPort && uiPort !== before.ui_port && await localPortInUse(uiPort))
       throw new AppError('EADDRINUSE', 'Requested management port is occupied; the current host was preserved.');
     await stop(directory);
-    return start(directory, before.port ?? 8765, { mcp: before.mcp_running === true, uiPort: uiPort ?? before.ui_port ?? 8766 });
+    return start(directory, before.port ?? defaultMcpPort(), { mcp: before.mcp_running === true, uiPort: uiPort ?? before.ui_port ?? defaultUiPort() });
   });
 }
 
@@ -179,7 +180,7 @@ export async function mcpStatus(directory: string) {
 export function startMcp(directory: string, port?: number) {
   return withServiceCommand(directory, async () => {
     const before = await serviceStatus(directory);
-    await start(directory, port ?? before.port ?? 8765);
+    await start(directory, port ?? before.port ?? defaultMcpPort());
     return mcpStatus(directory);
   });
 }
@@ -197,13 +198,13 @@ function changeMcp(directory: string, action: 'mcp/stop' | 'mcp/restart', port?:
     const before = await serviceStatus(directory);
     if (before.lease.guard_present) throw new AppError('LEASE_BUSY', 'Runtime guard exists; inspect application status.');
     if (before.state === 'stopped') {
-      if (action === 'mcp/restart') await start(directory, port ?? 8765);
+      if (action === 'mcp/restart') await start(directory, port ?? defaultMcpPort());
       return mcpStatus(directory);
     }
     if (before.state !== 'running' || !before.managed) throw new AppError('SERVICE_NOT_MANAGED', 'Cannot control MCP in an unverified application. Inspect app status; no process was killed.');
     const record = await readRecord(directory);
     if (!record || record.pid !== before.pid || record.lease_nonce !== before.lease.nonce) throw new AppError('SERVICE_STATE_CHANGED', 'Application changed; inspect status.');
-    try { await control(record, action, port ?? before.port ?? 8765); }
+    try { await control(record, action, port ?? before.port ?? defaultMcpPort()); }
     catch (error) {
       if (error instanceof AppError) throw error;
       throw new AppError('MCP_CONTROL_UNKNOWN', 'MCP control result is unknown. Inspect mcp status before retrying; the application was not force-stopped.');
@@ -272,7 +273,7 @@ export function stopService(directory: string) {
 export function restartService(directory: string, port?: number) {
   return withServiceCommand(directory, async () => {
     const before = await serviceStatus(directory);
-    const nextPort = port ?? before.port ?? 8765;
+    const nextPort = port ?? before.port ?? defaultMcpPort();
     await stop(directory);
     return start(directory, nextPort);
   });
@@ -329,7 +330,7 @@ export async function runManagedService(store: ConfigStore, credentials: Credent
       sharedRuntime.current = await startHttp(store, new Operations(store, credentials), port);
     }
     if (process.env.SAPLINK_HOST_MODE === 'app' || process.env.SAPLINK_HOST_UI_PORT) {
-      const uiPort = z.coerce.number().int().min(1).max(65535).parse(process.env.SAPLINK_HOST_UI_PORT || '8766');
+      const uiPort = z.coerce.number().int().min(1).max(65535).parse(process.env.SAPLINK_HOST_UI_PORT || String(defaultUiPort()));
       await openAdmin(uiPort);
     }
     const controlToken = randomBytes(32).toString('base64url');

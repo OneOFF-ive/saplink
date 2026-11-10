@@ -7,6 +7,55 @@ import { connectionSchema } from '../src/config.js';
 import { safeError } from '../src/errors.js';
 import { XMLParser } from 'fast-xml-parser';
 import type { ProgramKind } from '../src/adt.js';
+import { ddicTypes, type DdicKind } from '../src/ddic-definition.js';
+
+for (const kind of ['structure','table'] as DdicKind[]) {
+  test(`ADT creates a DDIC ${kind} and writes its inactive source on the returned object`,async()=>{
+    const {collection,type}=ddicTypes[kind], object='/sap/bc/adt/ddic/structures/zcreated';
+    const ddl=`define ${kind} zcreated { field : abap.int4; }`;
+    let code='', created=false, locked=false, dispatched=false;
+    let creation:Record<string,unknown>|undefined;
+    const server=createServer(async(req,res)=>{
+      const url=new URL(req.url!,'http://local');let body='';
+      for await(const chunk of req)body+=chunk;
+      res.setHeader('Content-Type','application/xml');
+      if(url.pathname.endsWith('/compatibility/graph')){res.setHeader('x-csrf-token','test');res.end('<graph/>');}
+      else if(url.pathname===collection+'/validation'){
+        assert.equal(url.searchParams.get('objtype'),type);
+        res.end('<asx:abap xmlns:asx="http://www.sap.com/abapxml"><asx:values><DATA><SEVERITY>SUCCESS</SEVERITY><CHECK_RESULT>X</CHECK_RESULT></DATA></asx:values></asx:abap>');
+      }else if(url.pathname===collection&&req.method==='POST'){
+        assert.equal(dispatched,true);
+        creation=new XMLParser({ignoreAttributes:false}).parse(body)['blue:blueSource'];
+        created=true;res.statusCode=201;res.setHeader('Location',object);res.end();
+      }else if(url.pathname===object&&url.searchParams.get('_action')==='LOCK'){
+        locked=true;res.end('<asx:abap xmlns:asx="http://www.sap.com/abapxml"><asx:values><DATA><LOCK_HANDLE>handle</LOCK_HANDLE></DATA></asx:values></asx:abap>');
+      }else if(url.pathname===object&&url.searchParams.get('_action')==='UNLOCK'){
+        locked=false;res.end();
+      }else if(url.pathname===object&&created){
+        res.end(`<blue:blueSource xmlns:blue="http://www.sap.com/wbobj/blue" xmlns:adtcore="http://www.sap.com/adt/core" adtcore:name="ZCREATED" adtcore:type="${type}" adtcore:version="new"/>`);
+      }else if(url.pathname===object+'/source/main'&&req.method==='PUT'){
+        assert.equal(locked,true);code=body;res.statusCode=204;res.end();
+      }else if(url.pathname===object+'/source/main'){res.setHeader('Content-Type','text/plain');res.end(code);}
+      else if(url.pathname==='/sap/public/bc/icf/logoff')res.end();
+      else{res.statusCode=404;res.end();}
+    });
+    await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
+    const address=server.address();assert.ok(address&&typeof address!=='string');
+    const backend=new AdtBackend(connectionSchema.parse({connection_id:randomUUID(),name:'mock',
+      base_url:`http://127.0.0.1:${address.port}`,client:'001',language:'EN',username:'TEST'}),'fake');
+    try{
+      const uri=await backend.createDdic(kind,'ZCREATED','Fields & data','$TMP',undefined,()=>{dispatched=true;});
+      assert.equal(uri,object);
+      assert.equal(creation?.['@_adtcore:type'],type);
+      assert.equal(creation?.['@_adtcore:description'],'Fields & data');
+      const handle=await backend.lock(uri), source=await backend.read(uri,'inactive');
+      await backend.save(source.source_uri,ddl,handle);
+      await backend.unlock(uri,handle);
+      assert.equal((await backend.read(uri,'inactive')).source,ddl);
+      await assert.rejects(backend.read(uri,'active'),{code:'VERSION_UNAVAILABLE'});
+    }finally{try{await backend.close();}finally{await new Promise<void>(resolve=>server.close(()=>resolve()));}}
+  });
+}
 
 for (const kind of ['report', 'include', 'module_pool', 'subroutine_pool'] as ProgramKind[]) {
   test(`create ${kind} sends escaped XML, transport and verifies metadata`, async () => {

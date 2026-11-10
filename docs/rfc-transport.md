@@ -101,7 +101,7 @@ local-runtime/
 JCo 目录必须包含一份原始 JAR（`sapjco3.jar` 或 `com.sap.conn.jco_3.1.14.jar` 等带版本名称）和 x64 `sapjco3.dll`，保留原文件名；目录内的文档及声明一并保留。构建时校验架构并实际加载随包 Java/JCo，不连接 SAP。回执标记 `distribution: internal`，从本地 Java 的 `release` 文件记录版本，并记录 Java/JCo 关键文件 SHA-256。其他构建依赖（Node.js、NSIS、VC++ 运行库）仍使用原有下载缓存逻辑，版本固定在 `packaging/windows/download-lock.json`。生成的安装包用于内部部署。
 
 新连接默认只读。启用写入仍须用户明确要求并使用现有写入开关。
-不经过 SAProuter 时省略 `--rfc-saprouter`。已有 RFC 连接改回直连使用 `connection edit <name> --clear-rfc-saprouter --password-prompt --json`；修改其他字段时默认保留已有路由。
+不经过 SAProuter 时省略 `--rfc-saprouter`。已有连接的目标和路由不可更改；要改为直连或使用其他路由，请新建连接。修改 Client 等其他字段时保留已有路由。
 切回 HTTP 可使用 `connection edit <name> --transport http --password-prompt --json`，原 `--http-transport` 仍兼容。不能同时指定 HTTP 与 RFC 参数。
 CLI 连接变更仍要求原运行进程释放配置锁；本功能不增加运行时热切换或强制重启。
 

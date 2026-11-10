@@ -11,25 +11,27 @@ GitHub Release 附件要求、COS 同步 Action 的触发条件、secrets 和恢
 ```powershell
 npm ci --ignore-scripts
 npm run build
-node dist/cli.js --help
+npm run dev -- --help
 ```
 
 项目的 `vendor/adt-path-format` 通过 npm override 替换 ADT 库的通用格式化依赖，仅支持其路径所需的字符串占位符。保留 `vendor/`、锁文件和 `.npmrc` 中的 `install-links=true`；Windows 构建在生产依赖安装前复制该目录，并显式使用 `--install-links`。修改 ADT 库版本时运行 `tests/dependency-security.test.ts`，核对其格式化调用仍符合这一受限接口。
 
-这些是源码开发命令，不是安装包用户的前置步骤。后续源码 CLI 调用统一使用 `node dist/cli.js`，例如：
+这些是源码开发命令，不是安装包用户的前置步骤。开发 CLI 调用使用隔离预览，例如：
 
 ```powershell
-node dist/cli.js ui
-node dist/cli.js tools instructions --json
-node dist/cli.js sap list_connections --json
-node dist/cli.js status --json
-node dist/cli.js doctor --json
-node dist/cli.js update check --json
+npm run dev -- ui
+npm run dev -- tools instructions --json
+npm run dev -- sap list_connections --json
+npm run dev -- status --json
+npm run dev -- doctor --json
+npm run dev -- update check --json
 ```
 
-`node dist/cli.js ui` 打开或复用托管宿主，并作为前台附着命令供桌面托盘使用；Ctrl+C 仅结束附着命令，关闭浏览器也不会退出宿主。正常退出宿主使用 `node dist/cli.js app stop --json`，会同时关闭其 MCP；仅停 MCP 使用 `node dist/cli.js mcp stop --json`。`start-ui.cmd` 是源码目录的便捷入口。源码与已安装应用默认共用用户配置目录，不要同时启动独立的管理/服务宿主；CLI SAP 操作可以并存，但须遵守配置锁。需要隔离测试时使用专用 `SAPLINK_CONFIG_DIR` 和 `SAPLINK_LOG_DIR`。
+`npm run dev -- ui` 打开或复用预览宿主，并作为前台附着命令供桌面托盘使用；Ctrl+C 仅结束附着命令，关闭浏览器也不会退出宿主。正常退出预览宿主使用 `npm run dev -- app stop --json`，会同时关闭其 MCP；仅停 MCP 使用 `npm run dev -- mcp stop --json`。源码目录下直接运行 `node dist/cli.js` 或 `npm start` 时必须显式指定 `SAPLINK_CONFIG_DIR`，以免无意使用正式版配置；即使显式指定，也不应在正式目录下启动不兼容的开发代码。开发调试请使用 `npm run dev -- <参数>`、`start-ui.cmd` 或 `scripts/start-agent-dev.cmd`，它们使用独立的预览配置、日志、凭据和端口，详见 [Agent 运行时](agent-runtime.md)。预览目录不会自动导入历史数据和密钥；不要删除原目录中的审批和防重放记录。
 
-运维手册中的 `saplink <参数>` 对应项目目录内的 `node dist/cli.js <参数>`。`npm start -- <参数>` 也是项目脚本入口，但不用于用户运维示例；自动化优先直接运行 Node CLI，避免 npm 附加输出影响 JSON 解析。
+运维手册中的 `saplink <参数>` 对应安装版 CLI；源码目录的 `node dist/cli.js <参数>` 和 `npm start -- <参数>` 必须显式指定配置目录。需要纯 JSON 的预览自动化可使用 `node scripts/dev-cli.mjs --compiled <参数>`，避免 npm 附加输出影响 JSON 解析。
+
+发布时保留这套预览入口。安装包使用正式版配置和端口，覆盖升级及与预览并行的验证步骤见[安装包验收](releases-and-actions.md#安装包验收)。
 
 ## 测试与接口维护
 

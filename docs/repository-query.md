@@ -13,12 +13,15 @@
 | `get_ddic_definition` | `entity_name`、可选 `field_name`、`limit` | 表、结构或支持的 CDS 实体的字段、类型、长度、主键标志、数据元素与可用标签 |
 | `get_data_element` | `data_element_uri` | 数据元素说明、字段标签、类型名称及可用搜索帮助信息 |
 | `get_domain_values` | `domain_uri`、`limit` | 域定义、固定值或区间、说明、转换信息和可用值表名称 |
+| `get_odata_service_binding` | `object_uri`、`limit` | RAP OData 服务绑定、协议版本、服务版本及关联的服务定义 |
 | `find_references` | `object_uri`、可选成对的 `line` / `column`、`limit` | 对象或指定符号的实际引用位置、代码片段及展开状态 |
 | `find_definition` | `object_uri`、`line`、`column`、可选 `end_column` / `implementation` | 指定符号的定义位置；`implementation=true` 时定位实现 |
 | `get_class_structure` | 类或接口的 `object_uri`、`limit` | 成员名称、类型、可见性和后端提供的静态、常量及只读标志 |
 | `get_type_hierarchy` | `object_uri`、`line`、`column`、`direction`、`limit` | 指定类型的上级或下级关系；`direction` 为 `super`（默认）或 `sub` |
 
 除 DDIC 名称查询外，对象 URI 均应来自 `search_objects` 或 SAP 的真实先前结果，不拼接路径。查数据元素时可筛选类型 `DTEL`，查域时用 `DOMA`；类和接口用后端返回的类型与 URI。
+
+查询 RAP OData 时，用 `search_objects` 筛选 `SRVB`（服务绑定）或 `SRVD`（服务定义）。绑定详情使用 `get_odata_service_binding`。服务定义可以用 `read_source` 读取活动源码，URI 可以取自搜索结果或绑定返回的 `service_definition_uri`。这些工具只读取 ADT 开发对象，不请求运行时 OData 服务。
 
 ## 示例：先理解采购订单字段
 

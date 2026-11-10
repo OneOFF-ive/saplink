@@ -2,6 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
+import { mkdtemp, rm, rmdir } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { tableQuery, readOnlySql, queryCapabilities } from '../src/data-query.js';
 import { AdtBackend, type AdtBackendOptions } from '../src/adt.js';
 import { connectionSchema } from '../src/config.js';
@@ -49,7 +52,7 @@ test('discovery reports independent endpoint advertisement without assuming auth
   ] }] }]).sql_query.advertised, true);
 });
 
-async function fixture(status: number | ((calls: number, logins: number) => number) = 200, body?: string, loginStatus = 200, options: AdtBackendOptions = {}, logoutStatus = 200) {
+async function fixture(status: number | ((calls: number, logins: number) => number) = 200, body?: string | ((sql: string) => string), loginStatus = 200, options: AdtBackendOptions = {}, logoutStatus = 200) {
   const calls: { url: URL; method?: string; body: string; session?: string; cookie?: string }[] = [];
   const logins: URL[] = [];
   const logouts: URL[] = [];
@@ -67,15 +70,119 @@ async function fixture(status: number | ((calls: number, logins: number) => numb
     else if (url.pathname.includes('/datapreview/')) {
       calls.push({ url, method: req.method, body: text, session: req.headers['x-sap-adt-sessiontype'] as string, cookie: req.headers.cookie });
       res.statusCode = typeof status === 'function' ? status(calls.length, logins.length) : status;
-      res.end(body ?? '<tableData><columns><metadata name="MATNR" type="N"/><dataSet><data>000001</data><data>000002</data></dataSet></columns><columns><metadata name="AMOUNT" type="P"/><dataSet><data>123456789012345678.90</data><data>0.00</data></dataSet></columns></tableData>');
+      res.end(typeof body === 'function' ? body(text) : body ?? '<tableData><columns><metadata name="MATNR" type="N"/><dataSet><data>000001</data><data>000002</data></dataSet></columns><columns><metadata name="AMOUNT" type="P"/><dataSet><data>123456789012345678.90</data><data>0.00</data></dataSet></columns></tableData>');
+    } else if (url.pathname.endsWith('/ddic/elementinfo')) {
+      const field = (name: string, type: string) => `<elementInfo name="${name}" type="TABL/DTF"><properties>
+        <entry key="ddicIsKey">true</entry><entry key="ddicDataType">${type}</entry></properties></elementInfo>`;
+      res.end(`<elementInfo name="${url.searchParams.get('path')}" type="TABL/DT">
+        ${field('MANDT', 'CLNT')}${field('DOCNO', 'CHAR')}${field('ITEM', 'NUMC')}</elementInfo>`);
     } else res.end('');
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const address = server.address(); assert.ok(address && typeof address !== 'string');
-  const backend = new AdtBackend(connectionSchema.parse({ connection_id: randomUUID(), name: 'mock',
-    base_url: `http://127.0.0.1:${address.port}`, client: '001', language: 'EN', username: 'TEST' }), 'fake', options);
-  return { backend, calls, logins, logouts, close: async () => { try { await backend.close(); } finally { await new Promise<void>(resolve => server.close(() => resolve())); } } };
+  const connection = connectionSchema.parse({ connection_id: randomUUID(), name: 'mock',
+    base_url: `http://127.0.0.1:${address.port}`, client: '001', language: 'EN', username: 'TEST' });
+  const backend = new AdtBackend(connection, 'fake', options);
+  return { backend, connection, calls, logins, logouts, close: async () => { try { await backend.close(); } finally { await new Promise<void>(resolve => server.close(() => resolve())); } } };
 }
+
+test('table pagination uses the composite DDIC key, hides added key fields, and binds the cursor to the query', async () => {
+  const configDirectory = await mkdtemp(join(tmpdir(), 'saplink-page-test-'));
+  const tableData = (columns: Record<string, string[]>) => `<tableData>${Object.entries(columns).map(([name, values]) =>
+    `<columns><metadata name="${name}" type="C"/><dataSet>${values.map(value => `<data>${value}</data>`).join('')}</dataSet></columns>`).join('')}</tableData>`;
+  const f = await fixture(200, sql => sql.includes('ITEM >')
+    ? tableData({ TEXT: ['second'], DOCNO: ["A'1"], ITEM: ['0002'] })
+    : sql.includes('DOCNO >') ? tableData({ TEXT: [], DOCNO: [], ITEM: [] })
+    : tableData({ TEXT: ['first', 'second'], DOCNO: ["A'1", "A'1"], ITEM: ['0001', '0002'] }),
+  200, { configDirectory });
+  const reopened = new AdtBackend(f.connection, 'fake', { configDirectory });
+  const other = new AdtBackend({ ...f.connection, client: '002' }, 'fake', { configDirectory });
+  try {
+    const input = { table_name: 'ZTAB', fields: ['TEXT'], limit: 1 };
+    const first = await f.backend.queryTable({ ...input, pagination: true });
+    assert.equal(first.pagination_supported, true);
+    assert.equal(first.truncated, true);
+    assert.ok('next_cursor' in first && typeof first.next_cursor === 'string');
+    const cursor = first.next_cursor;
+    assert.deepEqual(first.rows, [{ TEXT: 'first' }]);
+    assert.deepEqual(first.columns.map(column => (column as { name: string }).name), ['TEXT']);
+    assert.equal(f.calls[0].body, 'SELECT TEXT, DOCNO, ITEM FROM ZTAB ORDER BY DOCNO, ITEM');
+    assert.equal(f.calls[0].url.searchParams.get('rowNumber'), '2');
+    const second = await reopened.queryTable({ ...input, cursor });
+    assert.deepEqual(second.rows, [{ TEXT: 'second' }]);
+    assert.equal(second.truncated, false);
+    assert.equal('next_cursor' in second && second.next_cursor, null);
+    assert.equal(f.calls[1].body,
+      "SELECT TEXT, DOCNO, ITEM FROM ZTAB WHERE DOCNO = 'A''1' AND ITEM > '0001' ORDER BY DOCNO, ITEM");
+    assert.equal(f.calls[2].body, "SELECT TEXT, DOCNO, ITEM FROM ZTAB WHERE DOCNO > 'A''1' ORDER BY DOCNO, ITEM");
+    assert.equal(f.calls[2].url.searchParams.get('rowNumber'), '1');
+    const invalid = { code: 'INVALID_QUERY_CURSOR' };
+    await assert.rejects(other.queryTable({ ...input, cursor }), invalid);
+    await assert.rejects(f.backend.queryTable({ ...input, cursor, fields: ['ITEM'] }), invalid);
+    await assert.rejects(f.backend.queryTable({ ...input, cursor, table_name: 'ZOTHER' }), invalid);
+    await assert.rejects(f.backend.queryTable({ ...input, cursor: (cursor[0] === 'A' ? 'B' : 'A') + cursor.slice(1) }), invalid);
+    assert.equal(f.calls.length, 3);
+  } finally {
+    await Promise.all([reopened.close(), other.close()]);
+    await f.close();
+    await rm(join(configDirectory, 'table-cursor.key'), { force: true });
+    await rmdir(configDirectory);
+  }
+});
+
+test('SQL pagination resumes an ordered join using projected keys and rejects unsafe or ambiguous continuation', async () => {
+  const configDirectory = await mkdtemp(join(tmpdir(), 'saplink-sql-page-test-'));
+  const result = (keys: string[], items: string[], type = 'N') => `<tableData>
+    <columns><metadata name="DOCNO" type="C"/><dataSet>${keys.map(key => `<data>${key}</data>`).join('')}</dataSet></columns>
+    <columns><metadata name="LINE" type="${type}"/><dataSet>${items.map(item => `<data>${item}</data>`).join('')}</dataSet></columns>
+    </tableData>`;
+  const f = await fixture(200, sql => {
+    if (sql.includes("B~ITEM < '0002'")) return result(['001'], ['0001']);
+    if (sql.includes("A~DOCNO > '001'")) return result(['002'], ['0004']);
+    if (sql.endsWith('ORDER BY a~docno')) return result(['001', '001'], ['0003', '0002']);
+    if (sql.includes("a~status = 'BINARY'")) return result(['001'], ['0002'], 'X');
+    return result(['001', '001', '001'], ['0003', '0002', '0001']);
+  }, 200, { configDirectory });
+  const reopened = new AdtBackend(f.connection, 'fake', { configDirectory });
+  const other = new AdtBackend({ ...f.connection, client: '002' }, 'fake', { configDirectory });
+  const sql = "SELECT a~docno, b~item AS line FROM zhead AS a INNER JOIN zline AS b ON a~docno = b~docno WHERE a~status = 'ORDER BY OR' ORDER BY a~docno, line DESCENDING";
+  try {
+    const first = await f.backend.querySql({ sql, pagination: true, limit: 2 });
+    assert.deepEqual(first.rows, [{ DOCNO: '001', LINE: '0003' }, { DOCNO: '001', LINE: '0002' }]);
+    assert.ok('next_cursor' in first && typeof first.next_cursor === 'string');
+    const cursor = first.next_cursor;
+    const second = await reopened.querySql({ sql, cursor, limit: 2 });
+    assert.deepEqual(second.rows, [{ DOCNO: '001', LINE: '0001' }, { DOCNO: '002', LINE: '0004' }]);
+    assert.equal(second.truncated, false);
+    assert.equal('next_cursor' in second && second.next_cursor, null);
+    assert.match(f.calls[1].body, /AND A~DOCNO = '001' AND B~ITEM < '0002' ORDER BY a~docno, line DESCENDING$/);
+    assert.match(f.calls[2].body, /AND A~DOCNO > '001' ORDER BY a~docno, line DESCENDING$/);
+    assert.deepEqual(f.calls.map(call => call.url.searchParams.get('rowNumber')), ['3', '3', '2']);
+    await assert.rejects(other.querySql({ sql, cursor }), { code: 'INVALID_QUERY_CURSOR' });
+    await assert.rejects(f.backend.querySql({ sql: sql.replace("'ORDER BY OR'", "'NEW'"), cursor }), { code: 'INVALID_QUERY_CURSOR' });
+    await assert.rejects(f.backend.querySql({ sql, cursor: (cursor[0] === 'A' ? 'B' : 'A') + cursor.slice(1) }),
+      { code: 'INVALID_QUERY_CURSOR' });
+    const unsupported = { code: 'QUERY_PAGINATION_UNSUPPORTED' };
+    for (const invalid of [sql.split(' ORDER BY a~docno')[0], sql + ' OFFSET 2',
+      sql.replace('INNER JOIN', 'LEFT OUTER JOIN'), sql.replace('line DESCENDING', 'b~not_projected'),
+      sql.replace("WHERE a~status = 'ORDER BY OR'", "WHERE a~status = 'A' OR a~status = 'B'")])
+      await assert.rejects(f.backend.querySql({ sql: invalid, pagination: true }), unsupported);
+    assert.equal(f.calls.length, 3);
+    await assert.rejects(f.backend.querySql({ sql: sql.replace(', line DESCENDING', ''), pagination: true, limit: 1 }), unsupported);
+    await assert.rejects(f.backend.querySql({ sql: sql.replace("'ORDER BY OR'", "'BINARY'"), pagination: true }), unsupported);
+    const literal = `'${"some  '' spaced ".repeat(10)}'`;
+    const longSql = sql.replace("'ORDER BY OR'", literal);
+    await f.backend.querySql({ sql: longSql, pagination: true, limit: 2 });
+    const formatted = f.calls.at(-1)!.body;
+    assert.ok(formatted.includes(literal));
+    assert.ok(formatted.includes('\n') && formatted.split('\n').every(line => Buffer.byteLength(line) <= 240));
+  } finally {
+    await Promise.all([reopened.close(), other.close()]);
+    await f.close();
+    await rm(join(configDirectory, 'table-cursor.key'), { force: true });
+    await rmdir(configDirectory);
+  }
+});
 
 test('DDIC and freestyle use independent stateless endpoints and preserve precision with bounded results', async () => {
   const f = await fixture();

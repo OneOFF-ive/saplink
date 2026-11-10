@@ -7,6 +7,16 @@ import { tableQuerySchema, sqlQuerySchema } from './data-query.js';
 import { functionModuleSyntaxHelp } from './function-help.js';
 import { requestTimeoutSchema } from './request-timeout.js';
 
+// Approval tickets belong to the built-in client, never to CLI/MCP contracts.
+export function externalToolSchema(name: ToolName) {
+  const schema = toolSchemas[name];
+  if (!('approval_id' in schema.shape)) return schema;
+  const { approval_id: _internal, ...shape } = schema.shape as Record<string, z.ZodType>;
+  // Preserve refinements (for example source XOR edits) without advertising the
+  // built-in client's authorization ticket in the public protocol.
+  return z.object(shape).strict().refine(input => schema.safeParse(input).success, 'Invalid SAP operation arguments');
+}
+
 const connectionIdSchema = z.string().uuid();
 
 const connection = { connection_id: connectionIdSchema.describe('Stable UUID returned by list_connections. Select the intended SAP system and Client; do not use the connection name here.'),
@@ -29,17 +39,19 @@ const transportTaskSchema = z.string().regex(/^[A-Za-z0-9]+$/).max(30).optional(
 const requestIdSchema = z.string().min(1).max(128).describe(("Unique ID for one intended write, scoped to this connection across all write tools. Identical ID and " +
   "arguments return a cached result only in this service process. Inspect SAP state before retrying " +
   "uncertain writes with a new ID."));
+const approvalIdSchema = z.uuid().optional().describe('Single-use local approval for this exact controlled operation.');
 
 export const toolSchemas = {
   get_atc_configuration: qualitySchemas.get_atc_configuration.extend(connection),
-  run_atc: qualitySchemas.run_atc.extend(connection),
+  run_atc: qualitySchemas.run_atc.extend({ ...connection, approval_id: approvalIdSchema }),
   get_atc_results: qualitySchemas.get_atc_results.extend(connection),
-  run_unit_tests: qualitySchemas.run_unit_tests.extend(connection),
+  run_unit_tests: qualitySchemas.run_unit_tests.extend({ ...connection, approval_id: approvalIdSchema }),
   list_source_versions: qualitySchemas.list_source_versions.extend(connection),
   compare_source_versions: qualitySchemas.compare_source_versions.extend(connection),
   get_ddic_definition: repositorySchemas.get_ddic_definition.extend(connection),
   get_data_element: repositorySchemas.get_data_element.extend(connection),
   get_domain_values: repositorySchemas.get_domain_values.extend(connection),
+  get_odata_service_binding: repositorySchemas.get_odata_service_binding.extend(connection),
   find_references: repositorySchemas.find_references.safeExtend(connection),
   find_definition: repositorySchemas.find_definition.safeExtend(connection),
   get_class_structure: repositorySchemas.get_class_structure.extend(connection),
@@ -79,7 +91,19 @@ export const toolSchemas = {
     description: z.string().min(1).max(60),
     package_name: packageNameSchema,
     transport_task: transportTaskSchema,
-    request_id: requestIdSchema
+    request_id: requestIdSchema,
+    approval_id: approvalIdSchema
+  }).strict(),
+  create_ddic_object: z.object({
+    ...connection,
+    ddic_kind: z.enum(['structure','table']),
+    name: z.string().regex(/^[ZY][A-Z0-9_]{0,29}$/).describe('Z/Y name. At most 30 characters for a structure or 16 for a database table.'),
+    description: z.string().trim().min(1).max(60),
+    package_name: packageNameSchema,
+    source: z.string().trim().min(1).max(128*1024).describe('Complete SAP Dictionary DDL for this exact object: DEFINE STRUCTURE or DEFINE TABLE.'),
+    transport_task: transportTaskSchema,
+    request_id: requestIdSchema,
+    approval_id: approvalIdSchema
   }).strict(),
   create_function_group: z.object({
     ...connection,
@@ -87,7 +111,8 @@ export const toolSchemas = {
     description: z.string().min(1).max(60),
     package_name: packageNameSchema,
     transport_task: transportTaskSchema,
-    request_id: requestIdSchema
+    request_id: requestIdSchema,
+    approval_id: approvalIdSchema
   }).strict(),
   create_function_module: z.object({
     ...connection,
@@ -95,7 +120,8 @@ export const toolSchemas = {
     description: z.string().min(1).max(60),
     function_group_uri: adtUriSchema,
     transport_task: transportTaskSchema,
-    request_id: requestIdSchema
+    request_id: requestIdSchema,
+    approval_id: approvalIdSchema
   }).strict(),
   list_function_group_members: z.object({
     ...connection,
@@ -115,7 +141,8 @@ export const toolSchemas = {
     expected_revision: z.string().regex(/^[a-f0-9]{64}$/).describe(("Exact revision from read_source for this source and connection. On conflict reread and merge; do not " +
       "substitute a new revision without reviewing the source.")),
     transport_task: transportTaskSchema,
-    request_id: requestIdSchema
+    request_id: requestIdSchema,
+    approval_id: z.uuid().optional().describe('Single-use local approval for this exact controlled source update.')
   }).strict()
     .refine(p => Boolean(p.object_uri || p.source_uri), { message: 'Provide object_uri or source_uri' })
     .refine(p => (p.source === undefined) !== (p.edits === undefined), { message: 'Provide exactly one of source or edits' }),
@@ -130,7 +157,8 @@ export const toolSchemas = {
       object_uri: adtUriSchema,
       expected_revision: z.string().regex(/^[a-f0-9]{64}$/)
     }).strict()).min(1).max(20),
-    request_id: requestIdSchema
+    request_id: requestIdSchema,
+    approval_id: approvalIdSchema
   }).strict(),
   list_transport_requests: z.object({ ...connection,
     transport_number: z.string().regex(/^[A-Z0-9]{3}K[0-9]{6}$/).optional()
@@ -141,14 +169,15 @@ export const toolSchemas = {
     object_uri: adtUriSchema.describe('Existing or intended Program, Include, function group or function module object URI, not source/main.'),
     package_name: packageNameSchema,
     description: z.string().trim().min(1).max(60),
-    request_id: requestIdSchema
+    request_id: requestIdSchema,
+    approval_id: approvalIdSchema
   }).strict()
 };
 
 const toolDescriptions: Record<ToolName, string> = {
   ...repositoryDescriptions,
   ...qualityDescriptions,
-  list_connections: ("List configured SAP connections with Client, language, username, backend URL and write policy. Confirm " +
+  list_connections: ("List configured SAP connections with Client, language, username, backend URL, write and table-data policies. Confirm " +
     "the intended system and Client before writing."),
   get_capabilities: 'Probe ADT discovery. A capability does not imply write authorization.',
   search_enhancements: ("Read-only repository name search across customer exits (SMOD), projects (CMOD), classic BAdIs " +
@@ -163,13 +192,15 @@ const toolDescriptions: Record<ToolName, string> = {
     "AND-combined filters (eq/ne/gt/ge/lt/le/like). Values are strings; LIKE uses SQL % and _ wildcards. " +
     "Default limit 100, maximum 500. Returns column metadata and raw string rows, preserving leading zeros and " +
     "decimal precision. SAP controls entity support and permissions. Uses configured Client; no cross-client " +
-    "override. No stable ordering or pagination is promised. Basic queries use an empty preview body for older " +
-    "systems; projection/filter support depends on SAP. Does not require write_enabled."),
+    "override. Set pagination=true to page a DDIC table by primary key using SAP freestyle preview. Pass next_cursor as cursor with the same connection, table, fields and filters to fetch the next page. Stop when next_cursor is null. Basic queries use an empty preview body for older " +
+    "systems; projection/filter support depends on SAP. Requires connection allow_table_data; does not require write_enabled."),
   query_sql: ("Run one read-only ABAP SQL SELECT through SAP freestyle Data Preview, subject to backend version and " +
     "permissions. Supports joins, aggregations and subqueries as accepted by SAP. No comments, statement " +
     "terminators, INTO, writes, client overrides or privileged access. Default limit 100, maximum 500; returns " +
     "raw string values and column metadata. Limit bounds returned rows, not backend scan cost. Uses configured " +
-    "Client. No pagination. Does not require write_enabled. Query get_capabilities for discovery " +
+    "Client. For pagination set pagination=true and end the SELECT or inner join with ORDER BY on projected character or NUMC columns that uniquely identify each row. " +
+    "No grouping, outer joins, explicit row limits or top-level OR filters in pagination mode. Pass next_cursor as cursor with identical SQL and connection. " +
+    "Requires connection allow_table_data; does not require write_enabled. Query get_capabilities for discovery " +
     "advertisement; unadvertised is not proof of unavailability."),
   search_objects: 'Search SAP repository objects and return relative ADT object URIs.',
   list_package_objects: 'List package contents with a limit. Pagination is not supported in this release.',
@@ -178,6 +209,7 @@ const toolDescriptions: Record<ToolName, string> = {
     "subroutine_pool. Subject to SAP support and permissions. Does not activate. Follow returned next_action " +
     "to read the source URI and revision discovered by SAP; do not construct source paths. Do not blindly " +
     "retry unknown results."),
+  create_ddic_object: 'Create a customer DDIC structure or transparent database table and verify its complete Dictionary DDL in the inactive version. Use an ADT backend that supports source-based DDIC creation. Save does not activate the object or configure separate technical table settings. Activate separately using the returned inactive revision. If creation was dispatched but not fully verified, inspect SAP before retrying.',
   create_function_group: ("Create a function group (FUGR/F) shell in a package. Does not activate. Follow next_action to obtain its " +
     "snapshot; groups have no main source."),
   create_function_module: ("Create an empty function module (FUGR/FF) in an existing function group, under its group lock. Interface " +
@@ -186,7 +218,7 @@ const toolDescriptions: Record<ToolName, string> = {
   list_function_group_members: 'List function modules and Includes of a function group, excluding category nodes.',
   get_function_group: ("Snapshot function group members and source revisions for group activation. Pass the returned revision to " +
     "activate_objects for the group. Rejects groups exceeding 500 members."),
-  update_source: ("Save Program, Include, function module or group Include main source with expected revision. For small changes prefer edits:[{old_text,new_text}] over resending the full source. Each original fragment must match once; all edits target the original, non-overlapping source. Provide source OR edits. Include version from read_source to avoid unnecessary active reads. Edits return compact metadata by default; include_source:true requests full saved source. Full-source calls preserve their existing response by default. Does not " +
+  update_source: ("Save Program, Include, function module, group Include or Z/Y Dictionary structure or transparent table source with the expected revision. A Dictionary edit must preserve the name and kind. For small changes prefer edits:[{old_text,new_text}] over resending the full source. Each original fragment must match once; all edits target the original, non-overlapping source. Provide source OR edits. Include version from read_source to avoid unnecessary active reads. Edits return compact metadata by default; include_source:true requests full saved source. Full-source calls preserve their existing response by default. Does not " +
     "activate. Inspect source_save even on errors: saved=true means SAP accepted the save, not that content " +
     "verification passed; unknown requires reading backend state. Read inactive before retrying VERIFY_FAILED, " +
     "and do not use its revision to blindly overwrite. Function modules use their own lock and ADT " +
@@ -195,7 +227,7 @@ const toolDescriptions: Record<ToolName, string> = {
     "CALL FUNCTION syntax). End the definition with a period. Definition comments may be lost; implementation " +
     "comments must not start with reserved prefixes *\" or *\"---. SAP may normalize the definition."),
   syntax_check: 'Check the requested version and return backend diagnostics.',
-  activate_objects: ("Jointly activate a reviewed set of up to 20 source objects/function groups. Save ALL dependent changes first, then supply each inactive revision " +
+  activate_objects: ("Jointly activate a reviewed set of up to 20 source objects, Z/Y Dictionary objects with a verified inactive version, or function groups. Save ALL dependent changes first, then supply each inactive revision " +
     "or the group revision from get_function_group. All targets are version-checked before any activation is sent. Groups expand to their inactive members and container in the same request. " +
     "Do not list both a group and its members. No automatic dependency discovery, scope expansion, sequential fallback or rollback. " +
     "If SAP requests a preaudit confirmation, at most one second phase is sent after validating its scope. " +
@@ -231,7 +263,7 @@ export function toolDescription(name: ToolName): string {
     description += (" If inactive returns VERSION_UNAVAILABLE, follow error.details.next_action to explicitly read active and " +
       "obtain its revision. This is not proof of activation; no silent version fallback occurs.");
   }
-  if (['create_program', 'create_function_group', 'create_function_module', 'update_source'].includes(name)) {
+  if (['create_program', 'create_ddic_object', 'create_function_group', 'create_function_module', 'update_source'].includes(name)) {
     description += (" transport_task is required on each call when SAP requires change recording, including update_source of " +
       "existing objects. A task supplied earlier is NOT remembered or inherited. If omitted outside $TMP, the " +
       "service performs a read-only SAP CTS check before locking or writing: required returns " +

@@ -5,7 +5,7 @@ import type { ConfigStore } from './config.js';
 import { Operations, type Input } from './operations.js';
 import { safeError } from './errors.js';
 import { clientInstructions } from './client-guidance.js';
-import { toolSchemas, toolDescription, type ToolName } from './tool-definitions.js';
+import { toolSchemas, externalToolSchema, toolDescription, type ToolName } from './tool-definitions.js';
 import { writeTools } from './tool-policy.js';
 import { appVersion } from './version.js';
 import { notifyMcpStarted } from './updates.js';
@@ -22,7 +22,7 @@ export function makeMcp(operations: Operations) {
     const write = writeTools.has(name);
     server.registerTool(name, {
       description: toolDescription(name),
-      inputSchema: toolSchemas[name],
+      inputSchema: externalToolSchema(name),
       annotations: {
         readOnlyHint: !write,
         destructiveHint: write,
