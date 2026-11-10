@@ -1,7 +1,7 @@
 import { unzipSync,zipSync } from 'fflate';
 import { z } from 'zod';
 import { AppError } from '../errors.js';
-import type { ModelTool } from './model.js';
+import type { ModelTool } from './model/model.js';
 
 const maxBytes = 8 * 1024 * 1024;
 const maxFiles = 128;

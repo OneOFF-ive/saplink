@@ -1,8 +1,8 @@
 import { z } from 'zod';
-import { AppError } from '../errors.js';
-import type { ArtifactStore } from './artifacts.js';
+import { AppError } from '../../errors.js';
+import type { ArtifactStore } from '../artifacts.js';
 import { extractDocument,imageType } from './attachment-reader.js';
-import { maxInlineImageBytes } from './output-limits.js';
+import { maxInlineImageBytes } from '../output-limits.js';
 
 export const maxUploadFiles = 10;
 const maxDocumentBytes = 10 * 1024 * 1024;

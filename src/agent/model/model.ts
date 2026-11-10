@@ -1,5 +1,5 @@
-import { AppError } from '../errors.js';
-import { maxOutputTokens, modelContextTokens, maxOutputCharacters, maxToolArgumentCharacters, maxModelStreamBytes, modelIdleTimeoutMs } from './output-limits.js';
+import { AppError } from '../../errors.js';
+import { maxOutputTokens, modelContextTokens, maxOutputCharacters, maxToolArgumentCharacters, maxModelStreamBytes, modelIdleTimeoutMs } from '../output-limits.js';
 import { estimateTokens } from './token-estimate.js';
 
 export type ToolCall = { id: string; type: 'function'; function: { name: string; arguments: string } };

@@ -2,8 +2,8 @@ import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { z } from 'zod';
-import { AppError } from '../errors.js';
-import type { Credentials } from '../config.js';
+import { AppError } from '../../errors.js';
+import type { Credentials } from '../../config.js';
 
 const defaultContextTokens = 512000;
 const defaultReasoningEffort = 'high';

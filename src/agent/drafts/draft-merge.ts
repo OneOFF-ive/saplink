@@ -1,7 +1,7 @@
-import { sourceResult } from '../adt.js';
-import { sourceDiff } from '../source-diff.js';
-import { AppError } from '../errors.js';
-import type { AgentTask, TaskStore } from './task-store.js';
+import { sourceResult } from '../../adt.js';
+import { sourceDiff } from '../../source-diff.js';
+import { AppError } from '../../errors.js';
+import type { AgentTask, TaskStore } from '../task-store.js';
 
 export type DraftBaseline = {
   object_uri: string;

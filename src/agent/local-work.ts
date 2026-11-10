@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { Document,HeadingLevel,Packer,Paragraph,TextRun } from 'docx';
 import { z } from 'zod';
 import { AppError } from '../errors.js';
-import type { ModelTool } from './model.js';
+import type { ModelTool } from './model/model.js';
 
 const fileName = z.string().trim().min(1).max(120)
   .regex(/^[\p{L}\p{N}_-][\p{L}\p{N} ._-]*\.[a-z0-9]{1,12}$/iu)

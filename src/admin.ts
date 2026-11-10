@@ -18,8 +18,8 @@ import { readSapLogon } from './sap-logon.js';
 import { checkRfcEnvironment, discoverRfcEnvironment, saveRfcEnvironment } from './rfc-environment.js';
 import { AgentRuntime, type AgentDependencies } from './agent/runtime.js';
 import { registerAgentApi } from './agent/api.js';
-import { ModelSettings } from './agent/model-settings.js';
-import { maxUploadRequestBytes } from './agent/uploads.js';
+import { ModelSettings } from './agent/model/model-settings.js';
+import { maxUploadRequestBytes } from './agent/attachments/uploads.js';
 import { skillPackageRequestLimit } from './agent/skill-packages.js';
 
 const draft = connectionSchema.omit({ connection_id: true, agent_allow_table_data: true, write_objects: true, write_governance: true }).extend({

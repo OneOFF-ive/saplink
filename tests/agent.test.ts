@@ -10,13 +10,13 @@ import { TaskStore, taskEvent } from '../src/agent/task-store.js';
 import { ArtifactStore, artifactTool } from '../src/agent/artifacts.js';
 import { createReportTool, updateReportTool } from '../src/agent/report.js';
 import { askUserTool } from '../src/agent/questions.js';
-import { changePreviewTool, createChangePreview, readChangePreview } from '../src/agent/change-preview.js';
-import { operationProposalTool } from '../src/agent/operation-proposal.js';
-import { workflowProposalTool } from '../src/agent/workflow-proposal.js';
+import { changePreviewTool, createChangePreview, readChangePreview } from '../src/agent/drafts/change-preview.js';
+import { operationProposalTool } from '../src/agent/drafts/operation-proposal.js';
+import { workflowProposalTool } from '../src/agent/drafts/workflow-proposal.js';
 import { sourceResult } from '../src/adt.js';
-import { compactContext, estimateTokens, workingMessages } from '../src/agent/context.js';
+import { compactContext, estimateTokens, workingMessages } from '../src/agent/model/context.js';
 import { agentModelTools, agentReadTools, agentTableTools, validateAgentTool, cliExecutor, projectAgentResult, projectAgentReadFailure } from '../src/agent/cli-executor.js';
-import { deepSeekModel, ModelLengthError, readModelStream, type Message, type Model } from '../src/agent/model.js';
+import { deepSeekModel, ModelLengthError, readModelStream, type Message, type Model } from '../src/agent/model/model.js';
 import { deepSeekSearch,webSearchTool } from '../src/agent/web-search.js';
 import { memoryTool } from '../src/agent/long-term-memory.js';
 import { localWorkTools } from '../src/agent/local-work.js';
@@ -92,6 +92,96 @@ test('long-term memory extracts supported entries and recalls them only in the s
     assert.deepEqual(recalled?.map(entry=>entry.note).sort(),[preference,lesson].sort());
     const isolated = await f.runtime.create('分析 ZMMP026',other.connection_id,'chat');
     assert.deepEqual((await terminal(f.runtime,isolated.id)).recalled_memories,[]);
+  } finally { await f.cleanup(); }
+});
+
+test('long-term memory shares only explicitly configured preferences across connections', async () => {
+  const requests: Message[][] = [];
+  const f = await fixture(async messages => {
+    requests.push(structuredClone(messages));
+    const prompt = messages[1].content!;
+    if (prompt.startsWith('记住全局偏好') && !messages.some(message => message.role === 'tool')) {
+      return call('remember_for_future', { entries: [
+        { kind: 'preference', topic: '报告格式', note: '模型擅自改写', evidence: prompt },
+      ] });
+    }
+    return answer('完成');
+  });
+  try {
+    const other = { ...connection, connection_id: randomUUID(), client: '200' };
+    const config = await f.store.load();
+    config.connections.push(other);
+    await f.store.save(config);
+
+    for (const prompt of [
+      '记住全局偏好：报告格式 = 先给结论再列证据',
+      '记住全局偏好：密钥说明 = 不应保存的测试值',
+    ]) {
+      const task = await f.runtime.create(prompt, connection.connection_id, 'chat');
+      assert.equal((await terminal(f.runtime, task.id)).status, 'completed');
+    }
+    const lookup = await f.runtime.create('分析程序并生成报告', other.connection_id, 'chat');
+    const recalled = (await terminal(f.runtime, lookup.id)).recalled_memories;
+    assert.deepEqual(recalled?.map(entry => [entry.scope, entry.note]), [['profile', '先给结论再列证据']]);
+    const context = JSON.stringify(requests.at(-1));
+    assert.match(context, /先给结论再列证据/);
+    assert.doesNotMatch(context, /不应保存的测试值|模型擅自改写|evidence_artifact/);
+    const localLookup = await f.runtime.create('分析程序并生成报告', connection.connection_id, 'chat');
+    const localRecalled = (await terminal(f.runtime, localLookup.id)).recalled_memories;
+    assert.deepEqual(localRecalled?.map(entry => [entry.scope, entry.note]), [['profile', '先给结论再列证据']]);
+  } finally { await f.cleanup(); }
+});
+
+test('natural-language global preferences update the same topic and require direct cross-system evidence', async () => {
+  const initial = '以后不管用哪个 SAP 系统，报告都先给结论。';
+  const update = '把全局报告偏好改成先列证据，再给结论。';
+  const examples = [
+    { prompt: '这个格式怎么写，比如以后所有系统的报告都只给标题？', note: '只给标题' },
+    { prompt: '“以后所有系统的报告都只给标题。”', note: '只给标题' },
+    { prompt: '以后这个系统的报告都只给标题。', note: '只给标题' },
+    { prompt: '不要设为全局，以后这个系统的报告只给标题。', note: '只给标题' },
+    { prompt: '以后所有 SAP 系统的报告都给摘要。', note: '只给标题' },
+  ];
+  const inputs = [...examples, { prompt: initial, note: '报告都先给结论' }, { prompt: update, note: '先列证据，再给结论' }];
+  const accepted = new Map<string, number>();
+  const called = new Set<string>();
+  const f = await fixture(async messages => {
+    const latest = messages.find(message => message.content?.startsWith('当前用户追问'))?.content;
+    const input = inputs.find(item => latest?.endsWith(item.prompt) || (!latest && messages[1].content === item.prompt));
+    if (!input) return answer('完成');
+    if (called.has(input.prompt)) {
+      const receipt = messages.filter(message => message.role === 'tool').at(-1)!;
+      accepted.set(input.prompt, JSON.parse(receipt.content!).data.accepted);
+      return answer('完成');
+    }
+    if (input.prompt === update) {
+      assert.ok(messages.some(message => message.content?.startsWith('以下是跨会话历史资料') &&
+        message.content.includes('"scope":"profile"') && message.content.includes('"topic":"报告格式"')));
+    }
+    called.add(input.prompt);
+    return call('remember_for_future', { entries: [
+      { kind: 'preference', scope: 'profile', topic: '报告格式', note: input.note, evidence: input.prompt },
+    ] });
+  });
+  try {
+    const other = { ...connection, connection_id: randomUUID(), client: '200' };
+    const config = await f.store.load();
+    config.connections.push(other);
+    await f.store.save(config);
+    const task = await f.runtime.create(initial, connection.connection_id, 'chat');
+    assert.equal((await terminal(f.runtime, task.id)).status, 'completed');
+    await f.runtime.followUp(task.id, update);
+    assert.equal((await terminal(f.runtime, task.id)).status, 'completed');
+    for (const { prompt } of examples) {
+      const example = await f.runtime.create(prompt, connection.connection_id, 'chat');
+      assert.equal((await terminal(f.runtime, example.id)).status, 'completed');
+      assert.equal(accepted.get(prompt), 0, prompt);
+    }
+    assert.equal(accepted.get(initial), 1);
+    assert.equal(accepted.get(update), 1);
+    const lookup = await f.runtime.create('生成报告', other.connection_id, 'chat');
+    assert.deepEqual((await terminal(f.runtime, lookup.id)).recalled_memories?.map(entry => [entry.scope, entry.topic, entry.note]),
+      [['profile', '报告格式', '先列证据，再给结论']]);
   } finally { await f.cleanup(); }
 });
 

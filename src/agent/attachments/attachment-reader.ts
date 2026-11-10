@@ -1,6 +1,6 @@
 import { Worker } from 'node:worker_threads';
-import { AppError } from '../errors.js';
-import { readModelStream } from './model.js';
+import { AppError } from '../../errors.js';
+import { readModelStream } from '../model/model.js';
 
 export function imageType(bytes:Buffer) {
   const header = bytes.subarray(0,12);

@@ -4,7 +4,7 @@ import { request as httpsRequest } from 'node:https';
 import { Parser } from 'htmlparser2';
 import ipaddr from 'ipaddr.js';
 import { z } from 'zod';
-import type { ModelTool } from './model.js';
+import type { ModelTool } from './model/model.js';
 
 export const webPageInput = z.object({url:z.string().trim().min(1).max(2048)}).strict();
 export const webPageTool:ModelTool = {type:'function',function:{

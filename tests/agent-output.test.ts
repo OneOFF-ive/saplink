@@ -7,8 +7,8 @@ import { randomUUID } from 'node:crypto';
 import { ConfigStore } from '../src/config.js';
 import { AgentRuntime } from '../src/agent/runtime.js';
 import { TaskStore } from '../src/agent/task-store.js';
-import { deepSeekModel, readModelStream } from '../src/agent/model.js';
-import { estimateTokens } from '../src/agent/token-estimate.js';
+import { deepSeekModel, readModelStream } from '../src/agent/model/model.js';
+import { estimateTokens } from '../src/agent/model/token-estimate.js';
 
 const frame = (delta: unknown, finish_reason: string | null = null) =>
   `data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason }] })}\n\n`;

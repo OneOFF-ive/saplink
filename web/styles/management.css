@@ -1,0 +1,102 @@
+/* Management pages share the workspace's quiet card hierarchy. */
+.management-page { max-width:1040px; margin:0 auto; }
+.management-title { justify-content:flex-start; gap:14px; margin-bottom:28px; }
+.management-title h1 { font-size:25px; letter-spacing:-.4px; }
+.management-icon { width:46px; height:46px; display:grid; place-items:center; background:var(--surface); border:1px solid var(--border); border-radius:13px; color:var(--accent); flex-shrink:0; }
+.management-icon svg { width:23px; height:23px; }
+.management-card { min-width:0; padding:24px; border:1px solid var(--border); border-radius:14px; background:var(--surface); margin-bottom:20px; }
+.management-card-heading { display:flex; align-items:center; justify-content:space-between; gap:20px; margin-bottom:24px; }
+.card-identity { display:flex; align-items:center; gap:12px; min-width:0; }
+.card-icon { display:grid; place-items:center; width:36px; height:36px; border-radius:10px; background:var(--subtle); color:var(--muted); flex-shrink:0; }
+.card-icon svg { width:18px; height:18px; }
+.management-card h2 { font-size:15px; margin:0; }
+.card-caption { display:block; font-size:11px; color:var(--muted); margin-top:5px; }
+.management-card button { min-height:34px; font-size:12px; border-radius:8px; padding:7px 12px; }
+.management-card button svg { width:15px; height:15px; }
+#connections-view { max-width:1200px; }
+#connections-view .management-title>button { margin-left:auto; min-height:36px; font-size:12px; padding:8px 14px; border-radius:8px; }
+.connections-card { padding:20px; }
+.connections-card .toolbar { margin-bottom:20px; }
+.connections-card .search { width:300px; background:var(--subtle); border-radius:8px; }
+.connections-card .search:focus-within { border-color:var(--focus); }
+.connections-card .search input { font-size:12px; }
+.connections-card .search svg { width:16px; height:16px; }
+#connections-view .table-wrap { border-radius:9px; margin:0; box-shadow:none; }
+#connections-view th { font-size:11px; padding:13px 14px; }
+#connections-view td { height:80px; padding:16px 14px; font-size:12px; }
+#connections-view td strong { font-size:13px; }
+#connections-view .connection-symbol { width:36px; height:36px; border-radius:10px; background:var(--subtle); color:var(--muted); border:0; }
+#connections-view .connection-identity strong { max-width:160px; }
+#connections-view .connection-identity small { font-size:10px; }
+#connections-view .address { max-width:230px; font-family:Consolas,monospace; font-size:11px; }
+#connections-view .row-actions button { width:30px; height:30px; min-height:30px; padding:6px; }
+#connections-view .empty { padding:46px 16px; border:1px dashed var(--border); border-radius:9px; background:var(--subtle); }
+.connection-empty-icon { display:grid; place-items:center; width:48px; height:48px; border:1px solid var(--border); border-radius:13px; color:var(--muted); margin:0 auto 16px; }
+#connections-view .empty h2 { margin:0 0 22px; font-size:15px; font-weight:500; color:var(--muted); }
+@media(max-width:800px) {
+  #connections-view .management-title { flex-wrap:wrap; gap:12px; }
+  #connections-view .management-title>button { padding:7px 10px; }
+  #connections-view .management-title>button svg { width:14px; height:14px; }
+  .connections-card { padding:16px; }
+  .connections-card .search { width:auto; min-width:0; flex:1; }
+  .connections-card .toolbar>.badge { flex-shrink:0; }
+  #connections-view table,#connections-view tbody { display:block; width:100%; white-space:normal; }
+  #connections-view thead { display:none; }
+  #connections-view tr { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; padding:18px 16px; border-bottom:1px solid var(--border); }
+  #connections-view tr:last-child { border-bottom:0; }
+  #connections-view td { display:block; padding:0; height:auto; max-width:none; min-width:0; border:0; }
+  #connections-view td:nth-child(1),#connections-view td:nth-child(2),#connections-view td:last-child { grid-column:1/-1; }
+  #connections-view td[data-label]::before { content:attr(data-label); display:block; color:var(--muted); font-size:10px; margin-bottom:7px; }
+  #connections-view td:last-child { padding-top:10px; border-top:1px solid var(--border); }
+  #connections-view .connection-symbol { display:grid; }
+  #connections-view .connection-identity strong { max-width:none; white-space:normal; overflow-wrap:anywhere; }
+  #connections-view .address { max-width:none; white-space:normal; overflow-wrap:anywhere; }
+  #connections-view .row-actions { gap:8px; }
+}
+.service-controls { display:flex; align-items:center; gap:16px; }
+.service-controls .service-actions { padding:0; }
+.service-details { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:20px; }
+.service-details>div { display:flex; align-items:flex-start; flex-direction:column; gap:10px; padding:0; border:0; min-width:0; }
+.service-details dt { font-size:11px; }
+.service-details dd { font-size:13px; min-height:34px; }
+.service-details #port { width:100px; height:34px; padding:6px 10px; background:var(--subtle); }
+.service-details .service-endpoint { grid-column:1/-1; flex-direction:row; align-items:center; justify-content:space-between; gap:16px; padding:12px 16px; border:1px solid var(--border); border-radius:9px; background:var(--subtle); }
+.service-endpoint dd { min-width:0; flex:1; justify-content:flex-end; }
+.service-endpoint code { overflow-wrap:anywhere; white-space:normal; }
+.service-endpoint .icon-button { flex-shrink:0; }
+#tokens-view .table-wrap { margin:0; border-radius:9px; box-shadow:none; }
+#tokens-view td { height:64px; padding:14px 16px; }
+#tokens-view td strong { font-size:13px; margin:0; }
+#tokens-view .empty { padding:34px 12px; background:var(--subtle); border:1px dashed var(--border); border-radius:9px; }
+#tokens-view .empty>svg { width:24px; height:24px; color:var(--muted); margin-bottom:12px; }
+#tokens-view .empty h2 { font-size:13px; color:var(--muted); font-weight:400; }
+#updates-view #update-panel { padding:24px; border-radius:14px; }
+#update-panel .management-card-heading { margin-bottom:0; }
+#update-panel #update-summary { font-size:12px; margin:5px 0 0; }
+.maintenance-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:20px; }
+.maintenance-grid .management-card { margin:0; }
+.maintenance-card { display:flex; flex-direction:column; }
+.maintenance-card>p,.log-card>div>p { line-height:1.8; margin:16px 0 22px; }
+.maintenance-actions { display:flex; margin-top:auto; padding-top:4px; }
+.log-card { grid-column:1/-1; flex-direction:row; align-items:center; justify-content:space-between; gap:24px; }
+.log-card>div>p { margin-bottom:0; }
+.log-controls { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.log-controls label { margin:0; color:var(--muted); font-size:12px; }
+.log-controls #log-days { width:80px; height:34px; padding:6px 10px; background:var(--subtle); }
+#release-details { border-top:1px solid var(--border); margin-top:20px; padding-top:20px; }
+@media(max-width:700px) {
+  .management-card,#updates-view #update-panel { padding:18px; }
+  .management-title h1 { font-size:23px; }
+  .management-card-heading { align-items:flex-start; gap:16px; }
+  .service-controls { flex-direction:column; align-items:flex-end; gap:8px; }
+  .service-details { gap:16px; }
+  .service-details .service-endpoint { flex-direction:column; align-items:flex-start; gap:4px; padding:12px; }
+  .service-endpoint dd { width:100%; justify-content:space-between; }
+  .maintenance-grid { grid-template-columns:minmax(0,1fr); gap:16px; }
+  .log-card { grid-column:1; flex-direction:column; align-items:flex-start; gap:20px; }
+  #update-panel .update-heading { flex-direction:column; }
+  #update-panel .update-buttons { padding-left:48px; }
+  #tokens-view td,#tokens-view th { padding:10px 8px; font-size:11px; }
+  #tokens-view td strong { font-size:12px; }
+  #tokens-view .row-actions button { width:28px; height:28px; min-height:28px; padding:5px; }
+}

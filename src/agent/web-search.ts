@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { ModelTool } from './model.js';
+import type { ModelTool } from './model/model.js';
 
 export const webSearchInput = z.object({
   query: z.string().trim().min(1).refine(query => [...query].length <= 128)

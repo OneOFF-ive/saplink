@@ -1,13 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { sourceResult } from '../adt.js';
-import { AppError } from '../errors.js';
-import { sourceDiff } from '../source-diff.js';
-import { applySourceEdits, sourceUpdateFields } from '../source-edit.js';
-import { ddicUriName } from '../adt-uri.js';
-import { verifyDdicUpdate } from '../ddic-definition.js';
-import type { ModelTool } from './model.js';
-import type { AgentTask, TaskStore } from './task-store.js';
+import { sourceResult } from '../../adt.js';
+import { AppError } from '../../errors.js';
+import { sourceDiff } from '../../source-diff.js';
+import { applySourceEdits, sourceUpdateFields } from '../../source-edit.js';
+import { ddicUriName } from '../../adt-uri.js';
+import { verifyDdicUpdate } from '../../ddic-definition.js';
+import type { ModelTool } from '../model/model.js';
+import type { AgentTask, TaskStore } from '../task-store.js';
 
 export const changePreviewInput = z.object({
   transport_task: z.string().regex(/^[A-Za-z0-9]{1,30}$/).optional(),

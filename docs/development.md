@@ -6,7 +6,7 @@ GitHub Release 附件要求、COS 同步 Action 的触发条件、secrets 和恢
 
 ## 从源码运行
 
-需要 Windows、Node.js 22+ 和 npm。在项目根目录的 PowerShell 执行：
+需要 Windows、Node.js 22.13 或更新的 LTS 版本和 npm。在项目根目录的 PowerShell 执行：
 
 ```powershell
 npm ci --ignore-scripts
@@ -53,6 +53,16 @@ npm test
 工具 schema 和描述位于 `src/tool-definitions.ts`，注册位于 `src/server.ts`，业务行为位于 `src/operations.ts`。写操作分类集中在 `src/tool-policy.ts`，MCP annotations 与业务层写保护共用该集合；初始化客户端指引位于 `src/client-guidance.ts`。修改接口时同步核对客户端手册示例。
 
 架构与模块职责见 [架构文档](architecture.md)，源码接口与实现细节见 [技术参考](technical-reference.md)。
+
+### SAP 助手源码导航
+
+| 目录或入口 | 职责 |
+| --- | --- |
+| `src/agent/api.ts`、`runtime.ts`、`task-store.ts` | HTTP 路由、会话执行与状态持久化 |
+| `src/agent/model/` | 模型调用、提示词、工具可见范围、上下文压缩和流式文本 |
+| `src/agent/drafts/` | SAP 修改草稿、差异合并、保存和激活流程 |
+| `src/agent/attachments/` | 上传校验、文档解析 Worker 和图片读取 |
+| `web/style.css`、`web/styles/` | 公共样式、工作区布局、管理页面及对话交互样式，加载顺序见 `web/index.html` |
 
 ## Windows 安装包构建与验证
 

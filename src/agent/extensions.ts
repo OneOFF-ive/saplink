@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { AppError } from '../errors.js';
 import { digest,type Credentials } from '../config.js';
 import { toolSchemas } from '../tool-definitions.js';
-import type { ModelTool } from './model.js';
+import type { ModelTool } from './model/model.js';
 import { maxSkillBody,skillText,type prepareSkillPackage } from './skill-packages.js';
 import { builtinSkillIds,builtinSkills } from './builtin-skills.js';
 

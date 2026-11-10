@@ -1,10 +1,11 @@
 import type { Express } from 'express';
 import { z } from 'zod';
-import { AgentRuntime, estimateTaskContext } from './runtime.js';
+import { AgentRuntime } from './runtime.js';
+import { estimateTaskContext } from './model/task-tools.js';
 import type { AgentTask } from './task-store.js';
 import { taskTitle } from './title.js';
-import { uploadsInput } from './uploads.js';
-import { draftKind } from './draft-state.js';
+import { uploadsInput } from './attachments/uploads.js';
+import { draftKind } from './drafts/draft-state.js';
 import { extensionRefsInput,skillInput,mcpInput } from './extensions.js';
 import { packageInput,prepareSkillPackage,prepareSkillDraft,skillChatInput,skillDraft,skillFileInput } from './skill-packages.js';
 import { questionReplyInput } from './questions.js';

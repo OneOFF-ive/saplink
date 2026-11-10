@@ -1,6 +1,6 @@
 {
   "name": "saplink",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "private": true,
   "type": "module",
   "description": "Local SAP CLI for AI clients with optional HTTP MCP access",
@@ -18,7 +18,7 @@
     "test": "node --import tsx --test tests/*.test.ts"
   },
   "engines": {
-    "node": ">=22"
+    "node": "^22.13.0 || >=23.5.0"
   },
   "overrides": {
     "abap-adt-api": {

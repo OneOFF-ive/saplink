@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { AppError } from '../errors.js';
 import { maxArtifactBytes,maxImageArtifactBytes } from './output-limits.js';
-import type { ModelTool } from './model.js';
+import type { ModelTool } from './model/model.js';
 
 export const artifactInput = z.object({ artifact_id: z.string().regex(/^[a-f0-9]{64}$/),
   offset: z.number().int().min(0).default(0), length: z.number().int().min(1).max(16000).default(8000),

@@ -15,6 +15,7 @@
 | 查询技能支持的全部公开 CLI 命令 | [技能命令目录](../skills/saplink-manager/references/commands.md) |
 | 理解模块、会话、锁和版本保护 | [架构文档](architecture.md) |
 | SAP 助手使用、运行时与任务接口 | [Agent Runtime](agent-runtime.md) |
+| 用自然语言设置和修改全局偏好 | [长期记忆](agent-runtime.md#长期记忆) |
 | 配置可选的 RFC/JCo 传输与验证范围 | [ADT over RFC](rfc-transport.md) |
 | 运行源码、测试与构建安装包 | [开发与构建指南](development.md) |
 | 本地发布、Actions 暂停/恢复及 COS 同步 | [发布与 GitHub Actions](releases-and-actions.md) |

@@ -15,3 +15,13 @@ export function streamTextFilter(secret: string) {
     return output;
   };
 }
+
+export function joinModelText(prefix: string, next: string) {
+  if (!prefix || !next) return prefix + next;
+  if (next.startsWith(prefix)) return next;
+  const tail = prefix.slice(-4096);
+  for (let length = Math.min(tail.length, next.length); length >= 12; length--) {
+    if (tail.endsWith(next.slice(0, length))) return prefix + next.slice(length);
+  }
+  return prefix + next;
+}

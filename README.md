@@ -27,7 +27,7 @@ SapLink 将 SAP 中的源码、开发对象和数据查询能力，默认通过 
 
 应用独立运行，不依赖 VS Code 或 SAP GUI。通过本地管理界面配置 SAP 连接后，AI 可执行 `saplink tools instructions --json` 和 `saplink sap list_connections --json` 开始使用 CLI，默认无需启动 MCP 或创建访问令牌。详见 [CLI 客户端指南](docs/cli-client-guide.md)。
 
-添加连接时可选择 HTTP/HTTPS 或 RFC/JCo。RFC 支持直连及不带路由密码的 SAProuter 路由，复用现有 ADT 工具与写入保护。内部完整安装包自带 Java 和 JCo，固定使用随包环境，无需用户安装或配置；Windows ARM64 包需要 Windows 11，通过独立 x64 Java/JCo 子进程运行 RFC。配置方法见 [ADT over RFC](docs/rfc-transport.md)。旧连接继续使用 HTTP/HTTPS。
+添加连接时可选择 HTTP/HTTPS 或 RFC/JCo。RFC 支持直连及不带路由密码的 SAProuter 路由，复用现有 ADT 工具与写入保护。内部完整安装包自带 Java 和 JCo，固定使用随包环境，无需用户安装或配置；Windows ARM64 包需要 Windows 11，通过独立 x64 Java/JCo 子进程运行 RFC。配置方法见 [ADT over RFC](docs/rfc-transport.md)。
 
 ## ♾️ 三环相连，无限可能
 
@@ -87,6 +87,7 @@ SapLink 是开发与查询工具，不是完整 IDE。目前不提供调试、�
 | 自行研究可选 MCP 接入与操作 | [MCP 客户端 SAP 操作手册](docs/mcp-client-guide.md) |
 | 让 AI 直接用 CLI 连接 SAP，无需配置 MCP | [CLI 客户端指南](docs/cli-client-guide.md) |
 | 让 AI 配置连接、管理宿主/MCP/令牌并使用 SAP | [AI 终端管理](docs/ai-management.md) |
+| 在内置 SAP 助手中用自然语言设置和修改长期偏好 | [长期记忆](docs/agent-runtime.md#长期记忆) |
 | 运行源码、测试与制作安装包 | [开发与构建指南](docs/development.md) |
 | 发布版本、配置 GitHub Actions 与下载同步 | [发布与 Actions 手册](docs/releases-and-actions.md) |
 | 理解架构与模块职责 | [架构文档](docs/architecture.md) |

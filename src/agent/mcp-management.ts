@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { mcpInput } from './extensions.js';
-import type { ModelTool } from './model.js';
+import type { ModelTool } from './model/model.js';
 
 const serverId = { server_id:z.uuid() };
 const port = z.number().int().min(1).max(65535);

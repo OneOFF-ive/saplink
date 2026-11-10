@@ -6,6 +6,7 @@
 | --- | --- |
 | 程序安装目录 | `%LOCALAPPDATA%\Programs\SapLink` |
 | 连接配置和令牌哈希 | `%APPDATA%\saplink\config.json` |
+| 助手长期记忆 | 配置目录中的 `agent/memory/library.sqlite`，保存全局偏好及按连接隔离的偏好和排查经验，属于持久数据。使用方式见[长期记忆](agent-runtime.md#长期记忆) |
 | 数据查询分页游标密钥 | 配置目录中的 `table-cursor.key`，首次使用分页时生成，由本机 CLI、助手和 MCP 共用 |
 | 持久写请求标记 | `%APPDATA%\saplink\cli-write-requests\`，CLI 和所有受控操作使用，随 `SAPLINK_CONFIG_DIR` 更改，不作为缓存清理 |
 | 受控审批和结果标记 | `%APPDATA%\saplink\write-approvals\`，含连接及请求指纹、审批终态和结果；操作结果可能含 SAP 元数据、检查结果和诊断，源码审批不保存完整源码；随 `SAPLINK_CONFIG_DIR` 更改，不作为缓存清理 |

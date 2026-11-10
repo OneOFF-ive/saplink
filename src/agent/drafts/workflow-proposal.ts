@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { AppError } from '../errors.js';
-import { workflowPlanSchema, workflowProposalSchema } from '../workflow-review.js';
-import type { ModelTool } from './model.js';
-import type { AgentTask, TaskStore } from './task-store.js';
+import { AppError } from '../../errors.js';
+import { workflowPlanSchema, workflowProposalSchema } from '../../workflow-review.js';
+import type { ModelTool } from '../model/model.js';
+import type { AgentTask, TaskStore } from '../task-store.js';
 
 export const workflowProposalTool: ModelTool = { type: 'function', function: {
   name: 'propose_program_workflow',

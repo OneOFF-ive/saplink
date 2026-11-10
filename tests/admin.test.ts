@@ -30,8 +30,21 @@ test('local web management protects APIs and manages connections, credentials, t
     return { status: response.status, body: await response.json() };
   };
   try {
-    const home = await fetch(origin); assert.equal(home.status, 200); assert.ok((await home.text()).includes('连接配置'));
+    const home = await fetch(origin);
+    assert.equal(home.status, 200);
+    const html = await home.text();
+    assert.ok(html.includes('连接配置'));
     assert.ok(home.headers.get('content-security-policy')?.includes("frame-ancestors 'none'"));
+    const stylesheets = Array.from(html.matchAll(/<link rel="stylesheet" href="([^"]+)">/g), match => match[1]);
+    assert.deepEqual(stylesheets, [
+      '/style.css', '/styles/workspace.css', '/styles/management.css', '/styles/conversation.css',
+    ]);
+    for (const path of stylesheets) {
+      const stylesheet = await fetch(origin + path);
+      assert.equal(stylesheet.status, 200, path);
+      assert.match(stylesheet.headers.get('content-type') ?? '', /^text\/css\b/, path);
+      await stylesheet.text();
+    }
     assert.equal((await fetch(`${origin}/icons.js`)).status, 200);
     assert.equal((await fetch(`${origin}/api/state`)).status, 401);
     assert.equal((await fetch(`${origin}/api/sap-logon/connections`)).status, 401);

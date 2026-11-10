@@ -1,4 +1,4 @@
-import type { AgentTask } from './task-store.js';
+import type { AgentTask } from '../task-store.js';
 import type { Completion } from './model.js';
 
 // Count only usage actually returned by the provider; failed/aborted calls may

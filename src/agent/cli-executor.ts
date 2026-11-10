@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { toolSchemas, toolDescription, type ToolName } from '../tool-definitions.js';
 import { tableDataToolNames, writeTools } from '../tool-policy.js';
 import { AppError } from '../errors.js';
-import type { ModelTool } from './model.js';
+import type { ModelTool } from './model/model.js';
 
 // Positive allowlist: a newly added tool is never implicitly available to the agent.
 export const agentReadTools = [

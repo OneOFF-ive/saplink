@@ -17,15 +17,15 @@ import { parseControlledOperation, WriteApprovalStore } from '../src/write-appro
 import { targetFingerprint } from '../src/connection-identity.js';
 import { reserveCliWrite, runSapOperation, validateSapInput } from '../src/sap-cli.js';
 import { startAdmin } from '../src/admin.js';
-import type { Message } from '../src/agent/model.js';
+import type { Message } from '../src/agent/model/model.js';
 import { ApprovalService } from '../src/approval-service.js';
 import { WorkflowReview } from '../src/workflow-review.js';
 import { WorkflowExecution } from '../src/workflow-execution.js';
 import { toolSchemas } from '../src/tool-definitions.js';
 import { AgentRuntime } from '../src/agent/runtime.js';
-import { ClientDrafts } from '../src/agent/client-drafts.js';
-import { createOperationProposal } from '../src/agent/operation-proposal.js';
-import { mergeDraftSources } from '../src/agent/draft-merge.js';
+import { ClientDrafts } from '../src/agent/drafts/client-drafts.js';
+import { createOperationProposal } from '../src/agent/drafts/operation-proposal.js';
+import { mergeDraftSources } from '../src/agent/drafts/draft-merge.js';
 
 const object = '/sap/bc/adt/programs/programs/ztest';
 const source = `${object}/source/main`;

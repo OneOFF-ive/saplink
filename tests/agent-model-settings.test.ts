@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { ConfigStore, type Credentials } from '../src/config.js';
-import { ModelSettings } from '../src/agent/model-settings.js';
+import { ModelSettings } from '../src/agent/model/model-settings.js';
 import { AgentRuntime } from '../src/agent/runtime.js';
 import { startAdmin } from '../src/admin.js';
 

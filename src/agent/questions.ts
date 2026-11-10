@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { ModelTool } from './model.js';
+import type { ModelTool } from './model/model.js';
 
 const question = z.object({
   prompt: z.string().trim().min(1).max(300),

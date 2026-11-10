@@ -2,7 +2,7 @@ import type { TaskEvent } from './task-store.js';
 import { marked } from 'marked';
 import { z } from 'zod';
 import { maxOutputCharacters } from './output-limits.js';
-import type { ModelTool } from './model.js';
+import type { ModelTool } from './model/model.js';
 
 export const createReportInput=z.object({title:z.string().trim().min(1).max(80),content:z.string().trim().min(1).max(maxOutputCharacters)}).strict();
 export const createReportTool:ModelTool={type:'function',function:{name:'create_report',description:'在当前会话中新建一份独立、完整的分析报告。仅保存本机报告，不操作 SAP；不会覆盖已有报告。',parameters:{type:'object',properties:{title:{type:'string',description:'简短报告标题'},content:{type:'string',description:'完整 Markdown 报告，使用规定的六类章节按需组织'}},required:['title','content'],additionalProperties:false}}};

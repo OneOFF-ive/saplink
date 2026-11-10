@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { AppError } from '../errors.js';
-import { toolSchemas } from '../tool-definitions.js';
-import { parseControlledOperation, type ControlledOperationIntent } from '../write-approval.js';
-import type { ModelTool } from './model.js';
-import type { AgentTask, TaskStore } from './task-store.js';
+import { AppError } from '../../errors.js';
+import { toolSchemas } from '../../tool-definitions.js';
+import { parseControlledOperation, type ControlledOperationIntent } from '../../write-approval.js';
+import type { ModelTool } from '../model/model.js';
+import type { AgentTask, TaskStore } from '../task-store.js';
 
 const common = { connection_id: true, request_id: true, approval_id: true, timeout_ms: true } as const;
 export const operationProposalInput = z.discriminatedUnion('tool', [

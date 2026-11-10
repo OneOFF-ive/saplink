@@ -6,8 +6,8 @@ import { randomUUID } from 'node:crypto';
 import { OfficeParser } from 'officeparser';
 import { strToU8,zipSync } from 'fflate';
 import { ArtifactStore } from '../src/agent/artifacts.js';
-import { prepareUploads } from '../src/agent/uploads.js';
-import { deepSeekImageReader } from '../src/agent/attachment-reader.js';
+import { prepareUploads } from '../src/agent/attachments/uploads.js';
+import { deepSeekImageReader } from '../src/agent/attachments/attachment-reader.js';
 import { maxInlineImageBytes } from '../src/agent/output-limits.js';
 
 function pdf() {
