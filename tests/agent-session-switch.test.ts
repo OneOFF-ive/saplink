@@ -76,6 +76,48 @@ test('failed loading stays on selected session and reports the error', async () 
   assert.match(f.errors.at(-1)!, /网络不可用/);
 });
 
+test('opening or returning to a conversation shows the latest messages, while refreshing preserves reading position', async () => {
+  const paginationStart = source.indexOf('  function loadEarlierAtTop() {');
+  const paginationEnd = source.indexOf('  async function pinTask(', paginationStart);
+  const scrollStart = source.indexOf('  function updateScrollBottom() {');
+  const scrollEnd = source.indexOf('  chatScroll.addEventListener', scrollStart);
+  const chatScroll = {
+    clientHeight: 200,
+    scrollHeight: 0,
+    position: 0,
+    get scrollTop() { return this.position; },
+    set scrollTop(value: number) { this.position = Math.min(value, Math.max(0, this.scrollHeight - this.clientHeight)); }
+  };
+  const scrollBottom = { hidden: true };
+  const requests: string[] = [];
+  const state = vm.createContext({
+    chatScroll, scrollBottom, selectedTask: { id: 'a' }, generation: 0,
+    chatTaskId: undefined, chatMessages: [], chatCursor: undefined, earlierRequest: undefined,
+    $: () => ({}),
+    renderChatHistory: () => { chatScroll.scrollHeight = 600; },
+    pollError: assert.fail,
+    api: async (path: string) => {
+      requests.push(path);
+      return { messages: [{ id: 'latest' }], next_cursor: 'older' };
+    }
+  });
+  vm.runInContext(source.slice(scrollStart, scrollEnd) + source.slice(paginationStart, paginationEnd), state);
+  const load = (options = '') => vm.runInContext(`loadConversation(${options})`, state) as Promise<void>;
+  await load();
+  assert.equal(chatScroll.scrollTop, 400);
+  assert.equal(scrollBottom.hidden, true);
+
+  chatScroll.scrollTop = 100;
+  await load();
+  assert.equal(chatScroll.scrollTop, 100);
+  assert.equal(scrollBottom.hidden, false);
+
+  await load('{ showLatest: true }');
+  assert.equal(chatScroll.scrollTop, 400);
+  assert.equal(scrollBottom.hidden, true);
+  assert.deepEqual(requests, Array(3).fill('agent/tasks/a/conversation'));
+});
+
 test('scrolling to the top fetches one older page and keeps the visible messages in place', async () => {
   const paginationStart = source.indexOf('  function loadEarlierAtTop() {');
   const paginationEnd = source.indexOf('  async function pinTask(', paginationStart);

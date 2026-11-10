@@ -5,6 +5,10 @@
   function updateScrollBottom() {
     scrollBottom.hidden = !chatScroll.clientHeight || chatScroll.scrollHeight-chatScroll.clientHeight-chatScroll.scrollTop<=40;
   }
+  function scrollToLatest() {
+    chatScroll.scrollTop = chatScroll.scrollHeight;
+    updateScrollBottom();
+  }
   chatScroll.addEventListener('scroll',()=>{
     updateScrollBottom();
     loadEarlierAtTop();
@@ -1332,9 +1336,9 @@
     }
   }
   function loadEarlierAtTop() {
-    if (chatScroll.clientHeight && chatScroll.scrollTop <= 32) void loadConversation(true);
+    if (chatScroll.clientHeight && chatScroll.scrollTop <= 32) void loadConversation({ older: true });
   }
-  async function loadConversation(older = false) {
+  async function loadConversation({ older = false, showLatest = false } = {}) {
     if (!selectedTask || older && (chatTaskId !== selectedTask.id || !chatCursor || earlierRequest === generation)) return;
     const id = selectedTask.id, revision = generation;
     const before = older ? chatCursor : undefined;
@@ -1352,8 +1356,12 @@
       const top = chatScroll.scrollTop, height = older ? history.offsetHeight : 0;
       chatTaskId = id; renderChatHistory();
       const added = older ? history.offsetHeight - height : 0;
-      if (older && added > 0) chatScroll.scrollTop = top + added;
-      updateScrollBottom();
+      if (!older && (!same || showLatest)) {
+        scrollToLatest();
+      } else {
+        if (older && added > 0) chatScroll.scrollTop = top + added;
+        updateScrollBottom();
+      }
       fillViewport = chatScroll.scrollHeight <= chatScroll.clientHeight || older && added === 0;
     } catch (error) { if (revision === generation) pollError('对话历史暂时无法加载。' + error.message); }
     finally { if (older && earlierRequest === revision) earlierRequest = undefined; }
@@ -1617,7 +1625,7 @@
       if (revision === generation) pollError('暂时无法刷新任务状态。' + error.message, true);
     } finally { pollRunning = false; schedule(); }
   }
-  async function load() {
+  async function load({ showLatest = false } = {}) {
     if (busy) return;
     sessionLoading=false;sessionDetailLoading=false;sessionLoadFailed=false;reportLoading=false;
     const revision = ++generation; busy = true; updateControls();
@@ -1633,11 +1641,11 @@
       if (connections.some(c => c.connection_id === current)) select.value = current;
       else if (connections.length) select.value = connections[0].connection_id;
       if (select.value) rememberConnection();
-      await loadSystemSessions(revision); pollError('');
+      await loadSystemSessions(revision, showLatest); pollError('');
     } catch (error) { if (revision === generation) pollError(error.message); }
     finally { busy = false; updateControls(); schedule(); }
   }
-  async function loadSystemSessions(revision) {
+  async function loadSystemSessions(revision, showLatest = false) {
     const connectionId = $('#agent-connection').value;
     const history = connectionId ? await api('agent/tasks?connection_id=' + encodeURIComponent(connectionId)) : {tasks:[]};
     if(revision !== generation || connectionId !== $('#agent-connection').value)return;
@@ -1650,12 +1658,17 @@
     selectedTask = task?.connection_id === connectionId ? task : undefined;
     if(selectedTask)rememberTask();
     renderTask(); renderHistory(); renderSetup();
-    await Promise.all([loadConversation(), loadReport()]);
+    await Promise.all([loadConversation({ showLatest }), loadReport()]);
   }
   const nav = element('button', undefined, 'nav'); nav.dataset.view = 'agent';
   nav.append(icon('sparkles'), document.createTextNode('工作空间'));
   $('.sidebar nav').prepend(nav);
-  nav.onclick = () => { showView('agent'); void load(); };
+  nav.onclick = () => {
+    const entering = view.hidden;
+    showView('agent');
+    if (entering) scrollToLatest();
+    void load({ showLatest: entering });
+  };
   $('#agent-connections').onclick = () => showView('connections');
   function positionComposerMenu(button, menu) {
     const rect=button.getBoundingClientRect(),writeMenu=menu.id==='agent-write-menu',connectionMenu=menu.id==='agent-connection-menu';
